@@ -1,0 +1,111 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index a62416c..1c09659 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -104,6 +104,7 @@ public:
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	bool          fScale;                   /* scale logical -> panel (default) */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -122,6 +123,7 @@ public:
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -176,6 +178,14 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	/* Default: scale the presented iPhone-sized surface down to the panel.
++	 * sweetfb_crop=1 keeps the old centered crop, sweetfb_native=1 no scaling. */
++	int crop = 0;
++	PE_parse_boot_argn("sweetfb_crop", &crop, sizeof(crop));
++	fScale = (!native && !crop && (fLogicalW != fWidth || fLogicalH != fHeight) && fWidth <= 2048);
++	if (fScale) {
++		fOffX = fOffY = 0;
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -308,6 +318,63 @@ AppleCLCD::swap(const uint8_t *rec)
+ 	}
+ }
+ 
++static uint32_t sweet_fb_xmap[2048];
++
++/* Nearest-neighbour blit of a logical-display rectangle onto the panel. */
++void
++AppleCLCD::scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe,
++    int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	int32_t LW = (int32_t)fLogicalW, LH = (int32_t)fLogicalH;
++	if (src == 0 || bpe != 4 || s->elementWidth != 1 || s->elementHeight != 1 || s->memory == NULL) {
++		return;
++	}
++	if (w > (int32_t)s->width - sx) {
++		w = (int32_t)s->width - sx;
++	}
++	if (h > (int32_t)s->height - sy) {
++		h = (int32_t)s->height - sy;
++	}
++	if (w > LW - dx) {
++		w = LW - dx;
++	}
++	if (h > LH - dy) {
++		h = LH - dy;
++	}
++	if (w <= 0 || h <= 0) {
++		return;
++	}
++	uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4;
++	if (last > s->memory->getLength()) {
++		return;
++	}
++	int64_t PW = fWidth, PH = fHeight;
++	int32_t X0 = (int32_t)((int64_t)dx * PW / LW);
++	int32_t X1 = (int32_t)(((int64_t)(dx + w) * PW + LW - 1) / LW);
++	int32_t Y0 = (int32_t)((int64_t)dy * PH / LH);
++	int32_t Y1 = (int32_t)(((int64_t)(dy + h) * PH + LH - 1) / LH);
++	if (X1 > (int32_t)fWidth) {
++		X1 = (int32_t)fWidth;
++	}
++	if (Y1 > (int32_t)fHeight) {
++		Y1 = (int32_t)fHeight;
++	}
++	for (int32_t X = X0; X < X1; X++) {
++		int32_t i = (int32_t)(((int64_t)(2 * X + 1) * LW) / (2 * PW)) - dx;
++		i = i < 0 ? 0 : (i > w - 1 ? w - 1 : i);
++		sweet_fb_xmap[X - X0] = (uint32_t)(sx + i);
++	}
++	for (int32_t Y = Y0; Y < Y1; Y++) {
++		int32_t j = (int32_t)(((int64_t)(2 * Y + 1) * LH) / (2 * PH)) - dy;
++		j = j < 0 ? 0 : (j > h - 1 ? h - 1 : j);
++		const uint32_t *srow = (const uint32_t *)(src + s->offset + (uint64_t)(sy + j) * s->bytesPerRow);
++		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)Y * fRowBytes);
++		for (int32_t X = X0; X < X1; X++) {
++			drow[X] = srow[sweet_fb_xmap[X - X0]];
++		}
++	}
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -359,6 +426,11 @@ AppleCLCD::present(const uint8_t *rec)
+ 		if (dx < 0 || dy < 0) {
+ 			dx = dy = 0;
+ 		}
++		if (fScale) {
++			scaled_blit(s, src, bpe, sx, sy, dx, dy, w, h);
++			s->release();
++			continue;
++		}
+ 		/* Logical (presented) display coordinates -> panel coordinates. */
+ 		dx -= fOffX;
+ 		dy -= fOffY;
