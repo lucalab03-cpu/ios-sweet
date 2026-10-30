@@ -1,0 +1,17 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -612,6 +612,14 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			/* No touch or power key yet to wake the panel again: keep showing the last
++			 * frame when iOS idles the display (sweetfb_keepon=0 restores the blanking). */
++			int keepon = 1;
++			PE_parse_boot_argn("sweetfb_keepon", &keepon, sizeof(keepon));
++			if (off && keepon) {
++				IOLog("SWEET FB: display off ignored (sweetfb_keepon)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
