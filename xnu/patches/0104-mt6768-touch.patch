@@ -29,7 +29,7 @@
   */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  #include <sys/param.h>
-@@ -13,87 +27,84 @@
+@@ -13,87 +27,90 @@
  #include <kern/thread.h>
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
@@ -133,9 +133,14 @@
 +#define PANEL_W         720
 +#define PANEL_H         1604
 +#define LOW_RANGE       2048
-+/* ILITEK high-resolution range: chipone,x-res/y-res in the DT (6 * 720 x 6 * 1600). */
-+#define HIGH_X          4320
-+#define HIGH_Y          9600
++/*
++ * ILITEK high-resolution range. Android reports 0..2879 x 0..6415 (4 * 720 x
++ * 4 * 1604); the raw range is assumed to be the same. Boot-args sweettouchhx /
++ * sweettouchhy / sweettouchlr override the ranges, sweettouchflip is a mask:
++ * 1 swap x/y, 2 invert x, 4 invert y.
++ */
++#define HIGH_X          2880
++#define HIGH_Y          6416
  
  static struct {
 -	vm_offset_t se, gcc, gpio;
@@ -148,6 +153,7 @@
 +	bool started;
 +	bool fingers[ILI_FINGERS];
 +	unsigned bad_ack, bad_sum, unk_pid, reads, touches;
++	int hx, hy, lr, flip;
  } st;
 +
 +static uint8_t touch_tx[128] __attribute__((aligned(128)));
@@ -176,106 +182,19 @@
  	__asm__ volatile("dsb osh" ::: "memory");
  }
  
-@@ -106,530 +117,200 @@
+@@ -106,530 +123,225 @@
  	thread_block(THREAD_CONTINUE_NULL);
  }
  
 -static bool
 -touch_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
--{
--	for (unsigned i = 0; i < 5000; ++i) {
--		if (!(touch_rd(base, off) & mask)) {
--			return true;
--		}
--		delay(1);
--	}
--	return false;
--}
--
--static void
--touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
--{
--	uint32_t off = TOUCH_GPIO_CFG(pin);
--	uint32_t cfg = touch_rd(st.gpio, off);
--	if (out) {
--		/* Set the desired latch before enabling output (reset is active low). */
--		touch_wr(st.gpio, TOUCH_GPIO_IO(pin),
--		    (touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
--	}
--	cfg &= ~0x3ffu;
--	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
--	touch_wr(st.gpio, off, cfg);
--}
--
--static bool
--touch_clocks(void)
--{
--	/* Vote on only wrapper1 and SE7, preserving other clock users. */
--	uint32_t mask = (0x0fu << 18) | (1u << 23);
--	touch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);
--	uint32_t dfs = touch_rd(st.gcc, TOUCH_RCG + 0x14u);
--	uint32_t cfg = touch_rd(st.gcc, TOUCH_RCG + 4u);
--	printf("SWEET TOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n",
--	    touch_rd(st.gcc, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG), cfg, dfs);
--	if (dfs & 1u) {
--		/* SE CLK_SEL=0 selects DFS performance level 0. Do not alter tables. */
--		cfg = touch_rd(st.gcc, TOUCH_RCG + 0x1cu);
--		if ((cfg & 0x371fu) != 1u) {
--			printf("SWEET TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
--			return false;
--		}
--	} else {
--		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
--		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
--		touch_wr(st.gcc, TOUCH_RCG + 4u, cfg);
--		touch_wr(st.gcc, TOUCH_RCG, touch_rd(st.gcc, TOUCH_RCG) | 1u);
--		if (!touch_wait_clear(st.gcc, TOUCH_RCG, 1u)) {
--			printf("SWEET TOUCH: RCG update timeout\n");
--			return false;
--		}
--	}
--	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
--	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
--		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
--			printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", branches[i],
--			    touch_rd(st.gcc, branches[i]));
--			return false;
--		}
--	}
--	return true;
--}
--
--/* Called only for a transfer started by this driver, including a stretched TX. */
--static void
--touch_abort(void)
 +/* One full-duplex DMA transfer of len bytes (touch_tx -> IC, IC -> touch_rx). */
 +static int
 +touch_xfer(unsigned len)
  {
--	touch_wr(st.se, SE_CTRL, 2); /* abort M command, release held bus */
--	bool done = false;
 -	for (unsigned i = 0; i < 5000; ++i) {
--		if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
--			done = true;
--			break;
--		}
--		delay(1);
--	}
--	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
--		st.dead = true;
--		printf("SWEET TOUCH: abort failed status=%#x irq=%#x; stopping\n",
--		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_IRQ));
--	}
--	/* Bound drain even if the hardware reports an impossible FIFO count. */
--	for (unsigned i = 0; i < 64 && (touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
--		(void)touch_rd(st.se, SE_RX);
--	}
--	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
--	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
--		st.dead = true;
--		printf("SWEET TOUCH: TX FIFO not empty after abort; stopping\n");
--	}
--}
+-		if (!(touch_rd(base, off) & mask)) {
+-			return true;
 +	uint64_t txpa = (uint64_t)ml_vtophys((vm_offset_t)touch_tx);
 +	uint64_t rxpa = (uint64_t)ml_vtophys((vm_offset_t)touch_rx);
 +	uint32_t cmd, cfg1;
@@ -299,6 +218,117 @@
 +	spi_wr(SPI_TX_SRC_64, (uint32_t)(txpa >> 32));
 +	spi_wr(SPI_RX_DST, (uint32_t)rxpa);
 +	spi_wr(SPI_RX_DST_64, (uint32_t)(rxpa >> 32));
++
++	(void)spi_rd(SPI_STATUS0);     /* clear a stale finish flag */
++	spi_wr(SPI_CMD, cmd | CMD_ACT);
++
++	int done = 0;
++	for (unsigned i = 0; i < 20000; ++i) {
++		if (spi_rd(SPI_STATUS0) & 1u) {
++			done = 1;
++			break;
+ 		}
+ 		delay(1);
+ 	}
+-	return false;
+-}
+-
+-static void
+-touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
+-{
+-	uint32_t off = TOUCH_GPIO_CFG(pin);
+-	uint32_t cfg = touch_rd(st.gpio, off);
+-	if (out) {
+-		/* Set the desired latch before enabling output (reset is active low). */
+-		touch_wr(st.gpio, TOUCH_GPIO_IO(pin),
+-		    (touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
+-	}
+-	cfg &= ~0x3ffu;
+-	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
+-	touch_wr(st.gpio, off, cfg);
++	cmd &= ~(CMD_TX_DMA | CMD_RX_DMA);
++	spi_wr(SPI_CMD, cmd);
++	flush_dcache64(rxpa, 128, 1);
++	return done ? 0 : ETIMEDOUT;
+ }
+ 
+-static bool
+-touch_clocks(void)
++static uint8_t
++touch_sum(const uint8_t *p, unsigned n)
+ {
+-	/* Vote on only wrapper1 and SE7, preserving other clock users. */
+-	uint32_t mask = (0x0fu << 18) | (1u << 23);
+-	touch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);
+-	uint32_t dfs = touch_rd(st.gcc, TOUCH_RCG + 0x14u);
+-	uint32_t cfg = touch_rd(st.gcc, TOUCH_RCG + 4u);
+-	printf("SWEET TOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n",
+-	    touch_rd(st.gcc, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG), cfg, dfs);
+-	if (dfs & 1u) {
+-		/* SE CLK_SEL=0 selects DFS performance level 0. Do not alter tables. */
+-		cfg = touch_rd(st.gcc, TOUCH_RCG + 0x1cu);
+-		if ((cfg & 0x371fu) != 1u) {
+-			printf("SWEET TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
+-			return false;
+-		}
+-	} else {
+-		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
+-		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
+-		touch_wr(st.gcc, TOUCH_RCG + 4u, cfg);
+-		touch_wr(st.gcc, TOUCH_RCG, touch_rd(st.gcc, TOUCH_RCG) | 1u);
+-		if (!touch_wait_clear(st.gcc, TOUCH_RCG, 1u)) {
+-			printf("SWEET TOUCH: RCG update timeout\n");
+-			return false;
+-		}
++	int sum = 0;
++	for (unsigned i = 0; i < n; i++) {
++		sum += p[i];
+ 	}
+-	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
+-	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
+-		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
+-			printf("SWEET TOUCH: GCC branch %#x halted (%#x)\n", branches[i],
+-			    touch_rd(st.gcc, branches[i]));
+-			return false;
+-		}
+-	}
+-	return true;
++	return (uint8_t)((-sum) & 0xff);
+ }
+ 
+-/* Called only for a transfer started by this driver, including a stretched TX. */
+ static void
+-touch_abort(void)
++touch_dump(const char *why, const uint8_t *p, unsigned n)
+ {
+-	touch_wr(st.se, SE_CTRL, 2); /* abort M command, release held bus */
+-	bool done = false;
+-	for (unsigned i = 0; i < 5000; ++i) {
+-		if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
+-			done = true;
+-			break;
+-		}
+-		delay(1);
+-	}
+-	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
+-		st.dead = true;
+-		printf("SWEET TOUCH: abort failed status=%#x irq=%#x; stopping\n",
+-		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_IRQ));
+-	}
+-	/* Bound drain even if the hardware reports an impossible FIFO count. */
+-	for (unsigned i = 0; i < 64 && (touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
+-		(void)touch_rd(st.se, SE_RX);
+-	}
+-	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
+-	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
+-		st.dead = true;
+-		printf("SWEET TOUCH: TX FIFO not empty after abort; stopping\n");
++	printf("SWEET TOUCH: %s:", why);
++	for (unsigned i = 0; i < n; i++) {
++		printf(" %02x", p[i]);
+ 	}
++	printf("\n");
+ }
  
 -/* Keep all observed bits for diagnostics, even if a watermark was cleared. */
 -static uint32_t
@@ -308,14 +338,15 @@
 -	st.irq_status |= st.irq_last;
 -	return st.irq_last;
 -}
-+	(void)spi_rd(SPI_STATUS0);     /* clear a stale finish flag */
-+	spi_wr(SPI_CMD, cmd | CMD_ACT);
- 
+-
 -/* One Linux-style FIFO message. TX is at most 3 bytes; RX at most 90. */
 -static int
 -touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
 -    unsigned nr, bool stretch)
--{
++/* Decode one finger; returns false if the slot is empty. */
++static bool
++touch_finger(const uint8_t *pkt, unsigned id, bool high, int *x, int *y)
+ {
 -	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
 -		return EIO;
 -	}
@@ -329,8 +360,7 @@
 -	touch_wr(st.se, SE_CMD, ((nr ? 2u : 1u) << 27) |
 -	    ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
 -	int err = ETIMEDOUT;
-+	int done = 0;
- 	for (unsigned i = 0; i < 20000; ++i) {
+-	for (unsigned i = 0; i < 20000; ++i) {
 -		uint32_t irq = touch_irq();
 -		if (irq & SE_ERRORS) {
 -			err = (irq & SE_NACK) ? ENXIO : EIO;
@@ -347,10 +377,8 @@
 -				touch_wr(st.se, SE_IRQ_CLR, irq);
 -				return err;
 -			}
-+		if (spi_rd(SPI_STATUS0) & 1u) {
-+			done = 1;
- 			break;
- 		}
+-			break;
+-		}
 -		if (nt && !st.sent && (irq & SE_TX_WM_IRQ)) {
 -			uint32_t word = 0;
 -			for (unsigned j = 0; j < nt; ++j) {
@@ -370,7 +398,11 @@
 -			for (unsigned j = 0; j < 4 && st.got < nr; ++j) {
 -				rx[st.got++] = (uint8_t)(word >> (8u * j));
 -			}
--		}
++	if (!high) {
++		const uint8_t *f = pkt + 1 + 4 * id;
++		if (f[0] == 0xff && f[1] == 0xff && f[2] == 0xff) {
++			return false;
+ 		}
 -		/* DONE is checked after draining RX, so final short words aren't lost. */
 -		if (irq & SE_DONE) {
 -			/* Re-sample after the final drain; a late error must beat DONE. */
@@ -384,25 +416,31 @@
 -			}
 -			err = EIO;
 -			break;
--		}
++		int xop = ((f[0] & 0xf0) << 4) | f[1];
++		int yop = ((f[0] & 0x0f) << 8) | f[2];
++		*x = xop * PANEL_W / st.lr;
++		*y = yop * PANEL_H / st.lr;
++	} else {
++		const uint8_t *f = pkt + 1 + 5 * id;
++		if (f[0] == 0xff && f[1] == 0xff && f[2] == 0xff && f[3] == 0xff) {
++			return false;
+ 		}
 -		/* Preserve DONE/errors if they arrive during this iteration. */
 -		touch_wr(st.se, SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
- 		delay(1);
+-		delay(1);
++		int xop = (f[0] << 8) | f[1];
++		int yop = (f[2] << 8) | f[3];
++		*x = xop * PANEL_W / st.hx;
++		*y = yop * PANEL_H / st.hy;
  	}
 -	touch_abort();
 -	return err;
-+	cmd &= ~(CMD_TX_DMA | CMD_RX_DMA);
-+	spi_wr(SPI_CMD, cmd);
-+	flush_dcache64(rxpa, 128, 1);
-+	return done ? 0 : ETIMEDOUT;
- }
- 
+-}
+-
 -static int
 -touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
 -    unsigned nr, bool stretch)
-+static uint8_t
-+touch_sum(const uint8_t *p, unsigned n)
- {
+-{
 -	st.irq_status = st.irq_last = 0;
 -	st.sent = st.got = 0;
 -	int err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
@@ -411,27 +449,24 @@
 -		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
 -		    err, st.irq_last, st.irq_status, st.sent, st.got,
 -		    touch_rd(st.se, SE_STATUS));
-+	int sum = 0;
-+	for (unsigned i = 0; i < n; i++) {
-+		sum += p[i];
++	if (st.flip & 1) {
++		int t = *x * PANEL_H / PANEL_W;
++		*x = *y * PANEL_W / PANEL_H;
++		*y = t;
  	}
 -	return err;
-+	return (uint8_t)((-sum) & 0xff);
- }
- 
+-}
+-
 -static int
 -touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
-+static void
-+touch_dump(const char *why, const uint8_t *p, unsigned n)
- {
+-{
 -	uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
 -	int err = touch_msg(addr, wide ? ptr : ptr + 1, wide ? 2u : 1u,
 -	    NULL, 0, true);
 -	if (err) {
 -		return err;
-+	printf("SWEET TOUCH: %s:", why);
-+	for (unsigned i = 0; i < n; i++) {
-+		printf(" %02x", p[i]);
++	if (st.flip & 2) {
++		*x = PANEL_W - 1 - *x;
  	}
 -	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
 -	return touch_msg(addr, NULL, 0, buf, len, false);
@@ -442,18 +477,14 @@
 -{
 -	const uint8_t ack[3] = {GOODIX_EVENT_REG >> 8, GOODIX_EVENT_REG & 0xffu, 0};
 -	return touch_msg(0x5d, ack, sizeof(ack), NULL, 0, false);
-+	printf("\n");
- }
- 
+-}
+-
 -/* Raw read only: 0x8240 is the vendor's generic/older VERSION candidate,
 - * not a second accepted GT9896 identity. Never try a four-byte Berlin pointer:
 - * on this 16-bit IC the extra bytes would be register data writes. */
 -static int
 -touch_probe_info(uint16_t reg, uint8_t *buf)
-+/* Decode one finger; returns false if the slot is empty. */
-+static bool
-+touch_finger(const uint8_t *pkt, unsigned id, bool high, int *x, int *y)
- {
+-{
 -	memset(buf, 0xa5, 32);
 -	int err = touch_read(0x5d, reg, true, buf, 32);
 -	printf("SWEET TOUCH: probe info reg=%#x len=32 err=%d irq=%#x seen=%#x\n",
@@ -465,27 +496,9 @@
 -				(void)snprintf(line + j * 3u, 4, "%02x ", buf[off + j]);
 -			}
 -			printf("SWEET TOUCH: probe raw %#x: %s\n", reg + off, line);
-+	if (!high) {
-+		const uint8_t *f = pkt + 1 + 4 * id;
-+		if (f[0] == 0xff && f[1] == 0xff && f[2] == 0xff) {
-+			return false;
-+		}
-+		int xop = ((f[0] & 0xf0) << 4) | f[1];
-+		int yop = ((f[0] & 0x0f) << 8) | f[2];
-+		*x = xop * PANEL_W / LOW_RANGE;
-+		*y = yop * PANEL_H / LOW_RANGE;
-+	} else {
-+		const uint8_t *f = pkt + 1 + 5 * id;
-+		if (f[0] == 0xff && f[1] == 0xff && f[2] == 0xff && f[3] == 0xff) {
-+			return false;
- 		}
-+		int xop = (f[0] << 8) | f[1];
-+		int yop = (f[2] << 8) | f[3];
-+		*x = xop * PANEL_W / HIGH_X;
-+		*y = yop * PANEL_H / HIGH_Y;
-+	}
-+	if (*x < 0) {
-+		*x = 0;
+-		}
++	if (st.flip & 4) {
++		*y = PANEL_H - 1 - *y;
  	}
 -	return err;
 -}
@@ -501,14 +514,14 @@
 -{
 -	if (len < 2) {
 -		return false;
-+	if (*x > PANEL_W - 1) {
-+		*x = PANEL_W - 1;
++	if (*x < 0) {
++		*x = 0;
  	}
 -	unsigned sum = 0;
 -	for (unsigned i = 0; i + 2 < len; ++i) {
 -		sum += buf[i];
-+	if (*y < 0) {
-+		*y = 0;
++	if (*x > PANEL_W - 1) {
++		*x = PANEL_W - 1;
  	}
 -	return (sum & 0xffffu) == touch_be16(buf + len - 2);
 -}
@@ -527,6 +540,9 @@
 -		} else if (st.active & bit) {
 -			sweet_hid_touch((int)id, 0, st.x[id], st.y[id]);
 -		}
++	if (*y < 0) {
++		*y = 0;
++	}
 +	if (*y > PANEL_H - 1) {
 +		*y = PANEL_H - 1;
  	}
@@ -759,6 +775,20 @@
 -	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
 -	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
 -	if (!st.gcc || !st.gpio || !st.se) {
++	st.hx = HIGH_X;
++	st.hy = HIGH_Y;
++	st.lr = LOW_RANGE;
++	st.flip = 0;
++	(void)PE_parse_boot_argn("sweettouchhx", &st.hx, sizeof(st.hx));
++	(void)PE_parse_boot_argn("sweettouchhy", &st.hy, sizeof(st.hy));
++	(void)PE_parse_boot_argn("sweettouchlr", &st.lr, sizeof(st.lr));
++	(void)PE_parse_boot_argn("sweettouchflip", &st.flip, sizeof(st.flip));
++	if (st.hx <= 0 || st.hy <= 0 || st.lr <= 0) {
++		st.hx = HIGH_X;
++		st.hy = HIGH_Y;
++		st.lr = LOW_RANGE;
++	}
++	printf("SWEET TOUCH: ranges low %d high %dx%d flip %d\n", st.lr, st.hx, st.hy, st.flip);
 +	st.spi = ml_io_map(SPI_PA, 0x1000);
 +	if (!st.spi) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
@@ -844,7 +874,7 @@
  out:
  	(void)thread_terminate(current_thread());
  	thread_block(THREAD_CONTINUE_NULL);
-@@ -645,7 +326,6 @@
+@@ -645,7 +357,6 @@
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
