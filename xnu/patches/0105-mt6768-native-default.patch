@@ -1,0 +1,29 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -168,7 +168,12 @@
+ 		IOLog("SWEET FB: no boot framebuffer\n");
+ 		return false;
+ 	}
+-	int native = 0;
++	/* Native size is the default: reporting an iPhone-sized display makes backboardd
++	 * look for AppleM2ScalerCSCDriver (hardware scaler) forever. sweetfb_logical=1
++	 * brings the iPhone X presentation back; an explicit sweetfb_native=0 does too. */
++	int logical = 0;
++	PE_parse_boot_argn("sweetfb_logical", &logical, sizeof(logical));
++	int native = logical ? 0 : 1;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -434,7 +434,9 @@
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
+-	int native = 0;
++	int logical = 0;
++	PE_parse_boot_argn("sweetfb_logical", &logical, sizeof(logical));
++	int native = logical ? 0 : 1;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	/* MT6768: 720x1604 panel. Default (scaled) mode and native mode map the whole
+ 	 * panel onto the whole presented display; sweetfb_crop=1 centers the panel
