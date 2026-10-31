@@ -1,0 +1,162 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/sweet_conn.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_conn.c
+@@ -0,0 +1,127 @@
++/*
++ * Moto G05 (MT6768 "lamu") connectivity subsystem (CONNSYS, "consys") probe.
++ *
++ * Step 1 of Wi-Fi / Bluetooth: find out whether Linux left CONNSYS powered
++ * when it jumped to XNU, and read its identity registers (the same ones the
++ * MediaTek wmt driver polls in polling_consys_chipid()). Read-only.
++ *
++ * Boot-args: sweetconn=0 (default, off) | 1 (SPM power status only) |
++ *            2 (also read the CONNSYS identity registers; reading them while
++ *               CONNSYS is unpowered or unclocked can hang the bus, so the
++ *               SPM ack is checked first), sweetconndelay=<s>.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++void sweet_conn_init(void);
++
++#define SPM_PA            0x10006000u
++#define MCU_PA            0x18002000u  /* HW id +0, FW id +4 */
++#define MCU_TOP_MISC_PA   0x18007000u  /* IP version +0x10, configuration id +0x1c */
++
++#define SPM_PWRON_CONFG_EN   0x000u
++#define SPM_TOP1_PWR_CTRL    0x32cu
++#define SPM_PWR_CONN_ACK     0x180u
++#define SPM_PWR_ON_ACK_BIT   (1u << 1)
++
++#define CONN_IP_VER_OFF      0x10u
++#define CONN_CONF_ID_OFF     0x1cu
++#define CONN_HW_ID_OFF       0x00u
++#define CONN_FW_ID_OFF       0x04u
++#define CONN_IP_VER_ID       0x10020501u
++
++static int conn_sleep_chan;
++static bool conn_started;
++
++static inline uint32_t
++rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++conn_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&conn_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static void
++conn_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 30;
++	int mode = 0;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("sweetconn", &mode, sizeof(mode));
++	(void)PE_parse_boot_argn("sweetconndelay", &delay_s, sizeof(delay_s));
++	printf("SWEET CONN: probe mode %d, starting in %u s\n", mode, delay_s);
++	conn_wait(delay_s * 1000u);
++
++	vm_offset_t spm = ml_io_map(SPM_PA, 0x1000);
++	if (!spm) {
++		printf("SWEET CONN: SPM mapping failed\n");
++		goto out;
++	}
++	uint32_t ack = rd32(spm, SPM_PWR_CONN_ACK);
++	printf("SWEET CONN: SPM pwron_confg_en=%#x top1_pwr_ctrl=%#x pwr_conn_ack=%#x -> CONNSYS %s\n",
++	    rd32(spm, SPM_PWRON_CONFG_EN), rd32(spm, SPM_TOP1_PWR_CTRL), ack,
++	    (ack & SPM_PWR_ON_ACK_BIT) ? "powered" : "NOT powered");
++	if (mode < 2) {
++		goto out;
++	}
++	if (!(ack & SPM_PWR_ON_ACK_BIT)) {
++		printf("SWEET CONN: not reading identity registers while unpowered\n");
++		goto out;
++	}
++	vm_offset_t top = ml_io_map(MCU_TOP_MISC_PA, 0x1000);
++	vm_offset_t mcu = ml_io_map(MCU_PA, 0x1000);
++	if (!top || !mcu) {
++		printf("SWEET CONN: MMIO mapping failed\n");
++		goto out;
++	}
++	uint32_t ver = rd32(top, CONN_IP_VER_OFF);
++	printf("SWEET CONN: IP version %#010x (%s, expected %#010x)\n", ver,
++	    ver == CONN_IP_VER_ID ? "match" : "different", CONN_IP_VER_ID);
++	printf("SWEET CONN: conf id %#x, HW id %#x, FW id %#x\n",
++	    rd32(top, CONN_CONF_ID_OFF) & 0xfu,
++	    rd32(mcu, CONN_HW_ID_OFF) & 0xffffu, rd32(mcu, CONN_FW_ID_OFF) & 0xffffu);
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_conn_init(void)
++{
++	int mode = 0;
++	thread_t thread;
++	if (conn_started) {
++		return;
++	}
++	conn_started = true;
++	(void)PE_parse_boot_argn("sweetconn", &mode, sizeof(mode));
++	if (mode <= 0) {
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(conn_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET CONN: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -46,6 +46,7 @@
+ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
++extern void sweet_conn_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -731,6 +732,7 @@
+ 	/* Keys (bsd/dev/sweet_keys.c) and touch screen (ILITEK on SPI2, sweet_touch.c); USB not ported yet. */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
++	sweet_conn_init();
+ 	/* MT6768: the Qualcomm keys/touch/usb drivers would hit unmapped buses; not started. */
+ 	return 0;
+ }
