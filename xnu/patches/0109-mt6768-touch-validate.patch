@@ -1,0 +1,49 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -91,7 +91,7 @@
+ 	vm_offset_t spi;
+ 	bool started;
+ 	bool fingers[ILI_FINGERS];
+-	unsigned bad_ack, bad_sum, unk_pid, reads, touches;
++	unsigned bad_ack, bad_sum, unk_pid, reads, touches, dumped;
+ 	int hx, hy, lr, flip;
+ } st;
+ 
+@@ -200,6 +200,9 @@
+ 		}
+ 		int xop = ((f[0] & 0xf0) << 4) | f[1];
+ 		int yop = ((f[0] & 0x0f) << 8) | f[2];
++		if (xop >= st.lr || yop >= st.lr) {
++			return false; /* torn / noisy read: not a real finger */
++		}
+ 		*x = xop * PANEL_W / st.lr;
+ 		*y = yop * PANEL_H / st.lr;
+ 	} else {
+@@ -210,6 +213,9 @@
+ 		}
+ 		int xop = (f[0] << 8) | f[1];
+ 		int yop = (f[2] << 8) | f[3];
++		if (xop >= st.hx || yop >= st.hy) {
++			return false; /* out of range: noise on the bus, ignore */
++		}
+ 		*x = xop * PANEL_W / st.hx;
+ 		*y = yop * PANEL_H / st.hy;
+ 	}
+@@ -282,6 +288,17 @@
+ 		return EINVAL;
+ 	}
+ 
++	if (st.dumped < 12) {
++		bool any = false;
++		for (unsigned i = 0; i < ILI_FINGERS; i++) {
++			int tx = 0, ty = 0;
++			any = any || touch_finger(pkt, i, high, &tx, &ty);
++		}
++		if (any) {
++			st.dumped++;
++			touch_dump("touch packet", pkt, 32);
++		}
++	}
+ 	for (unsigned i = 0; i < ILI_FINGERS; i++) {
+ 		int x = 0, y = 0;
+ 		bool down = touch_finger(pkt, i, high, &x, &y);

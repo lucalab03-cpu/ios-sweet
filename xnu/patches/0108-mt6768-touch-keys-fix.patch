@@ -1,0 +1,85 @@
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+index dd4a4d9..38c7588 100644
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -12,7 +12,7 @@
+  * pmic-wrap driver does for a read. All raw values are logged when they
+  * change, so the first run on the phone shows which bit is which key.
+  * Boot-args: sweetkeys=0 (off), sweetkeydelay=<s>, sweetkeypwr=<bit>,
+- * sweetkeyup=<hw key>, sweetkeydn=<hw key>.
++ * sweetkeyup=<hw key>, sweetkeydn=<TOPSTATUS bit>.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -52,7 +52,7 @@ void sweet_keys_init(void);
+ static struct {
+ 	vm_offset_t pwrap, kpd;
+ 	bool started;
+-	int pwr_bit, up_key, dn_key;
++	int pwr_bit, dn_bit, up_key;
+ } ks;
+ static int keys_sleep_chan;
+ 
+@@ -140,14 +140,15 @@ keys_thread(void *arg, wait_result_t result)
+ 	(void)arg;
+ 	(void)result;
+ 	(void)PE_parse_boot_argn("sweetkeydelay", &delay_s, sizeof(delay_s));
+-	ks.pwr_bit = 0;
++	/* Measured: TOPSTATUS idles at 0xe; power pulls bit 1 low, the PMIC "home" key bit 3. */
++	ks.pwr_bit = 1;
++	ks.dn_bit = 3;
+ 	ks.up_key = 0;
+-	ks.dn_key = 17;
+ 	(void)PE_parse_boot_argn("sweetkeypwr", &ks.pwr_bit, sizeof(ks.pwr_bit));
+ 	(void)PE_parse_boot_argn("sweetkeyup", &ks.up_key, sizeof(ks.up_key));
+-	(void)PE_parse_boot_argn("sweetkeydn", &ks.dn_key, sizeof(ks.dn_key));
+-	printf("SWEET KEYS: MT6768 keys, starting in %u s (pwr bit %d, up key %d, down key %d)\n",
+-	    delay_s, ks.pwr_bit, ks.up_key, ks.dn_key);
++	(void)PE_parse_boot_argn("sweetkeydn", &ks.dn_bit, sizeof(ks.dn_bit));
++	printf("SWEET KEYS: MT6768 keys, starting in %u s (pwr bit %d, up key %d, down bit %d)\n",
++	    delay_s, ks.pwr_bit, ks.up_key, ks.dn_bit);
+ 	keys_wait(delay_s * 1000u);
+ 	ks.pwrap = ml_io_map(PWRAP_PA, 0x1000);
+ 	ks.kpd = ml_io_map(KPD_PA, 0x1000);
+@@ -200,17 +201,11 @@ keys_thread(void *arg, wait_result_t result)
+ 			}
+ 		}
+ 		int up = kpd_down(mem, ks.up_key);
+-		int dn = kpd_down(mem, ks.dn_key);
+ 		if (up != state[KEYS_VOLUP]) {
+ 			state[KEYS_VOLUP] = up;
+ 			printf("SWEET KEYS: volume up %s\n", up ? "down" : "up");
+ 			sweet_hid_key(KEYS_VOLUP, up);
+ 		}
+-		if (dn != state[KEYS_VOLDN]) {
+-			state[KEYS_VOLDN] = dn;
+-			printf("SWEET KEYS: volume down %s\n", dn ? "down" : "up");
+-			sweet_hid_key(KEYS_VOLDN, dn);
+-		}
+ 		keys_wait(20);
+ 	}
+ out:
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 8dd03b4..7f47aec 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -12,7 +12,8 @@
+  * Report packets (ilitek_v3 driver, oem/touchscreen/ILITEK9883C):
+  *   0x5a  43 bytes, 10 fingers * 4 bytes from byte 1: x = (b1 & 0xf0) << 4 | b2,
+  *         y = (b1 & 0x0f) << 8 | b3, both 0..2047; ff ff ff = no finger.
+- *   0x5b  72 bytes, 10 fingers * 5 bytes from byte 1: 16-bit x, 16-bit y.
++ *   0x5b  72 bytes, 3 header bytes, then 10 fingers * 5 bytes from byte 4:
++ *         16-bit x, 16-bit y, pressure.
+  * The last byte is a checksum: (-sum of the others) & 0xff.
+  *
+  * The transfer uses the controller's DMA from two static cache-line aligned
+@@ -202,7 +203,8 @@ touch_finger(const uint8_t *pkt, unsigned id, bool high, int *x, int *y)
+ 		*x = xop * PANEL_W / st.lr;
+ 		*y = yop * PANEL_H / st.lr;
+ 	} else {
+-		const uint8_t *f = pkt + 1 + 5 * id;
++		/* Fingers start after a 3 byte header (P5_X_DEMO_MODE_PACKET_INFO_LEN). */
++		const uint8_t *f = pkt + 1 + 3 + 5 * id;
+ 		if (f[0] == 0xff && f[1] == 0xff && f[2] == 0xff && f[3] == 0xff) {
+ 			return false;
+ 		}
