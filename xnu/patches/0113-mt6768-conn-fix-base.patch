@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+--- a/bsd/dev/sweet_conn.c
++++ b/bsd/dev/sweet_conn.c
+@@ -28,7 +28,7 @@
+ 
+ #define SPM_PA            0x10006000u
+ #define MCU_PA            0x18002000u  /* HW id +0, FW id +4 */
+-#define MCU_TOP_MISC_PA   0x18007000u  /* IP version +0x10, configuration id +0x1c */
++#define MCU_TOP_MISC_PA   0x180b1000u  /* IP version +0x10, configuration id +0x1c (DT reg index 5) */
+ 
+ #define SPM_PWRON_CONFG_EN   0x000u
+ #define SPM_TOP1_PWR_CTRL    0x32cu
