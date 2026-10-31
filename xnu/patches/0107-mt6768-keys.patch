@@ -1,0 +1,361 @@
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -1,12 +1,23 @@
+ /*
+- * Minimal polled SWEET keys. Call once after the scheduler is running.
+- * See hw-report.md: volume-up is PM6150L SID 4, NOT PM6150 SID 0.
+- * PMIC access is READ ONLY: the sole MMIO write issues EXT_READL on an
+- * observer channel. No PMIC config, IRQ acknowledge or reset writes exist.
++ * Moto G05 (MT6768 "lamu") hardware keys, polled; read-only access.
++ *
++ *  - Power: MT6358 PMIC TOPSTATUS (0x28) through the PMIC wrapper (pwrap @
++ *    0x1000d000, WACS2 channel). The key is down while PWRKEY_DEB (bit 0) reads 0.
++ *  - Volume: MediaTek keypad controller (kp @ 0x10010000). KP_MEM1..5 hold one bit
++ *    per hardware key, 0 = pressed. Android's DT maps hw key 0 to KEY_VOLUMEUP
++ *    and hw key 17 (KPD "reset key") to KEY_VOLUMEDOWN.
++ *
++ * Linux has already set everything up and left the clocks on. Nothing is
++ * written except the WACS2 read command and VLDCLR, exactly like the Linux
++ * pmic-wrap driver does for a read. All raw values are logged when they
++ * change, so the first run on the phone shows which bit is which key.
++ * Boot-args: sweetkeys=0 (off), sweetkeydelay=<s>, sweetkeypwr=<bit>,
++ * sweetkeyup=<hw key>, sweetkeydn=<hw key>.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
+@@ -14,112 +25,197 @@
+ #include <pexpert/pexpert.h>
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
+ extern void sweet_hid_key(int key, int down);
+ void sweet_keys_init(void);
+ 
+-#define KEYS_CORE_PA     0x0c440000u
+-#define KEYS_OBS_PA      0x0e600000u
+-#define KEYS_CNFG_PA     0x0c40a000u
+-#define KEYS_PON_RT      0x0810u
+-#define KEYS_GPIO_RT     0xc110u
+-#define KEYS_NO_APID     0xffffu
+-
+-static vm_offset_t keys_core, keys_obs, keys_cnfg;
+-static uint16_t keys_pon_apid = KEYS_NO_APID, keys_gpio_apid = KEYS_NO_APID;
+-static uint32_t keys_version, keys_last_status;
+-static bool keys_started;
++#define PWRAP_PA         0x1000d000u
++#define KPD_PA           0x10010000u
++
++#define WACS2_CMD        0xc20u
++#define WACS2_RDATA      0xc24u
++#define WACS2_VLDCLR     0xc28u
++#define WACS_FSM(x)      (((x) >> 16) & 7u)
++#define FSM_IDLE         0u
++#define FSM_WFVLDCLR     6u
++
++#define MT6358_TOPSTATUS 0x28u
++
++#define KP_STA           0x00u
++#define KP_MEM1          0x04u
++#define KP_EN            0x24u
++
++#define KEYS_POWER       0
++#define KEYS_VOLUP       1
++#define KEYS_VOLDN       2
++
++static struct {
++	vm_offset_t pwrap, kpd;
++	bool started;
++	int pwr_bit, up_key, dn_key;
++} ks;
+ static int keys_sleep_chan;
+ 
+-static uint32_t
+-keys_rd(vm_offset_t base, uint32_t off)
++static inline uint32_t
++rd32(vm_offset_t base, uint32_t off)
+ {
+ 	uint32_t v = *(volatile uint32_t *)(base + off);
+ 	__asm__ volatile("dmb oshld" ::: "memory");
+ 	return v;
+ }
+ 
+-/* v5 can map one PPID more than once; prefer the apps-owned entry. */
+-static uint16_t
+-keys_find_apid(uint16_t ppid, uint32_t count)
+-{
+-	uint16_t found = KEYS_NO_APID;
+-	for (uint32_t i = 0; i < count; ++i) {
+-		uint32_t map = keys_rd(keys_core, 0x900u + 4u * i);
+-		if (map == 0 || ((map >> 8) & 0xfffu) != ppid) {
+-			continue;
+-		}
+-		uint32_t owner = keys_rd(keys_cnfg, 0x700u + 4u * i) & 7u;
+-		if (found == KEYS_NO_APID || owner == 0) {
+-			found = (uint16_t)i;
+-		}
+-	}
+-	return found;
++static inline uint16_t
++rd16(vm_offset_t base, uint32_t off)
++{
++	uint16_t v = *(volatile uint16_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
+ }
+ 
+-static bool
+-keys_read(uint16_t apid, uint16_t addr, uint8_t *out)
++static inline void
++wr32(vm_offset_t base, uint32_t off, uint32_t val)
+ {
+-	if (apid == KEYS_NO_APID) {
+-		return false;
+-	}
+-	uint32_t off = 0x80u * apid; /* obs + EE(0)*0x10000 */
+-	uint32_t cmd = (1u << 27) | ((uint32_t)(addr & 0xffu) << 4);
+ 	__asm__ volatile("dmb oshst" ::: "memory");
+-	*(volatile uint32_t *)(keys_obs + off) = cmd; /* EXT_READL, one byte */
++	*(volatile uint32_t *)(base + off) = val;
+ 	__asm__ volatile("dsb osh" ::: "memory");
+-	for (unsigned i = 0; i < 1000; ++i) {
+-		keys_last_status = keys_rd(keys_obs, off + 0x08u);
+-		if (keys_last_status & 1u) {
+-			if (keys_last_status & 0x0eu) {
+-				return false;
+-			}
+-			*out = (uint8_t)keys_rd(keys_obs, off + 0x18u);
+-			return true;
+-		}
+-		delay(1);
+-	}
+-	return false;
+ }
+ 
+ static void
+-keys_wait(void)
++keys_wait(unsigned ms)
+ {
+ 	uint64_t deadline;
+-	clock_interval_to_deadline(20, NSEC_PER_MSEC, &deadline);
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+ 	(void)assert_wait_deadline(&keys_sleep_chan, THREAD_UNINT, deadline);
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++/* 16-bit PMIC register read through WACS2 (same sequence as pwrap_read16). */
++static int
++pmic_read(uint32_t adr, uint32_t *out)
++{
++	unsigned i;
++	uint32_t v = 0;
++
++	for (i = 0; i < 20000; i++) {
++		v = rd32(ks.pwrap, WACS2_RDATA);
++		if (WACS_FSM(v) == FSM_IDLE) {
++			break;
++		}
++		delay(1);
++	}
++	if (i == 20000) {
++		wr32(ks.pwrap, WACS2_VLDCLR, 1);
++		return ETIMEDOUT;
++	}
++	wr32(ks.pwrap, WACS2_CMD, (adr >> 1) << 16);
++	for (i = 0; i < 20000; i++) {
++		v = rd32(ks.pwrap, WACS2_RDATA);
++		if (WACS_FSM(v) == FSM_WFVLDCLR) {
++			break;
++		}
++		delay(1);
++	}
++	if (i == 20000) {
++		return ETIMEDOUT;
++	}
++	*out = v & 0xffffu;
++	wr32(ks.pwrap, WACS2_VLDCLR, 1);
++	return 0;
++}
++
++/* Hardware key n of the keypad: bit (n % 16) of KP_MEM(n / 16 + 1); 0 = pressed. */
++static bool
++kpd_down(const uint16_t mem[5], int key)
++{
++	if (key < 0 || key >= 72) {
++		return false;
++	}
++	return ((mem[key / 16] >> (key % 16)) & 1u) == 0;
++}
++
+ static void
+ keys_thread(void *arg, wait_result_t result)
+ {
+-	int state[3] = {0, 0, 0};
+-	unsigned errors = 0;
++	unsigned delay_s = 30;
+ 	(void)arg;
+ 	(void)result;
++	(void)PE_parse_boot_argn("sweetkeydelay", &delay_s, sizeof(delay_s));
++	ks.pwr_bit = 0;
++	ks.up_key = 0;
++	ks.dn_key = 17;
++	(void)PE_parse_boot_argn("sweetkeypwr", &ks.pwr_bit, sizeof(ks.pwr_bit));
++	(void)PE_parse_boot_argn("sweetkeyup", &ks.up_key, sizeof(ks.up_key));
++	(void)PE_parse_boot_argn("sweetkeydn", &ks.dn_key, sizeof(ks.dn_key));
++	printf("SWEET KEYS: MT6768 keys, starting in %u s (pwr bit %d, up key %d, down key %d)\n",
++	    delay_s, ks.pwr_bit, ks.up_key, ks.dn_key);
++	keys_wait(delay_s * 1000u);
++	ks.pwrap = ml_io_map(PWRAP_PA, 0x1000);
++	ks.kpd = ml_io_map(KPD_PA, 0x1000);
++	if (!ks.pwrap || !ks.kpd) {
++		printf("SWEET KEYS: MMIO mapping failed\n");
++		goto out;
++	}
++	printf("SWEET KEYS: kpd sta=%#x en=%#x\n", rd32(ks.kpd, KP_STA), rd32(ks.kpd, KP_EN));
++
++	int state[3] = {0, 0, 0};
++	uint32_t last_top = 0xffffffffu;
++	uint16_t last_mem[5] = {0xffff, 0xffff, 0xffff, 0xffff, 0xffff};
++	unsigned errors = 0;
+ 	for (;;) {
+-		uint8_t pon = 0, gpio = 0;
+-		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-		bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-		int now[3] = {!!(pon & 1u), !(gpio & 1u), !!(pon & 2u)};
+-		if (!pok || !gok) {
++		uint32_t top = 0;
++		int err = pmic_read(MT6358_TOPSTATUS, &top);
++		uint16_t mem[5];
++		for (int i = 0; i < 5; i++) {
++			mem[i] = rd16(ks.kpd, KP_MEM1 + 4u * (uint32_t)i);
++		}
++		if (err) {
+ 			if ((errors++ % 250u) == 0) {
+-				printf("SWEET KEYS: read error pon-ok=%d gpio-ok=%d arb-status=%#x\n",
+-				    pok, gok, keys_last_status);
++				printf("SWEET KEYS: PMIC read error %d (wacs2 rdata %#x)\n", err,
++				    rd32(ks.pwrap, WACS2_RDATA));
+ 			}
+ 		} else {
+ 			errors = 0;
++			if (top != last_top) {
++				printf("SWEET KEYS: TOPSTATUS %#x\n", top);
++				last_top = top;
++			}
++			int now = ((top >> ks.pwr_bit) & 1u) == 0;
++			if (now != state[KEYS_POWER]) {
++				state[KEYS_POWER] = now;
++				printf("SWEET KEYS: power %s\n", now ? "down" : "up");
++				sweet_hid_key(KEYS_POWER, now);
++			}
+ 		}
+-		for (int k = 0; k < 3; ++k) {
+-			if ((k == 1 ? gok : pok) && now[k] != state[k]) {
+-				state[k] = now[k];
+-				printf("SWEET KEYS: key=%d down=%d pon=%#x gpio4:c110=%#x\n",
+-				    k, state[k], pon, gpio);
+-				sweet_hid_key(k, state[k]);
++		bool mem_changed = false;
++		for (int i = 0; i < 5; i++) {
++			if (mem[i] != last_mem[i]) {
++				mem_changed = true;
+ 			}
+ 		}
+-		keys_wait();
++		if (mem_changed) {
++			printf("SWEET KEYS: kpd mem %04x %04x %04x %04x %04x\n",
++			    mem[0], mem[1], mem[2], mem[3], mem[4]);
++			for (int i = 0; i < 5; i++) {
++				last_mem[i] = mem[i];
++			}
++		}
++		int up = kpd_down(mem, ks.up_key);
++		int dn = kpd_down(mem, ks.dn_key);
++		if (up != state[KEYS_VOLUP]) {
++			state[KEYS_VOLUP] = up;
++			printf("SWEET KEYS: volume up %s\n", up ? "down" : "up");
++			sweet_hid_key(KEYS_VOLUP, up);
++		}
++		if (dn != state[KEYS_VOLDN]) {
++			state[KEYS_VOLDN] = dn;
++			printf("SWEET KEYS: volume down %s\n", dn ? "down" : "up");
++			sweet_hid_key(KEYS_VOLDN, dn);
++		}
++		keys_wait(20);
+ 	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
+ void
+@@ -127,51 +223,15 @@
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
+-	if (keys_started) {
++	if (ks.started) {
+ 		return;
+ 	}
+-	keys_started = true;
++	ks.started = true;
+ 	(void)PE_parse_boot_argn("sweetkeys", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		printf("SWEET KEYS: disabled (sweetkeys=0)\n");
+ 		return;
+ 	}
+-	keys_core = ml_io_map(KEYS_CORE_PA, 0x2000);
+-	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+-	keys_obs = ml_io_map(KEYS_OBS_PA, 0x10000);
+-	if (!keys_core || !keys_cnfg || !keys_obs) {
+-		printf("SWEET KEYS: MMIO mapping failed\n");
+-		return;
+-	}
+-	keys_version = keys_rd(keys_core, 0);
+-	uint32_t count = keys_rd(keys_core, 4) & 0x7ffu;
+-	if (keys_version < 0x50000000u || keys_version >= 0x70000000u ||
+-	    count == 0 || count > 512) {
+-		printf("SWEET KEYS: unsupported arbiter version=%#x apids=%u\n",
+-		    keys_version, count);
+-		return;
+-	}
+-	keys_pon_apid = keys_find_apid(0x008, count);
+-	keys_gpio_apid = keys_find_apid(0x4c1, count);
+-	uint8_t pon = 0, gpio = 0, mode = 0, en = 0, subtype = 0;
+-	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+-	bool gok = keys_read(keys_gpio_apid, KEYS_GPIO_RT, &gpio);
+-	bool mok = keys_read(keys_gpio_apid, 0xc140, &mode);
+-	bool eok = keys_read(keys_gpio_apid, 0xc146, &en);
+-	bool sok = keys_read(keys_gpio_apid, 0xc105, &subtype);
+-	printf("SWEET KEYS: arb=%#x apids=%u pon-apid=%u gpio4-apid=%u pon=%#x/%d gpio=%#x/%d mode=%#x/%d en=%#x/%d subtype=%#x/%d\n",
+-	    keys_version, count, keys_pon_apid, keys_gpio_apid,
+-	    pon, pok, gpio, gok, mode, mok, en, eok, subtype, sok);
+-	/* GPIO configuration belongs to firmware. Diagnose, never repair it here. */
+-	unsigned dir = subtype >= 0x10u && subtype <= 0x13u ?
+-	    mode & 3u : (mode >> 4) & 7u;
+-	if (!eok || !mok || !sok || !(en & 0x80u) || (dir != 0 && dir != 2)) {
+-		printf("SWEET KEYS: GPIO2 not confirmed enabled as input; volume-up withheld, PMIC unchanged\n");
+-		keys_gpio_apid = KEYS_NO_APID;
+-	}
+-	if (!pok && !gok) {
+-		printf("SWEET KEYS: no readable keys; polling retained for recovery\n");
+-	}
+ 	kern_return_t kr = kernel_thread_start(keys_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -728,7 +728,8 @@
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_sample_start();
+-	/* Touch screen (ILITEK on SPI2, bsd/dev/sweet_touch.c); keys/USB not ported yet. */
++	/* Keys (bsd/dev/sweet_keys.c) and touch screen (ILITEK on SPI2, sweet_touch.c); USB not ported yet. */
++	sweet_keys_init();
+ 	sweet_touch_init();
+ 	/* MT6768: the Qualcomm keys/touch/usb drivers would hit unmapped buses; not started. */
+ 	return 0;
