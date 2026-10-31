@@ -1,0 +1,64 @@
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+--- a/bsd/dev/sweet_conn.c
++++ b/bsd/dev/sweet_conn.c
+@@ -8,7 +8,9 @@
+  * Boot-args: sweetconn=0 (default, off) | 1 (SPM power status only) |
+  *            2 (also read the CONNSYS identity registers; reading them while
+  *               CONNSYS is unpowered or unclocked can hang the bus, so the
+- *               SPM ack is checked first), sweetconndelay=<s>.
++ *               SPM ack is checked first) |
++ *            3 (also dump the BTIF UART and its APDMA windows, the link the
++ *               Bluetooth and WMT firmware talk over), sweetconndelay=<s>.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -39,6 +41,10 @@
+ #define CONN_FW_ID_OFF       0x04u
+ #define CONN_IP_VER_ID       0x10020501u
+ 
++#define BTIF_PA              0x1100c000u  /* BTIF UART, 0x40 bytes of registers dumped */
++#define BTIF_DMA_PA          0x11000b80u  /* APDMA TX/RX channel windows */
++#define BTIF_DMA_RX_PA       0x11000c00u
++
+ static int conn_sleep_chan;
+ static bool conn_started;
+ 
+@@ -59,6 +65,25 @@
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++/* Dump 32-bit words of a register window, 8 per line. */
++static void
++conn_dump(const char *name, uint32_t pa, uint32_t len)
++{
++	vm_offset_t base = ml_io_map(pa & ~0xfffu, 0x1000);
++	if (!base) {
++		printf("SWEET CONN: %s mapping failed\n", name);
++		return;
++	}
++	uint32_t off = pa & 0xfffu;
++	for (uint32_t i = 0; i < len; i += 32) {
++		printf("SWEET CONN: %s +%#04x:", name, i);
++		for (uint32_t j = 0; j < 32 && i + j < len; j += 4) {
++			printf(" %08x", rd32(base, off + i + j));
++		}
++		printf("\n");
++	}
++}
++
+ static void
+ conn_thread(void *arg, wait_result_t result)
+ {
+@@ -99,6 +124,12 @@
+ 	printf("SWEET CONN: conf id %#x, HW id %#x, FW id %#x\n",
+ 	    rd32(top, CONN_CONF_ID_OFF) & 0xfu,
+ 	    rd32(mcu, CONN_HW_ID_OFF) & 0xffffu, rd32(mcu, CONN_FW_ID_OFF) & 0xffffu);
++	if (mode < 3) {
++		goto out;
++	}
++	conn_dump("BTIF", BTIF_PA, 0x40);
++	conn_dump("BTIF TX DMA", BTIF_DMA_PA, 0x40);
++	conn_dump("BTIF RX DMA", BTIF_DMA_RX_PA, 0x40);
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);

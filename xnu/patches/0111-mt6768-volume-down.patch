@@ -1,0 +1,17 @@
+diff --git a/bsd/dev/sweet_keys.c b/bsd/dev/sweet_keys.c
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -186,6 +186,13 @@
+ 				printf("SWEET KEYS: power %s\n", now ? "down" : "up");
+ 				sweet_hid_key(KEYS_POWER, now);
+ 			}
++			/* Volume down is the PMIC "home" key: TOPSTATUS bit 3 (measured), active low. */
++			int dn = ((top >> ks.dn_bit) & 1u) == 0;
++			if (dn != state[KEYS_VOLDN]) {
++				state[KEYS_VOLDN] = dn;
++				printf("SWEET KEYS: volume down %s\n", dn ? "down" : "up");
++				sweet_hid_key(KEYS_VOLDN, dn);
++			}
+ 		}
+ 		bool mem_changed = false;
+ 		for (int i = 0; i < 5; i++) {
