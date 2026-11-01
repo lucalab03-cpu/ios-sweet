@@ -1,0 +1,112 @@
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+--- a/bsd/dev/sweet_conn.c
++++ b/bsd/dev/sweet_conn.c
+@@ -144,13 +144,25 @@
+ 		}
+ 		osc_saved = rd32(infra, AP2CONN_OSC_EN);
+ 		printf("SWEET CONN: AP2CONN_OSC_EN before %#x\n", osc_saved);
+-		wr32(infra, AP2CONN_OSC_EN, osc_saved | AP2CONN_WAKEUP_BIT);
+-		conn_wait(5);
+-		wr32(hif, 0, CLOCK_CHECK_VALUE);
++		/*
++		 * The wake-up bit was already 1 and CONNSYS still slept (clock check 0x50001), so
++		 * produce a rising edge, as force_trigger_assert_debug_pin() of the MediaTek driver does.
++		 */
++		wr32(infra, AP2CONN_OSC_EN, osc_saved & ~AP2CONN_WAKEUP_BIT);
+ 		conn_wait(2);
+-		uint32_t chk = rd32(hif, 0);
+-		printf("SWEET CONN: AP2CONN_OSC_EN now %#x, clock check %#x -> hclk %d osc %d sleep %d\n",
+-		    rd32(infra, AP2CONN_OSC_EN), chk, !!(chk & HCLK_CHECK_BIT),
++		wr32(infra, AP2CONN_OSC_EN, osc_saved | AP2CONN_WAKEUP_BIT);
++		uint32_t chk = 0;
++		unsigned tries;
++		for (tries = 1; tries <= 50; tries++) {
++			wr32(hif, 0, CLOCK_CHECK_VALUE);
++			conn_wait(2);
++			chk = rd32(hif, 0);
++			if ((chk & HCLK_CHECK_BIT) && (chk & OSCCLK_CHECK_BIT) && !(chk & SLEEP_CHECK_BIT)) {
++				break;
++			}
++		}
++		printf("SWEET CONN: after wake-up edge (%u tries): AP2CONN_OSC_EN %#x, clock check %#x -> hclk %d osc %d sleep %d\n",
++		    tries, rd32(infra, AP2CONN_OSC_EN), chk, !!(chk & HCLK_CHECK_BIT),
+ 		    !!(chk & OSCCLK_CHECK_BIT), !!(chk & SLEEP_CHECK_BIT));
+ 	}
+ 	vm_offset_t top = ml_io_map(MCU_TOP_MISC_PA, 0x1000);
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -323,7 +323,7 @@
+ 
+ /*
+  * Transfer nsec sectors between the card and the bounce buffer with the MSDC DMA engine.
+- * Everything (descriptors and data) lies below 4 GiB, so no high address bits are needed.
++ * Addresses are 36 bits wide: the high nibble goes into the descriptors and into DMA_SA_H4BIT.
+  */
+ static int
+ msdc_dma_xfer(uint32_t sector, uint32_t nsec, bool write)
+@@ -342,6 +342,7 @@
+ 	if (!su.dma_mem || n == 0 || n > 32) {
+ 		return EINVAL;
+ 	}
++#define H4(pa) ((uint32_t)(((pa) >> 32) & 0xfu))
+ 	memset(gpd, 0, 2 * sizeof(*gpd));
+ 	memset(bd, 0, n * sizeof(*bd));
+ 	for (unsigned i = 0; i < n; i++) {
+@@ -350,15 +351,20 @@
+ 		if (l > DMA_BD_CHUNK) {
+ 			l = DMA_BD_CHUNK;
+ 		}
+-		bd[i].ptr = (uint32_t)(buf_pa + (uint64_t)i * DMA_BD_CHUNK);
++		uint64_t data_pa = buf_pa + (uint64_t)i * DMA_BD_CHUNK;
++		uint64_t next_pa = (i + 1 < n) ? bd_pa + (uint64_t)(i + 1) * sizeof(*bd) : 0;
++
++		bd[i].ptr = (uint32_t)data_pa;
+ 		bd[i].len = l;
+-		bd[i].next = (i + 1 < n) ? (uint32_t)(bd_pa + (uint64_t)(i + 1) * sizeof(*bd)) : 0;
++		bd[i].next = (uint32_t)next_pa;
+ 		bd[i].info = (i + 1 == n) ? 1u : 0u;    /* EOL on the last one */
++		bd[i].info |= (H4(next_pa) << 24) | (H4(data_pa) << 28);
+ 		bd[i].info |= (uint32_t)dma_cs(&bd[i], 16) << 8;
+ 	}
+ 	gpd->info = 3u;                                 /* HWO | BDP */
+ 	gpd->next = (uint32_t)(gpd_pa + sizeof(*gpd));
+ 	gpd->ptr = (uint32_t)bd_pa;
++	gpd->info |= (H4(gpd_pa + sizeof(*gpd)) << 24) | (H4(bd_pa) << 28);
+ 	gpd->info |= (uint32_t)dma_cs(gpd, 16) << 8;
+ 	flush_dcache64(su.dma_pa, DMA_BOUNCE, 1);
+ 	flush_dcache64(buf_pa, len, 1);
+@@ -367,7 +373,7 @@
+ 	ufs_wr(M_DMA_CFG, ufs_rd(M_DMA_CFG) | DMA_CFG_DECSEN);
+ 	ufs_wr(M_DMA_CTRL, (ufs_rd(M_DMA_CTRL) & ~(DMA_BURST_MASK | DMA_CTRL_START | DMA_CTRL_STOP)) |
+ 	    DMA_BURST_64B | DMA_CTRL_DESC);
+-	ufs_wr(M_DMA_H4, ufs_rd(M_DMA_H4) & ~0xfu);
++	ufs_wr(M_DMA_H4, (ufs_rd(M_DMA_H4) & ~0xfu) | H4(gpd_pa));
+ 	ufs_wr(M_DMA_SA, (uint32_t)gpd_pa);
+ 	ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_START);
+ 
+@@ -919,8 +925,22 @@
+ 	su.dma_pa = ptoa_64(pn);
+ 	su.dma_mem = (su.dma_pa + DMA_SIZE) <= 0x100000000ull;
+ 	if (want_dma && !su.dma_mem) {
+-		printf("SWEET EMMC: bounce buffer at 0x%llx is above 4 GiB, DMA not used\n", su.dma_pa);
+-		want_dma = 0;
++		/*
++		 * XNU's memory is above 4 GiB here. The engine can only reach it if DMA_SA_H4BIT
++		 * (the high address nibble) exists: check that the register really holds the bits.
++		 */
++		uint32_t h4 = *(volatile uint32_t *)(su.regs + M_DMA_H4);
++		*(volatile uint32_t *)(su.regs + M_DMA_H4) = (h4 & ~0xfu) | 0xfu;
++		uint32_t back = *(volatile uint32_t *)(su.regs + M_DMA_H4) & 0xfu;
++		*(volatile uint32_t *)(su.regs + M_DMA_H4) = h4;
++		printf("SWEET EMMC: bounce buffer at 0x%llx is above 4 GiB, DMA_SA_H4BIT test reads %#x\n",
++		    su.dma_pa, back);
++		if (back == 0xfu && (su.dma_pa + DMA_SIZE) < (1ull << 36)) {
++			su.dma_mem = true;
++		} else {
++			printf("SWEET EMMC: no 36-bit DMA addressing, DMA not used\n");
++			want_dma = 0;
++		}
+ 	}
+ 	su.lun = 0;
+ 	su.secsize = DEV_BSIZE;
