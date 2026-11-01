@@ -1,0 +1,98 @@
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+--- a/bsd/dev/sweet_conn.c
++++ b/bsd/dev/sweet_conn.c
+@@ -10,7 +10,11 @@
+  *               CONNSYS is unpowered or unclocked can hang the bus, so the
+  *               SPM ack is checked first) |
+  *            3 (also dump the BTIF UART and its APDMA windows, the link the
+- *               Bluetooth and WMT firmware talk over), sweetconndelay=<s>.
++ *               Bluetooth and WMT firmware talk over) |
++ *            4 (before reading, ask CONNSYS to wake up: AP2CONN_WAKEUP, bit 9 of
++ *               INFRACFG_AO+0xf00, then check its clocks like the MediaTek
++ *               driver's consys_check_reg_readable(); restored afterwards),
++ *            sweetconndelay=<s>.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -41,6 +45,15 @@
+ #define CONN_FW_ID_OFF       0x04u
+ #define CONN_IP_VER_ID       0x10020501u
+ 
++#define INFRACFG_AO_PA       0x10001000u
++#define AP2CONN_OSC_EN       0xf00u
++#define AP2CONN_WAKEUP_BIT   (1u << 9)
++#define HIF_ON_PA            0x18007000u  /* clock / sleep check register at +0 */
++#define CLOCK_CHECK_VALUE    0x30000u
++#define HCLK_CHECK_BIT       (1u << 16)
++#define OSCCLK_CHECK_BIT     (1u << 17)
++#define SLEEP_CHECK_BIT      (1u << 18)
++
+ #define BTIF_PA              0x1100c000u  /* BTIF UART, 0x40 bytes of registers dumped */
+ #define BTIF_DMA_PA          0x11000b80u  /* APDMA TX/RX channel windows */
+ #define BTIF_DMA_RX_PA       0x11000c00u
+@@ -56,6 +69,14 @@
+ 	return v;
+ }
+ 
++static inline void
++wr32(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
+ static void
+ conn_wait(unsigned ms)
+ {
+@@ -112,11 +133,31 @@
+ 		printf("SWEET CONN: not reading identity registers while unpowered\n");
+ 		goto out;
+ 	}
++	vm_offset_t infra = 0, hif = 0;
++	uint32_t osc_saved = 0;
++	if (mode >= 4) {
++		infra = ml_io_map(INFRACFG_AO_PA, 0x1000);
++		hif = ml_io_map(HIF_ON_PA, 0x1000);
++		if (!infra || !hif) {
++			printf("SWEET CONN: wake-up mapping failed\n");
++			goto out;
++		}
++		osc_saved = rd32(infra, AP2CONN_OSC_EN);
++		printf("SWEET CONN: AP2CONN_OSC_EN before %#x\n", osc_saved);
++		wr32(infra, AP2CONN_OSC_EN, osc_saved | AP2CONN_WAKEUP_BIT);
++		conn_wait(5);
++		wr32(hif, 0, CLOCK_CHECK_VALUE);
++		conn_wait(2);
++		uint32_t chk = rd32(hif, 0);
++		printf("SWEET CONN: AP2CONN_OSC_EN now %#x, clock check %#x -> hclk %d osc %d sleep %d\n",
++		    rd32(infra, AP2CONN_OSC_EN), chk, !!(chk & HCLK_CHECK_BIT),
++		    !!(chk & OSCCLK_CHECK_BIT), !!(chk & SLEEP_CHECK_BIT));
++	}
+ 	vm_offset_t top = ml_io_map(MCU_TOP_MISC_PA, 0x1000);
+ 	vm_offset_t mcu = ml_io_map(MCU_PA, 0x1000);
+ 	if (!top || !mcu) {
+ 		printf("SWEET CONN: MMIO mapping failed\n");
+-		goto out;
++		goto out_restore;
+ 	}
+ 	uint32_t ver = rd32(top, CONN_IP_VER_OFF);
+ 	printf("SWEET CONN: IP version %#010x (%s, expected %#010x)\n", ver,
+@@ -125,11 +166,16 @@
+ 	    rd32(top, CONN_CONF_ID_OFF) & 0xfu,
+ 	    rd32(mcu, CONN_HW_ID_OFF) & 0xffffu, rd32(mcu, CONN_FW_ID_OFF) & 0xffffu);
+ 	if (mode < 3) {
+-		goto out;
++		goto out_restore;
+ 	}
+ 	conn_dump("BTIF", BTIF_PA, 0x40);
+ 	conn_dump("BTIF TX DMA", BTIF_DMA_PA, 0x40);
+ 	conn_dump("BTIF RX DMA", BTIF_DMA_RX_PA, 0x40);
++out_restore:
++	if (infra) {
++		wr32(infra, AP2CONN_OSC_EN, osc_saved);
++		printf("SWEET CONN: AP2CONN_OSC_EN restored to %#x\n", rd32(infra, AP2CONN_OSC_EN));
++	}
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
