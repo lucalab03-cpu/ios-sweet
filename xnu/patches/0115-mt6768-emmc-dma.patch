@@ -1,0 +1,298 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -77,6 +77,24 @@
+ #define STS_CMDBUSY     (1u << 1)
+ #define PB1_CQE_BUSY    (1u << 7)               /* "busy check for CQE", set while Linux had CQE on */
+ 
++/* MSDC descriptor DMA (GPD/BD, like mtk-sd.c); only used with boot-arg ufsdma=1. */
++#define M_DMA_H4        0x8c
++#define M_DMA_SA        0x90
++#define M_DMA_CTRL      0x98
++#define M_DMA_CFG       0x9c
++#define DMA_CTRL_START  (1u << 0)
++#define DMA_CTRL_STOP   (1u << 1)
++#define DMA_CTRL_DESC   (1u << 8)
++#define DMA_BURST_64B   (6u << 12)
++#define DMA_BURST_MASK  (7u << 12)
++#define DMA_CFG_STS     (1u << 0)
++#define DMA_CFG_DECSEN  (1u << 1)
++#define INT_XFER_COMPL  (1u << 12)
++#define INT_DMA_ERR     ((1u << 17) | (1u << 18) | (1u << 19))
++#define DMA_GPD_OFF     0x0000u
++#define DMA_BD_OFF      0x1000u
++#define DMA_BD_CHUNK    0x8000u                 /* 32 KiB per buffer descriptor */
++
+ #define CMD_WRITE       (1u << 13)
+ #define CMD_AUTO12      (1u << 28)
+ 
+@@ -101,6 +119,9 @@
+ 	bool writable;                          /* boot-arg ufsrw=1 */
+ 	bool cache;                             /* boot-arg ufscache=1 (unused with eMMC) */
+ 	bool wait;                              /* boot-arg ufswait=1 (unused with eMMC) */
++	bool dma_mem;                           /* bounce buffer lies below 4 GiB */
++	bool use_dma;                           /* boot-arg ufsdma=1 and the self-test passed */
++	unsigned dma_fail;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	bool ready;
+@@ -273,6 +294,128 @@
+ 	return 0;
+ }
+ 
++struct sw_gpd {
++	uint32_t info, next, ptr, len, arg, blknum, cmd;
++};
++struct sw_bd {
++	uint32_t info, next, ptr, len;
++};
++
++static uint8_t
++dma_cs(const void *p, unsigned n)
++{
++	const uint8_t *b = p;
++	uint32_t sum = 0;
++
++	for (unsigned i = 0; i < n; i++) {
++		sum += b[i];
++	}
++	return (uint8_t)(0xffu - sum);
++}
++
++static void
++msdc_dma_stop(void)
++{
++	ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_STOP);
++	(void)msdc_poll(M_DMA_CFG, DMA_CFG_STS, 0, 20ull * NSEC_PER_MSEC);
++	msdc_clear_fifo_and_int();
++}
++
++/*
++ * Transfer nsec sectors between the card and the bounce buffer with the MSDC DMA engine.
++ * Everything (descriptors and data) lies below 4 GiB, so no high address bits are needed.
++ */
++static int
++msdc_dma_xfer(uint32_t sector, uint32_t nsec, bool write)
++{
++	struct sw_gpd *gpd = (struct sw_gpd *)(su.dma + DMA_GPD_OFF);
++	struct sw_bd *bd = (struct sw_bd *)(su.dma + DMA_BD_OFF);
++	uint64_t gpd_pa = su.dma_pa + DMA_GPD_OFF;
++	uint64_t bd_pa = su.dma_pa + DMA_BD_OFF;
++	uint64_t buf_pa = su.dma_pa + DMA_BOUNCE;
++	uint32_t len = nsec * EMMC_SECTOR;
++	unsigned n = (len + DMA_BD_CHUNK - 1) / DMA_BD_CHUNK;
++	uint64_t deadline;
++	uint32_t st = 0;
++	int error;
++
++	if (!su.dma_mem || n == 0 || n > 32) {
++		return EINVAL;
++	}
++	memset(gpd, 0, 2 * sizeof(*gpd));
++	memset(bd, 0, n * sizeof(*bd));
++	for (unsigned i = 0; i < n; i++) {
++		uint32_t l = len - i * DMA_BD_CHUNK;
++
++		if (l > DMA_BD_CHUNK) {
++			l = DMA_BD_CHUNK;
++		}
++		bd[i].ptr = (uint32_t)(buf_pa + (uint64_t)i * DMA_BD_CHUNK);
++		bd[i].len = l;
++		bd[i].next = (i + 1 < n) ? (uint32_t)(bd_pa + (uint64_t)(i + 1) * sizeof(*bd)) : 0;
++		bd[i].info = (i + 1 == n) ? 1u : 0u;    /* EOL on the last one */
++		bd[i].info |= (uint32_t)dma_cs(&bd[i], 16) << 8;
++	}
++	gpd->info = 3u;                                 /* HWO | BDP */
++	gpd->next = (uint32_t)(gpd_pa + sizeof(*gpd));
++	gpd->ptr = (uint32_t)bd_pa;
++	gpd->info |= (uint32_t)dma_cs(gpd, 16) << 8;
++	flush_dcache64(su.dma_pa, DMA_BOUNCE, 1);
++	flush_dcache64(buf_pa, len, 1);
++
++	ufs_wr(M_CFG, ufs_rd(M_CFG) & ~CFG_PIO);
++	ufs_wr(M_DMA_CFG, ufs_rd(M_DMA_CFG) | DMA_CFG_DECSEN);
++	ufs_wr(M_DMA_CTRL, (ufs_rd(M_DMA_CTRL) & ~(DMA_BURST_MASK | DMA_CTRL_START | DMA_CTRL_STOP)) |
++	    DMA_BURST_64B | DMA_CTRL_DESC);
++	ufs_wr(M_DMA_H4, ufs_rd(M_DMA_H4) & ~0xfu);
++	ufs_wr(M_DMA_SA, (uint32_t)gpd_pa);
++	ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_START);
++
++	if (write) {
++		error = msdc_cmd(nsec == 1 ? 24 : 25, sector, 1, nsec == 1 ? 1 : 2, nsec,
++		    CMD_WRITE | (nsec == 1 ? 0 : CMD_AUTO12), NULL);
++	} else {
++		error = msdc_cmd(nsec == 1 ? 17 : 18, sector, 1, nsec == 1 ? 1 : 2, nsec,
++		    nsec == 1 ? 0 : CMD_AUTO12, NULL);
++	}
++	if (!error) {
++		nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++		deadline += mach_absolute_time();
++		for (;;) {
++			st = ufs_rd(M_INT);
++			if (st & (INT_XFER_COMPL | INT_DATTMO | INT_DATCRC | INT_DMA_ERR)) {
++				break;
++			}
++			if (mach_absolute_time() > deadline) {
++				error = ETIMEDOUT;
++				break;
++			}
++		}
++		if (!error && (!(st & INT_XFER_COMPL) || (st & (INT_DATTMO | INT_DATCRC | INT_DMA_ERR)))) {
++			error = EIO;
++		}
++	}
++	if (error) {
++		printf("SWEET EMMC: DMA %s of %u sectors at 0x%x failed (%d, int %#x)\n",
++		    write ? "write" : "read", nsec, sector, error, st);
++		msdc_dma_stop();
++	} else {
++		ufs_wr(M_INT, ufs_rd(M_INT));
++		if (!write) {
++			flush_dcache64(buf_pa, len, 1);         /* drop stale lines */
++		}
++		if (!msdc_poll(M_SDC_STS, STS_SDCBUSY, 0, CMD_TIMEOUT_NS)) {
++			error = ETIMEDOUT;
++			msdc_dma_stop();
++		}
++	}
++	ufs_wr(M_CFG, ufs_rd(M_CFG) | CFG_PIO);
++	if (!error && write) {
++		error = msdc_card_ready();
++	}
++	return error;
++}
++
+ /* Read nsec 512-byte sectors starting at sector into the bounce buffer. */
+ static int
+ emmc_read_sectors(uint64_t sector, uint32_t nsec)
+@@ -283,6 +426,16 @@
+ 	if (sector > UINT32_MAX || nsec == 0 || nsec > BOUNCE_SIZE / EMMC_SECTOR) {
+ 		return EINVAL;
+ 	}
++	if (su.use_dma) {
++		error = msdc_dma_xfer((uint32_t)sector, nsec, false);
++		if (!error) {
++			return 0;
++		}
++		if (++su.dma_fail >= 3) {
++			su.use_dma = false;
++			printf("SWEET EMMC: DMA disabled after repeated errors, back to PIO\n");
++		}
++	}
+ 	if (nsec == 1) {
+ 		error = msdc_cmd(17, (uint32_t)sector, 1, 1, 1, 0, NULL);
+ 	} else {
+@@ -310,6 +463,16 @@
+ 	if (sector > UINT32_MAX || nsec == 0 || nsec > BOUNCE_SIZE / EMMC_SECTOR) {
+ 		return EINVAL;
+ 	}
++	if (su.use_dma) {
++		error = msdc_dma_xfer((uint32_t)sector, nsec, true);
++		if (!error) {
++			return 0;
++		}
++		if (++su.dma_fail >= 3) {
++			su.use_dma = false;
++			printf("SWEET EMMC: DMA disabled after repeated errors, back to PIO\n");
++		}
++	}
+ 	if (nsec == 1) {
+ 		error = msdc_cmd(24, (uint32_t)sector, 1, 1, 1, CMD_WRITE, NULL);
+ 	} else {
+@@ -662,6 +825,51 @@
+ 	.d_type       = D_DISK,
+ };
+ 
++/*
++ * DMA self-test: read the same 128 KiB with PIO and with DMA, compare, and log both speeds.
++ * Only the read path is exercised here; DMA stays off if anything differs.
++ */
++static uint8_t sw_dma_copy[131072];
++
++static void
++sweet_dma_selftest(void)
++{
++	const uint32_t nsec = sizeof(sw_dma_copy) / EMMC_SECTOR;
++	const uint32_t sector = (uint32_t)(su.first_block * (UFS_BLOCK / EMMC_SECTOR));
++	uint8_t *bounce = (uint8_t *)(su.dma + DMA_BOUNCE);
++	uint64_t t0, t1, t2, us_pio, us_dma;
++	int error;
++
++	t0 = mach_absolute_time();
++	error = emmc_read_sectors(sector, nsec);        /* su.use_dma is still false: PIO */
++	t1 = mach_absolute_time();
++	if (error) {
++		printf("SWEET EMMC: DMA self-test: PIO read failed (%d)\n", error);
++		return;
++	}
++	memcpy(sw_dma_copy, bounce, sizeof(sw_dma_copy));
++	memset(bounce, 0xa5, sizeof(sw_dma_copy));
++	flush_dcache64(su.dma_pa + DMA_BOUNCE, sizeof(sw_dma_copy), 1);
++	t2 = mach_absolute_time();
++	error = msdc_dma_xfer(sector, nsec, false);
++	uint64_t t3 = mach_absolute_time();
++	absolutetime_to_nanoseconds(t1 - t0, &us_pio);
++	absolutetime_to_nanoseconds(t3 - t2, &us_dma);
++	us_pio /= 1000;
++	us_dma /= 1000;
++	if (error) {
++		printf("SWEET EMMC: DMA self-test: DMA read failed (%d), staying on PIO\n", error);
++		return;
++	}
++	if (memcmp(sw_dma_copy, bounce, sizeof(sw_dma_copy)) != 0) {
++		printf("SWEET EMMC: DMA self-test: DATA MISMATCH, staying on PIO\n");
++		return;
++	}
++	su.use_dma = true;
++	printf("SWEET EMMC: DMA self-test OK: 128 KiB in %llu us (PIO) vs %llu us (DMA); DMA enabled\n",
++	    us_pio, us_dma);
++}
++
+ static int
+ sweet_ufs_init(void)
+ {
+@@ -687,8 +895,20 @@
+ 	su.wait = (wait == 1);
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+-	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+-	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++	uint32_t want_dma = 0;
++	PE_parse_boot_argn("ufsdma", &want_dma, sizeof(want_dma));
++	kern_return_t kr = KERN_FAILURE;
++	if (want_dma) {
++		/* The DMA engine is driven with 32-bit addresses: ask for memory below 4 GiB. */
++		kr = kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK,
++		    (ppnum_t)((0x100000000ull >> PAGE_SHIFT) - 1), 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
++	}
++	if (kr != KERN_SUCCESS) {
++		kr = kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
++		    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT);
++	}
++	if (kr != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
+ 		return ENOMEM;
+ 	}
+@@ -697,6 +917,11 @@
+ 		return ENOMEM;
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
++	su.dma_mem = (su.dma_pa + DMA_SIZE) <= 0x100000000ull;
++	if (want_dma && !su.dma_mem) {
++		printf("SWEET EMMC: bounce buffer at 0x%llx is above 4 GiB, DMA not used\n", su.dma_pa);
++		want_dma = 0;
++	}
+ 	su.lun = 0;
+ 	su.secsize = DEV_BSIZE;
+ 
+@@ -705,6 +930,9 @@
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
+ 	}
++	if (!error && want_dma) {
++		sweet_dma_selftest();
++	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+ 	if (error) {
+ 		return error;
