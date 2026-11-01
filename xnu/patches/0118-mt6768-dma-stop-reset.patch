@@ -1,0 +1,111 @@
+Subject: mt6768: stop DMA engine and reset MSDC after each DMA transfer, PIO sanity check in self-test
+
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -66,6 +66,7 @@
+ #define CQ_CFG          (M_CQ + 0x08)
+ #define CQ_CTL          (M_CQ + 0x0c)
+ 
++#define CFG_RST         (1u << 2)
+ #define CFG_PIO         (1u << 3)
+ #define INT_CMDRDY      (1u << 8)
+ #define INT_CMDTMO      (1u << 9)
+@@ -168,6 +169,24 @@
+ 	ufs_wr(M_INT, ufs_rd(M_INT));           /* write 1 to clear */
+ }
+ 
++/* Like msdc_data_xfer_done() in mtk-sd.c: stop the DMA engine and wait until it is really idle. */
++static void
++msdc_dma_engine_stop(void)
++{
++	ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_STOP);
++	(void)msdc_poll(M_DMA_CTRL, DMA_CTRL_STOP, 0, 20ull * NSEC_PER_MSEC);
++	(void)msdc_poll(M_DMA_CFG, DMA_CFG_STS, 0, 20ull * NSEC_PER_MSEC);
++}
++
++/* msdc_reset_hw() of mtk-sd.c: reset the state machine, flush the FIFO, clear the interrupts. */
++static void
++msdc_reset_hw(void)
++{
++	ufs_wr(M_CFG, ufs_rd(M_CFG) | CFG_RST);
++	(void)msdc_poll(M_CFG, CFG_RST, 0, 20ull * NSEC_PER_MSEC);
++	msdc_clear_fifo_and_int();
++}
++
+ /*
+  * One command. rsp: 1 = R1, 7 = R1b. dtype: 0 no data, 1 single block, 2 multiple blocks.
+  * extra: CMD_WRITE / CMD_AUTO12. The data stage is done by the caller.
+@@ -181,7 +200,17 @@
+ 	uint64_t deadline;
+ 
+ 	if (!msdc_poll(M_SDC_STS, STS_CMDBUSY | STS_SDCBUSY, 0, CMD_FAST_NS)) {
+-		return EBUSY;
++		static unsigned busy_reports;
++
++		if (busy_reports++ < 4) {
++			printf("SWEET EMMC: controller busy: sts %#x cfg %#x int %#x dma_ctrl %#x dma_cfg %#x, resetting\n",
++			    ufs_rd(M_SDC_STS), ufs_rd(M_CFG), ufs_rd(M_INT), ufs_rd(M_DMA_CTRL), ufs_rd(M_DMA_CFG));
++		}
++		msdc_dma_engine_stop();
++		msdc_reset_hw();
++		if (!msdc_poll(M_SDC_STS, STS_CMDBUSY | STS_SDCBUSY, 0, CMD_FAST_NS)) {
++			return EBUSY;
++		}
+ 	}
+ 	msdc_clear_fifo_and_int();
+ 	ufs_wr(M_BLK_NUM, dtype ? nblk : 0);
+@@ -408,17 +437,25 @@
+ 	if (error) {
+ 		printf("SWEET EMMC: DMA %s of %u sectors at 0x%x failed (%d, int %#x)\n",
+ 		    write ? "write" : "read", nsec, sector, error, st);
+-		msdc_dma_stop();
+-	} else {
++	}
++	/* Always leave the engine and the controller idle, like msdc_data_xfer_done() in mtk-sd.c. */
++	msdc_dma_engine_stop();
++	if (!error) {
+ 		ufs_wr(M_INT, ufs_rd(M_INT));
+ 		if (!write) {
+ 			flush_dcache64(buf_pa, len, 1);         /* drop stale lines */
+ 		}
+-		if (!msdc_poll(M_SDC_STS, STS_SDCBUSY, 0, CMD_TIMEOUT_NS)) {
++	}
++	if (!msdc_poll(M_SDC_STS, STS_CMDBUSY | STS_SDCBUSY, 0, CMD_TIMEOUT_NS)) {
++		printf("SWEET EMMC: controller still busy after DMA (sts %#x int %#x dma_cfg %#x), resetting\n",
++		    ufs_rd(M_SDC_STS), ufs_rd(M_INT), ufs_rd(M_DMA_CFG));
++		if (!error) {
+ 			error = ETIMEDOUT;
+-			msdc_dma_stop();
+ 		}
+ 	}
++	if (error) {
++		msdc_reset_hw();
++	}
+ 	ufs_wr(M_CFG, ufs_rd(M_CFG) | CFG_PIO);
+ 	if (!error && write) {
+ 		error = msdc_card_ready();
+@@ -897,11 +934,22 @@
+ 	absolutetime_to_nanoseconds(t3 - t2, &us_dma);
+ 	us_pio /= 1000;
+ 	us_dma /= 1000;
++	bool match = !error && memcmp(sw_dma_copy, bounce, sizeof(sw_dma_copy)) == 0;
++
++	/* The controller must still work in PIO afterwards, whatever DMA did. */
++	int perr = emmc_read_sectors(sector, 8);
++	if (perr) {
++		msdc_reset_hw();
++		perr = emmc_read_sectors(sector, 8);
++		printf("SWEET EMMC: DMA self-test: PIO read after DMA %s (%d), staying on PIO\n",
++		    perr ? "FAILED" : "ok only after reset", perr);
++		return;
++	}
+ 	if (error) {
+ 		printf("SWEET EMMC: DMA self-test: DMA read failed (%d), staying on PIO\n", error);
+ 		return;
+ 	}
+-	if (memcmp(sw_dma_copy, bounce, sizeof(sw_dma_copy)) != 0) {
++	if (!match) {
+ 		printf("SWEET EMMC: DMA self-test: DATA MISMATCH, staying on PIO\n");
+ 		return;
+ 	}
