@@ -1,0 +1,88 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -121,6 +121,8 @@
+ 	bool wait;                              /* boot-arg ufswait=1 (unused with eMMC) */
+ 	bool dma_mem;                           /* bounce buffer lies below 4 GiB */
+ 	bool use_dma;                           /* boot-arg ufsdma=1 and the self-test passed */
++	bool dma_write;                         /* boot-arg ufsdmaw=1: also write with DMA (default: PIO) */
++	unsigned dma_verify;                    /* boot-arg ufsdmaverify=N: re-read the first N DMA reads with PIO */
+ 	unsigned dma_fail;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+@@ -294,6 +296,8 @@
+ 	return 0;
+ }
+ 
++static uint8_t sw_dma_verify[BOUNCE_SIZE];
++
+ struct sw_gpd {
+ 	uint32_t info, next, ptr, len, arg, blknum, cmd;
+ };
+@@ -434,7 +438,37 @@
+ 	}
+ 	if (su.use_dma) {
+ 		error = msdc_dma_xfer((uint32_t)sector, nsec, false);
++		if (!error && su.dma_verify == 0) {
++			return 0;
++		}
+ 		if (!error) {
++			/*
++			 * Verification phase: keep a copy of what DMA delivered, read the same sectors
++			 * with PIO (the trusted path), compare, and always hand back the PIO data.
++			 */
++			uint32_t bytes = nsec * EMMC_SECTOR;
++
++			su.dma_verify--;
++			memcpy(sw_dma_verify, bounce, bytes);
++			su.use_dma = false;
++			int perr = emmc_read_sectors(sector, nsec);
++			su.use_dma = true;
++			if (perr) {
++				return perr;
++			}
++			if (memcmp(sw_dma_verify, bounce, bytes) != 0) {
++				uint32_t off = 0;
++
++				while (off < bytes && sw_dma_verify[off] == ((uint8_t *)bounce)[off]) {
++					off++;
++				}
++				printf("SWEET EMMC: DMA verify MISMATCH: %u sectors at 0x%llx, first difference at byte %u "
++				    "(dma %02x, pio %02x); DMA disabled\n", nsec, sector, off,
++				    sw_dma_verify[off], ((uint8_t *)bounce)[off]);
++				su.use_dma = false;
++			} else if (su.dma_verify == 0) {
++				printf("SWEET EMMC: DMA verified on all checked reads, no more checks\n");
++			}
+ 			return 0;
+ 		}
+ 		if (++su.dma_fail >= 3) {
+@@ -469,7 +503,7 @@
+ 	if (sector > UINT32_MAX || nsec == 0 || nsec > BOUNCE_SIZE / EMMC_SECTOR) {
+ 		return EINVAL;
+ 	}
+-	if (su.use_dma) {
++	if (su.use_dma && su.dma_write) {
+ 		error = msdc_dma_xfer((uint32_t)sector, nsec, true);
+ 		if (!error) {
+ 			return 0;
+@@ -872,8 +906,17 @@
+ 		return;
+ 	}
+ 	su.use_dma = true;
+-	printf("SWEET EMMC: DMA self-test OK: 128 KiB in %llu us (PIO) vs %llu us (DMA); DMA enabled\n",
+-	    us_pio, us_dma);
++	su.dma_verify = 512;
++	su.dma_write = false;
++	uint32_t v = 0;
++	if (PE_parse_boot_argn("ufsdmaverify", &v, sizeof(v))) {
++		su.dma_verify = v;
++	}
++	if (PE_parse_boot_argn("ufsdmaw", &v, sizeof(v))) {
++		su.dma_write = (v == 1);
++	}
++	printf("SWEET EMMC: DMA self-test OK: 128 KiB in %llu us (PIO) vs %llu us (DMA); DMA enabled (reads verified: %u, DMA writes: %s)\n",
++	    us_pio, us_dma, su.dma_verify, su.dma_write ? "on" : "off");
+ }
+ 
+ static int
