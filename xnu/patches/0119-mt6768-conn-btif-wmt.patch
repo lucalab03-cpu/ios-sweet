@@ -1,0 +1,127 @@
+Subject: mt6768: sweetconn=5, BTIF PIO exchange of the first WMT command
+
+diff --git a/bsd/dev/sweet_conn.c b/bsd/dev/sweet_conn.c
+--- a/bsd/dev/sweet_conn.c
++++ b/bsd/dev/sweet_conn.c
+@@ -14,6 +14,10 @@
+  *            4 (before reading, ask CONNSYS to wake up: AP2CONN_WAKEUP, bit 9 of
+  *               INFRACFG_AO+0xf00, then check its clocks like the MediaTek
+  *               driver's consys_check_reg_readable(); restored afterwards),
++ *            5 (also talk to the chip over the BTIF UART in plain PIO mode: send the first
++ *               WMT command of the MediaTek init sequence, "query STP" 01 04 01 00 04, and
++ *               print every byte that comes back; a working link answers
++ *               02 04 06 00 00 04 ...),
+  *            sweetconndelay=<s>.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+@@ -58,6 +62,19 @@
+ #define BTIF_DMA_PA          0x11000b80u  /* APDMA TX/RX channel windows */
+ #define BTIF_DMA_RX_PA       0x11000c00u
+ 
++#define BTIF_THR_OFF         0x00u
++#define BTIF_IER_OFF         0x04u
++#define BTIF_FIFOCTRL_OFF    0x08u
++#define BTIF_LSR_OFF         0x14u
++#define BTIF_SLEEP_EN_OFF    0x48u
++#define BTIF_DMA_EN_OFF      0x4cu
++#define BTIF_WAK_OFF         0x64u
++#define BTIF_LSR_DR          (1u << 0)
++#define BTIF_LSR_THRE        (1u << 5)
++#define BTIF_LSR_TEMT        (1u << 6)
++#define BTIF_FIFO_CLR_RX     (1u << 1)
++#define BTIF_FIFO_CLR_TX     (1u << 2)
++
+ static int conn_sleep_chan;
+ static bool conn_started;
+ 
+@@ -105,6 +122,79 @@
+ 	}
+ }
+ 
++static bool
++btif_wait_lsr(vm_offset_t b, uint32_t bit, unsigned ms)
++{
++	for (unsigned i = 0; i < ms * 10; i++) {
++		if (rd32(b, BTIF_LSR_OFF) & bit) {
++			return true;
++		}
++		delay(100);
++	}
++	return false;
++}
++
++/*
++ * Send one raw WMT command over BTIF in PIO mode and print the answer. Linux left the TX/RX
++ * APDMA channels configured, so DMA mode is switched off for the exchange and restored after.
++ */
++static void
++conn_btif_wmt(const uint8_t *cmd, unsigned cmdlen)
++{
++	vm_offset_t b = ml_io_map(BTIF_PA, 0x1000);
++	uint8_t rx[64];
++	unsigned n = 0, drained = 0;
++
++	if (!b) {
++		printf("SWEET CONN: BTIF mapping failed\n");
++		return;
++	}
++	uint32_t dma_en = rd32(b, BTIF_DMA_EN_OFF), ier = rd32(b, BTIF_IER_OFF), sleep = rd32(b, BTIF_SLEEP_EN_OFF);
++	printf("SWEET CONN: BTIF before: DMA_EN %#x IER %#x SLEEP_EN %#x LSR %#x\n", dma_en, ier, sleep, rd32(b, BTIF_LSR_OFF));
++	wr32(b, BTIF_WAK_OFF, 1);
++	wr32(b, BTIF_SLEEP_EN_OFF, 0);
++	wr32(b, BTIF_IER_OFF, 0);
++	wr32(b, BTIF_DMA_EN_OFF, 0);
++	wr32(b, BTIF_FIFOCTRL_OFF, BTIF_FIFO_CLR_RX | BTIF_FIFO_CLR_TX);
++	while ((rd32(b, BTIF_LSR_OFF) & BTIF_LSR_DR) && drained < 4096) {
++		(void)rd32(b, BTIF_THR_OFF);                    /* RBR */
++		drained++;
++	}
++	printf("SWEET CONN: BTIF drained %u stale bytes, LSR %#x\n", drained, rd32(b, BTIF_LSR_OFF));
++	for (unsigned i = 0; i < cmdlen; i++) {
++		if (!btif_wait_lsr(b, BTIF_LSR_THRE, 100)) {
++			printf("SWEET CONN: BTIF TX stuck at byte %u, LSR %#x\n", i, rd32(b, BTIF_LSR_OFF));
++			goto restore;
++		}
++		wr32(b, BTIF_THR_OFF, cmd[i]);
++	}
++	(void)btif_wait_lsr(b, BTIF_LSR_TEMT, 100);
++	printf("SWEET CONN: BTIF sent %u bytes, LSR %#x\n", cmdlen, rd32(b, BTIF_LSR_OFF));
++	/* collect the answer: stop after 300 ms of silence or 1 s in total */
++	for (unsigned quiet = 0, total = 0; n < sizeof(rx) && quiet < 300 && total < 1000; total++) {
++		if (btif_wait_lsr(b, BTIF_LSR_DR, 1)) {
++			while ((rd32(b, BTIF_LSR_OFF) & BTIF_LSR_DR) && n < sizeof(rx)) {
++				rx[n++] = (uint8_t)rd32(b, BTIF_THR_OFF);
++			}
++			quiet = 0;
++		} else {
++			quiet++;
++		}
++	}
++	printf("SWEET CONN: BTIF received %u bytes:", n);
++	for (unsigned i = 0; i < n; i++) {
++		printf(" %02x", rx[i]);
++	}
++	printf("\n");
++	if (n >= 10 && rx[0] == 0x02 && rx[1] == 0x04 && rx[5] == 0x04) {
++		printf("SWEET CONN: WMT link OK, STP options %02x %02x %02x %02x\n", rx[6], rx[7], rx[8], rx[9]);
++	}
++restore:
++	wr32(b, BTIF_DMA_EN_OFF, dma_en);
++	wr32(b, BTIF_IER_OFF, ier);
++	wr32(b, BTIF_SLEEP_EN_OFF, sleep);
++}
++
+ static void
+ conn_thread(void *arg, wait_result_t result)
+ {
+@@ -183,6 +273,10 @@
+ 	conn_dump("BTIF", BTIF_PA, 0x40);
+ 	conn_dump("BTIF TX DMA", BTIF_DMA_PA, 0x40);
+ 	conn_dump("BTIF RX DMA", BTIF_DMA_RX_PA, 0x40);
++	if (mode >= 5) {
++		static const uint8_t wmt_query_stp[] = { 0x01, 0x04, 0x01, 0x00, 0x04 };
++		conn_btif_wmt(wmt_query_stp, sizeof(wmt_query_stp));
++	}
+ out_restore:
+ 	if (infra) {
+ 		wr32(infra, AP2CONN_OSC_EN, osc_saved);
