@@ -1,0 +1,249 @@
+Subject: mt6768: sweetgpu= Mali-G52 identity dump and power-up test (GPU powered by lamu_gpu.ko on Linux)
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 5a21888..1671067 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_conn.c			standard
++bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+new file mode 100644
+index 0000000..03c575c
+--- /dev/null
++++ b/bsd/dev/sweet_gpu.c
+@@ -0,0 +1,209 @@
++/*
++ * Moto G05 (MT6768 "lamu") Mali-G52 MC2 bring-up, step 1.
++ *
++ * Linux (module lamu_gpu.ko, run before the jump) powers the GPU with the vendor sequence and keeps
++ * the MFG power domains up. This file only talks to the GPU registers: it checks the SPM power
++ * status of the four MFG domains first (reading the GPU block while it is unpowered hangs the bus),
++ * then dumps the identity registers (Linux read GPU_ID 0x74021000 = Mali-G52 r1p0, 3 shader mask bits
++ * 0x3, 1 tiler, 1 L2, 8 address spaces, 3 job slots).
++ *
++ * Boot-args: sweetgpu=0 (default, off) | 1 (identity dump) |
++ *            2 (also soft-reset the GPU and power L2, tiler and shader cores up and down, bounded waits),
++ *            sweetgpudelay=<s> (default 30).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++void sweet_gpu_init(void);
++
++#define SPM_PA            0x10006000u
++#define SPM_PWR_STATUS    0x180u
++#define SPM_PWR_STATUS_2  0x184u
++#define MFG_DOMAINS       ((1u << 11) | (1u << 12) | (1u << 13) | (1u << 14))   /* MFG, CORE0, CORE1, ASYNC */
++#define MFGCFG_PA         0x13000000u
++#define GPU_PA            0x13040000u
++
++#define GPU_ID            0x000u
++#define GPU_IRQ_RAWSTAT   0x020u
++#define GPU_IRQ_CLEAR     0x024u
++#define GPU_IRQ_MASK      0x028u
++#define GPU_STATUS        0x034u
++#define GPU_COMMAND       0x030u
++#define SHADER_PRESENT    0x100u
++#define TILER_PRESENT     0x110u
++#define L2_PRESENT        0x120u
++#define SHADER_READY      0x140u
++#define TILER_READY       0x150u
++#define L2_READY          0x160u
++#define SHADER_PWRON      0x180u
++#define TILER_PWRON       0x190u
++#define L2_PWRON          0x1a0u
++#define SHADER_PWROFF     0x1c0u
++#define TILER_PWROFF      0x1d0u
++#define L2_PWROFF         0x1e0u
++#define SHADER_PWRTRANS   0x200u
++#define TILER_PWRTRANS    0x210u
++#define L2_PWRTRANS       0x220u
++#define CMD_SOFT_RESET    1u
++#define IRQ_RESET_DONE    (1u << 8)
++
++static int gpu_sleep_chan;
++static bool gpu_started;
++
++static inline uint32_t
++rd32(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static inline void
++wr32(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++gpu_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&gpu_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* Wait until (reg & mask) == want; up to ms milliseconds. */
++static bool
++gpu_poll(vm_offset_t g, uint32_t off, uint32_t mask, uint32_t want, unsigned ms)
++{
++	for (unsigned i = 0; i < ms; i++) {
++		if ((rd32(g, off) & mask) == want) {
++			return true;
++		}
++		gpu_wait(1);
++	}
++	return (rd32(g, off) & mask) == want;
++}
++
++static void
++gpu_dump(vm_offset_t g)
++{
++	static const uint32_t offs[] = {
++		0x000, 0x004, 0x00c, 0x010, 0x014, 0x018, 0x01c, 0x020, 0x028, 0x034, 0x0a0, 0x0a4, 0x0a8, 0x0ac,
++		0x0b0, 0x0b4, 0x0c0, 0x100, 0x110, 0x120, 0x140, 0x150, 0x160, 0x200, 0x210, 0x220,
++	};
++
++	for (unsigned i = 0; i < sizeof(offs) / sizeof(offs[0]); i++) {
++		printf("SWEET GPU: +%#05x = %#010x\n", offs[i], rd32(g, offs[i]));
++	}
++}
++
++/* Power one block on and wait for READY; then report. */
++static bool
++gpu_power(vm_offset_t g, const char *name, uint32_t pwron, uint32_t ready, uint32_t trans, uint32_t mask)
++{
++	wr32(g, pwron, mask);
++	bool ok = gpu_poll(g, ready, mask, mask, 100) && gpu_poll(g, trans, mask, 0, 100);
++	printf("SWEET GPU: %s power on %#x -> ready %#x trans %#x %s\n", name, mask, rd32(g, ready), rd32(g, trans),
++	    ok ? "OK" : "FAILED");
++	return ok;
++}
++
++static void
++gpu_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 30;
++	int mode = 0;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("sweetgpu", &mode, sizeof(mode));
++	(void)PE_parse_boot_argn("sweetgpudelay", &delay_s, sizeof(delay_s));
++	printf("SWEET GPU: probe mode %d, starting in %u s\n", mode, delay_s);
++	gpu_wait(delay_s * 1000u);
++
++	vm_offset_t spm = ml_io_map(SPM_PA, 0x1000);
++	if (!spm) {
++		printf("SWEET GPU: SPM mapping failed\n");
++		goto out;
++	}
++	uint32_t st = rd32(spm, SPM_PWR_STATUS), st2 = rd32(spm, SPM_PWR_STATUS_2);
++	printf("SWEET GPU: PWR_STATUS %#010x 2ND %#010x -> MFG %d CORE0 %d CORE1 %d ASYNC %d\n", st, st2,
++	    !!(st & (1u << 11)), !!(st & (1u << 12)), !!(st & (1u << 13)), !!(st & (1u << 14)));
++	if ((st & MFG_DOMAINS) != MFG_DOMAINS || (st2 & MFG_DOMAINS) != MFG_DOMAINS) {
++		printf("SWEET GPU: the MFG domains are not all powered, not touching the GPU registers "
++		    "(run lamu_gpu.ko on Linux before the jump)\n");
++		goto out;
++	}
++	vm_offset_t g = ml_io_map(GPU_PA, 0x4000);
++	if (!g) {
++		printf("SWEET GPU: GPU mapping failed\n");
++		goto out;
++	}
++	uint32_t id = rd32(g, GPU_ID);
++	printf("SWEET GPU: GPU_ID %#010x (%s)\n", id, (id >> 16) == 0x7402 ? "Mali-G52, as on Linux" : "unexpected");
++	gpu_dump(g);
++	if (mode < 2 || (id >> 16) != 0x7402) {
++		goto out;
++	}
++	/* Soft reset, then bring the blocks up one by one with bounded waits. */
++	wr32(g, GPU_IRQ_CLEAR, 0xffffffffu);
++	wr32(g, GPU_COMMAND, CMD_SOFT_RESET);
++	bool reset = gpu_poll(g, GPU_IRQ_RAWSTAT, IRQ_RESET_DONE, IRQ_RESET_DONE, 500);
++	printf("SWEET GPU: soft reset %s (rawstat %#x status %#x)\n", reset ? "done" : "TIMED OUT",
++	    rd32(g, GPU_IRQ_RAWSTAT), rd32(g, GPU_STATUS));
++	wr32(g, GPU_IRQ_CLEAR, 0xffffffffu);
++	if (!reset) {
++		goto out;
++	}
++	uint32_t l2 = rd32(g, L2_PRESENT), tiler = rd32(g, TILER_PRESENT), sh = rd32(g, SHADER_PRESENT);
++	bool ok = gpu_power(g, "L2", L2_PWRON, L2_READY, L2_PWRTRANS, l2);
++	ok = ok && gpu_power(g, "tiler", TILER_PWRON, TILER_READY, TILER_PWRTRANS, tiler);
++	ok = ok && gpu_power(g, "shaders", SHADER_PWRON, SHADER_READY, SHADER_PWRTRANS, sh);
++	printf("SWEET GPU: power sequence %s, GPU_STATUS %#x\n", ok ? "OK" : "FAILED", rd32(g, GPU_STATUS));
++	/* leave it as it was found: off */
++	wr32(g, SHADER_PWROFF, sh);
++	wr32(g, TILER_PWROFF, tiler);
++	(void)gpu_poll(g, SHADER_READY, sh, 0, 100);
++	(void)gpu_poll(g, TILER_READY, tiler, 0, 100);
++	wr32(g, L2_PWROFF, l2);
++	(void)gpu_poll(g, L2_READY, l2, 0, 100);
++	printf("SWEET GPU: powered back down: shader %#x tiler %#x l2 %#x ready\n", rd32(g, SHADER_READY),
++	    rd32(g, TILER_READY), rd32(g, L2_READY));
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_gpu_init(void)
++{
++	int mode = 0;
++	thread_t thread;
++	if (gpu_started) {
++		return;
++	}
++	gpu_started = true;
++	(void)PE_parse_boot_argn("sweetgpu", &mode, sizeof(mode));
++	if (mode <= 0) {
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(gpu_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET GPU: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index c485bed..6b8d3ad 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -47,6 +47,7 @@ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_conn_init(void);
++extern void sweet_gpu_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ 
+@@ -1072,6 +1073,7 @@ sweet_ufs_init(void)
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_conn_init();
++	sweet_gpu_init();
+ 	/* MT6768: the Qualcomm keys/touch/usb drivers would hit unmapped buses; not started. */
+ 	return 0;
+ }
