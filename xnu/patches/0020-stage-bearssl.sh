@@ -6,11 +6,30 @@ set -euo pipefail
 bearssl_sha=7bea48e5e850ab4cafbe68d3765cdaba13a86d6f
 bearssl_tmp=$(mktemp -d)
 trap 'rm -rf "$bearssl_tmp"' EXIT
-git init -q "$bearssl_tmp"
-git -C "$bearssl_tmp" fetch -q --depth 1 \
-    https://www.bearssl.org/git/BearSSL "$bearssl_sha"
-git -C "$bearssl_tmp" checkout -q FETCH_HEAD
-[[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+vendored="${GITHUB_WORKSPACE:-/nonexistent}/xnu/vendor/BearSSL"
+if [[ -f "$vendored/src/inner.h" && -f "$vendored/LICENSE.txt" ]]; then
+    # a copy of the pinned commit kept in this repository: no network needed
+    echo "Using the BearSSL copy in xnu/vendor/BearSSL"
+    cp -R "$vendored"/. "$bearssl_tmp"/
+else
+    git init -q "$bearssl_tmp"
+    # bearssl.org is a small server that now and then answers 502, so the GitHub copy (status-im/BearSSL,
+    # which holds the same upstream commit) comes first. The pinned commit hash is checked below.
+    fetched=0
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        for url in https://github.com/status-im/BearSSL https://www.bearssl.org/git/BearSSL; do
+            if git -C "$bearssl_tmp" fetch -q --depth 1 "$url" "$bearssl_sha"; then
+                fetched=1
+                break 2
+            fi
+        done
+        echo "BearSSL fetch failed (attempt $attempt/10), retrying in $((attempt * 15)) s" >&2
+        sleep $((attempt * 15))
+    done
+    [[ $fetched == 1 ]] || { echo "BearSSL: server unreachable (put a copy in xnu/vendor/BearSSL)" >&2; exit 1; }
+    git -C "$bearssl_tmp" checkout -q FETCH_HEAD
+    [[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+fi
 python3 - "$bearssl_tmp" <<'PY'
 from pathlib import Path
 import shutil
