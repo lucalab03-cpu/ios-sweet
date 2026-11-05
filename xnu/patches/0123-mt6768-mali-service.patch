@@ -285,10 +285,10 @@ index c56a008..94a5bfb 100644
  static void
 diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
 new file mode 100644
-index 0000000..6d34239
+index 0000000..d8faa61
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,483 @@
 +/*
 + * SweetMali: the Mali-G52 of the Moto G05 for programs to draw with.
 + *
@@ -315,6 +315,7 @@ index 0000000..6d34239
 +#include <IOKit/IOLocks.h>
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOService.h>
++#include <IOKit/IOPlatformExpert.h>
 +#include <IOKit/IOUserClient.h>
 +#include <IOKit/IOBufferMemoryDescriptor.h>
 +#include <mach/vm_param.h>
