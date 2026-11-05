@@ -285,10 +285,10 @@ index c56a008..94a5bfb 100644
  static void
 diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
 new file mode 100644
-index 0000000..d8faa61
+index 0000000..0081970
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,483 @@
+@@ -0,0 +1,494 @@
 +/*
 + * SweetMali: the Mali-G52 of the Moto G05 for programs to draw with.
 + *
@@ -467,6 +467,7 @@ index 0000000..d8faa61
 +	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 +	virtual void free(void) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn exportObjectToClient(task_t task, LIBKERN_CONSUMED OSObject * obj, io_object_t * clientObj) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
 +	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
 +};
@@ -643,6 +644,16 @@ index 0000000..d8faa61
 +		fSyncobjs = NULL;
 +	}
 +	IOUserClient::free();
++}
++
++/* Nothing is handed to programs as an object: defined here so the vtable does not name the base's, whose symbol this build's headers spell differently. */
++IOReturn
++SweetMaliUserClient::exportObjectToClient(task_t, OSObject * obj, io_object_t *)
++{
++	if (obj != NULL) {
++		obj->release();
++	}
++	return kIOReturnUnsupported;
 +}
 +
 +IOReturn
