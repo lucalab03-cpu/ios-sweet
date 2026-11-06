@@ -83,9 +83,19 @@ main(void)
 	logfile = fopen("/var/tmp/malitest.log", "a");
 	say("start, pid %d", getpid());
 
-	service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetMali"));
+	/* the kernel brings the GPU up some 30 s after boot (sweetmali=3) and only then publishes the service */
+	service = 0;
+	for (int tries = 0; tries < 150 && !service; tries++) {
+		service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetMali"));
+		if (!service) {
+			if (tries % 10 == 0) {
+				say("waiting for the SweetMali service (%d s)", tries * 2);
+			}
+			sleep(2);
+		}
+	}
 	if (!service) {
-		say("FAIL: no SweetMali service (boot with sweetmali=3)");
+		say("FAIL: no SweetMali service after 300 s (boot with sweetmali=3)");
 		return 1;
 	}
 	kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
