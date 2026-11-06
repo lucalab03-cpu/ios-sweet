@@ -1,0 +1,19 @@
+name: malitest
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          cd tools/malitest
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 malitest.c -framework IOKit -o malitest
+          codesign -s - --force malitest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: malitest
+          path: |
+            tools/malitest/malitest
+            tools/malitest/com.sweet.malitest.plist
