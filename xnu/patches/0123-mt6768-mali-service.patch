@@ -285,10 +285,10 @@ index c56a008..94a5bfb 100644
  static void
 diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
 new file mode 100644
-index 0000000..0081970
+index 0000000..3d6eef8
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetMali.cpp
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,501 @@
 +/*
 + * SweetMali: the Mali-G52 of the Moto G05 for programs to draw with.
 + *
@@ -301,8 +301,8 @@ index 0000000..0081970
 + * The design and the request numbers follow the HakiOS projects (RedwoodMali of hakios-a32 and
 + * hakios-mt6768; Apple Public Source License 2.0, as this file is), reduced to what a first program
 + * needs: parameters, buffers (made, entered into the GPU's address space, told their address, mapped,
-+ * given back) and job chains. A buffer is wired kernel memory, zero when made and mapped uncached, so
-+ * what the program writes goes to memory where the GPU reads it. A job chain is run to its end before
++ * given back) and job chains. A buffer is wired, cached kernel memory, zero when made; what the program
++ * writes is cleaned to memory before a job, and what the GPU wrote is invalidated after it. A job chain is run to its end before
 + * the call returns, so waiting for a buffer has nothing left to wait for, and the synchronisation
 + * objects Mesa asks about are always signalled. Not here yet: jobs that overlap or are queued, an
 + * address space for each program, interrupts, buffers shared between programs, IOSurfaces as buffers.
@@ -396,6 +396,7 @@ index 0000000..0081970
 +#define SWEET_MALI_BUFFERS      4096
 +#define SWEET_MALI_BUFFER_MAX   (256ull << 20)
 +#define SWEET_MALI_SYNCOBJS     1024
++#define SWEET_MALI_FLUSH_MAX    (8ull << 20)    /* buffers up to this size are cleaned and invalidated around each job */
 +
 +struct sweet_mali_buffer {
 +	IOBufferMemoryDescriptor * memory;
@@ -531,8 +532,14 @@ index 0000000..0081970
 +		IOLog("SweetMali: no handles left\n");
 +		return kIOReturnNoResources;
 +	}
-+	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared |
-+	    kIOMapWriteCombineCache, (vm_size_t) size, PAGE_SIZE);
++	/*
++	 * Ordinary cached memory. Asking for write-combined or uncached made the kernel change the cache
++	 * attributes of every page (vm_object_change_wimg_mode), and that panicked in phystokv_range on this
++	 * board ("illegal PA"). The program's mapping and the kernel's are both cached, so they see the same
++	 * data; what the GPU reads or wrote is made right by cache maintenance around each job (submit()).
++	 */
++	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
++	    (vm_size_t) size, PAGE_SIZE);
 +	if (memory == NULL) {
 +		IOLog("SweetMali: no memory for a buffer of %llu bytes\n", size);
 +		return kIOReturnNoMemory;
@@ -591,7 +598,7 @@ index 0000000..0081970
 +	for (uint32_t i = 0; i < count; i++) {
 +		struct sweet_mali_buffer * b = buffer(handles[i]);
 +
-+		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= (1ull << 20)) {
++		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
 +			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
 +		}
 +	}
@@ -605,7 +612,7 @@ index 0000000..0081970
 +	for (uint32_t i = 0; i < count; i++) {
 +		struct sweet_mali_buffer * b = buffer(handles[i]);
 +
-+		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= (1ull << 20)) {
++		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
 +			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
 +		}
 +	}
@@ -667,7 +674,7 @@ index 0000000..0081970
 +	if (b != NULL) {
 +		b->memory->retain();
 +		*memory = b->memory;
-+		*options = kIOMapInhibitCache;
++		*options = kIOMapDefaultCache;
 +		ret = kIOReturnSuccess;
 +	}
 +	IOLockUnlock(gSweetMaliLock);
