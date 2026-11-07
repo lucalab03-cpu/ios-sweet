@@ -40,7 +40,7 @@ driParseConfigFiles(driOptionCache *cache, const driOptionCache *info, int scree
    (void)applicationName; (void)applicationVersion; (void)engineName; (void)engineVersion;
 }
 
-bool
+unsigned char
 driQueryOptionb(const driOptionCache *cache, const char *name)
 {
    (void)cache; (void)name;
