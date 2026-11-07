@@ -25,14 +25,13 @@ jobs:
             -Dbuildtype=release -Dsweet-ios=true -Dgallium-drivers=panfrost,softpipe \
             -Dvulkan-drivers= -Dllvm=disabled -Dplatforms= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
             -Dgles1=disabled -Dgles2=disabled -Dopengl=true -Dosmesa=true -Dshared-glapi=enabled \
-            -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled -Dvalgrind=disabled \
+            -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled -Dvalgrind=disabled \
             -Dlibunwind=disabled -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dgallium-xa=disabled \
             -Dtools= -Dbuild-tests=false -Dmesa-clc=auto -Dprecomp-compiler=auto \
             || { cat build/meson-logs/meson-log.txt | tail -80; exit 1; }
       - name: Build
         run: |
           cd mesa-25.0.7
-          ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tail -150 || true
           ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib
       - name: Test program and package
         run: |
