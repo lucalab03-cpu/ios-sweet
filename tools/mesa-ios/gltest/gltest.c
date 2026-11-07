@@ -10,6 +10,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <mach/mach.h>
+
+typedef mach_port_t io_object_t;
+extern const mach_port_t kIOMasterPortDefault;
+extern void *IOServiceMatching(const char *name);
+extern io_object_t IOServiceGetMatchingService(mach_port_t, void *matching);
+extern kern_return_t IOObjectRelease(io_object_t);
 
 #define W 256
 #define H 256
@@ -53,6 +60,32 @@ main(int argc, char **argv)
 	uint32_t centre, corner;
 
 	logf_ = fopen("/var/tmp/gltest.log", "w");
+	/* the GPU service appears a while after boot; and malitest (if it runs) uses the GPU first */
+	for (int i = 0; i < 150; i++) {
+		io_object_t service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetMali"));
+		if (service) {
+			IOObjectRelease(service);
+			break;
+		}
+		sleep(2);
+	}
+	for (int i = 0; i < 150; i++) {
+		FILE *m = fopen("/var/tmp/malitest.log", "r");
+		char buf[4096];
+		size_t n;
+		int done = 0;
+		if (!m)
+			break;
+		while ((n = fread(buf, 1, sizeof(buf) - 1, m)) > 0) {
+			buf[n] = 0;
+			if (strstr(buf, "RESULT"))
+				done = 1;
+		}
+		fclose(m);
+		if (done)
+			break;
+		sleep(2);
+	}
 	say("gltest: start, library %s\n", path);
 	lib = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
 	if (!lib) {
@@ -85,6 +118,8 @@ main(int argc, char **argv)
 
 	say("gltest: renderer: %s\n", getstr(GL_RENDERER));
 	say("gltest: version: %s\n", getstr(GL_VERSION));
+	if (strstr((const char *)getstr(GL_RENDERER), "softpipe"))
+		say("gltest: WARNING the software renderer is in use, not the GPU\n");
 	viewport(0, 0, W, H);
 	clearcolor(0.f, 0.f, 1.f, 1.f);
 	clear(GL_COLOR_BUFFER_BIT);
