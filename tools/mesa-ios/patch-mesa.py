@@ -96,6 +96,11 @@ wr('src/panfrost/lib/kmod/pan_kmod.h', s)
 sub_once('meson.build', "sweet_ios = host_machine.system() == 'darwin' and get_option('sweet-ios')\n",
 "sweet_ios = host_machine.system() == 'darwin' and get_option('sweet-ios')\nif sweet_ios\n  add_project_arguments('-DSWEET_IOS', language : ['c', 'cpp'])\nendif\n")
 
+# 4b. and its unmapping
+sub_once('src/gallium/drivers/panfrost/pan_bo.c',
+"   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n",
+"#ifdef SWEET_IOS\n   if (sweet_drm_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#else\n   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#endif\n")
+
 # 5. the osmesa target: panfrost's screen, software rendering as the fallback
 shutil.copy(os.path.join(shim, "osmesa/sweet_winsys.c"), os.path.join(mesa, "src/gallium/targets/osmesa/sweet_winsys.c"))
 t = rd('src/gallium/targets/osmesa/osmesa_target.c')

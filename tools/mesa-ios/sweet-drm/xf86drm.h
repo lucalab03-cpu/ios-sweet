@@ -71,6 +71,7 @@ int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
  * patched to call it). `offset` is what the MMAP_BO request answered: the buffer's handle << 12.
  */
 void *sweet_drm_mmap(size_t size, uint64_t offset);
+int sweet_drm_munmap(void *address, size_t size);
 
 #ifdef __cplusplus
 }

@@ -40,6 +40,43 @@ extern kern_return_t IOConnectMapMemory64(io_connect_t, uint32_t type, task_t, m
 #define SWEET_RETURN_NOT_FOUND  0xe00002f0u
 #define SWEET_RETURN_UNSUPPORTED 0xe00002c7u
 
+extern kern_return_t IOConnectUnmapMemory64(io_connect_t, uint32_t type, task_t, mach_vm_address_t address);
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <sys/stat.h>
+
+/* A short trace of what Mesa asks of the GPU: lines on the console (so they reach the kernel log) and in a file. */
+static int trace_lines;
+static void
+trace(const char *fmt, ...)
+{
+	char line[200];
+	va_list ap;
+	int n;
+
+	if (trace_lines >= 400) {
+		return;
+	}
+	trace_lines++;
+	va_start(ap, fmt);
+	n = vsnprintf(line, sizeof(line) - 1, fmt, ap);
+	va_end(ap);
+	if (n <= 0) {
+		return;
+	}
+	if (n > (int)sizeof(line) - 2) {
+		n = (int)sizeof(line) - 2;
+	}
+	line[n++] = '\n';
+	(void)write(2, line, (size_t)n);
+	int f = open("/var/tmp/sweetdrm.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (f >= 0) {
+		(void)write(f, line, (size_t)n);
+		close(f);
+	}
+}
+
 static io_connect_t connection;
 static int connection_fd = -1;
 static pthread_mutex_t open_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -111,9 +148,22 @@ call(unsigned number, void *data, size_t size)
 int
 drmIoctl(int fd, unsigned long request, void *arg)
 {
-	int error = call((unsigned)(request & 0xff), arg, IOCPARM_LEN(request));
+	unsigned number = (unsigned)(request & 0xff);
+	uint32_t before[6] = { 0 };
+	int error;
 
 	(void)fd;
+	if (number == 0x42 || number == 0x40) {
+		memcpy(before, arg, IOCPARM_LEN(request) < sizeof(before) ? IOCPARM_LEN(request) : sizeof(before));
+	}
+	error = call(number, arg, IOCPARM_LEN(request));
+	if (number == 0x42) {
+		const uint32_t *r = arg;
+		trace("sweetdrm: CREATE_BO size %#x flags %#x -> err %d, size %#x handle %u gpu %#x%08x", before[0],
+		    before[1], error, r[0], r[2], r[5], r[4]);
+	} else if (number == 0x40 || error != 0) {
+		trace("sweetdrm: ioctl %#x (%lu bytes) -> err %d", number, (unsigned long)IOCPARM_LEN(request), error);
+	}
 	if (error != 0) {
 		errno = error;
 		return -1;
@@ -182,19 +232,63 @@ drmCloseBufferHandle(int fd, uint32_t handle)
 	return drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &close_request);
 }
 
+#define MAP_TABLE 8192
+static struct { uint64_t address; uint32_t type; } map_table[MAP_TABLE];
+static pthread_mutex_t map_lock = PTHREAD_MUTEX_INITIALIZER;
+
 void *
 sweet_drm_mmap(size_t size, uint64_t offset)
 {
 	mach_vm_address_t address = 0;
 	mach_vm_size_t mapped = 0;
+	uint32_t type = (uint32_t)(offset >> 12);
+	kern_return_t kr;
 
-	(void)size;
-	if (connection == 0 ||
-	    IOConnectMapMemory64(connection, (uint32_t)(offset >> 12), mach_task_self(), &address, &mapped,
-	    SWEET_ANYWHERE) != 0) {
+	if (connection == 0) {
+		return (void *)-1;
+	}
+	kr = IOConnectMapMemory64(connection, type, mach_task_self(), &address, &mapped, SWEET_ANYWHERE);
+	trace("sweetdrm: MMAP handle %u wanted %#zx -> %#x, address %#llx size %#llx", type, size, kr,
+	    (unsigned long long)address, (unsigned long long)mapped);
+	if (kr != 0) {
 		return (void *)-1;              /* mmap()'s MAP_FAILED */
 	}
+	pthread_mutex_lock(&map_lock);
+	for (int i = 0; i < MAP_TABLE; i++) {
+		if (map_table[i].address == 0) {
+			map_table[i].address = address;
+			map_table[i].type = type;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&map_lock);
 	return (void *)(uintptr_t)address;
+}
+
+/* The counterpart: a mapping made by the service is unmapped through the service. */
+int
+sweet_drm_munmap(void *address, size_t size)
+{
+	kern_return_t kr = 0x2c2;
+	uint32_t type = 0;
+	int found = 0;
+
+	(void)size;
+	pthread_mutex_lock(&map_lock);
+	for (int i = 0; i < MAP_TABLE; i++) {
+		if (map_table[i].address == (uint64_t)(uintptr_t)address) {
+			type = map_table[i].type;
+			map_table[i].address = 0;
+			found = 1;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&map_lock);
+	if (found) {
+		kr = IOConnectUnmapMemory64(connection, type, mach_task_self(), (mach_vm_address_t)(uintptr_t)address);
+	}
+	trace("sweetdrm: MUNMAP %p handle %u -> %#x", address, type, kr);
+	return kr == 0 ? 0 : -1;
 }
 
 /* Synchronisation objects: a handle is a number; everything is always signalled. */
