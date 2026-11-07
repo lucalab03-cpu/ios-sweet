@@ -60,8 +60,8 @@ main(int argc, char **argv)
 	uint32_t centre, corner;
 
 	logf_ = fopen("/var/tmp/gltest.log", "w");
-	/* the GPU service appears a while after boot; and malitest (if it runs) uses the GPU first */
-	for (int i = 0; i < 150; i++) {
+	say("gltest: alive\n");
+	for (int i = 0; i < 30; i++) {
 		io_object_t service = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("SweetMali"));
 		if (service) {
 			IOObjectRelease(service);
@@ -69,23 +69,7 @@ main(int argc, char **argv)
 		}
 		sleep(2);
 	}
-	for (int i = 0; i < 150; i++) {
-		FILE *m = fopen("/var/tmp/malitest.log", "r");
-		char buf[4096];
-		size_t n;
-		int done = 0;
-		if (!m)
-			break;
-		while ((n = fread(buf, 1, sizeof(buf) - 1, m)) > 0) {
-			buf[n] = 0;
-			if (strstr(buf, "RESULT"))
-				done = 1;
-		}
-		fclose(m);
-		if (done)
-			break;
-		sleep(2);
-	}
+	say("gltest: service seen\n");
 	say("gltest: start, library %s\n", path);
 	lib = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
 	if (!lib) {
@@ -99,6 +83,7 @@ main(int argc, char **argv)
 		say("gltest: OSMesa symbols missing\n");
 		return 2;
 	}
+	say("gltest: creating the context\n");
 	ctx = create(OSMESA_RGBA, 0, 0, 0, NULL);
 	if (!ctx || !current(ctx, pixels, GL_UNSIGNED_BYTE, W, H)) {
 		say("gltest: no OSMesa context\n");
@@ -120,6 +105,7 @@ main(int argc, char **argv)
 	say("gltest: version: %s\n", getstr(GL_VERSION));
 	if (strstr((const char *)getstr(GL_RENDERER), "softpipe"))
 		say("gltest: WARNING the software renderer is in use, not the GPU\n");
+	say("gltest: drawing\n");
 	viewport(0, 0, W, H);
 	clearcolor(0.f, 0.f, 1.f, 1.f);
 	clear(GL_COLOR_BUFFER_BIT);
@@ -129,6 +115,7 @@ main(int argc, char **argv)
 	color3f(1.f, 1.f, 1.f); vertex2f(0.f, 0.8f);
 	end();
 	finish();
+	say("gltest: finished, reading back\n");
 	memset(pixels, 0, sizeof(pixels));
 	readpixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	centre = pixels[(H / 2) * W + W / 2];
