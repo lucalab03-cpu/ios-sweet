@@ -36,12 +36,15 @@ jobs:
       - name: Test program and package
         run: |
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/mesa-ios/gltest/gltest.c -framework IOKit -o gltest
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetboot/sweet-boot.c -o sweet-boot
           mkdir -p out/usr/local/lib out/usr/local/bin
+          cp sweet-boot out/usr/local/bin/
+          cp tools/sweetboot/pack-dropbox.py out/
           cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
           cp gltest out/usr/local/bin/
           install_name_tool -id /usr/local/lib/libOSMesa.8.dylib out/usr/local/lib/libOSMesa.8.dylib
           otool -L out/usr/local/lib/libOSMesa.8.dylib
-          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest
+          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest out/usr/local/bin/sweet-boot
           ls -l out/usr/local/lib out/usr/local/bin
       - uses: actions/upload-artifact@v4
         with:
