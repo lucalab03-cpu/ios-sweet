@@ -1,0 +1,50 @@
+name: mesa-ios
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install meson ninja bison flex pkg-config python-setuptools
+          pip3 install --break-system-packages mako pyyaml packaging || pip3 install mako pyyaml packaging
+          echo "/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+      - name: Mesa 25.0.7
+        run: |
+          curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
+          echo "592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6  mesa.tar.xz" | shasum -a 256 -c
+          tar xJf mesa.tar.xz
+          python3 -I tools/mesa-ios/patch-mesa.py "$PWD/mesa-25.0.7" "$PWD/tools/mesa-ios"
+      - name: Configure
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          cd mesa-25.0.7
+          meson setup build --cross-file ../tools/mesa-ios/ios.cross --prefix /usr/local \
+            -Dbuildtype=release -Dsweet-ios=true -Dgallium-drivers=panfrost,softpipe \
+            -Dvulkan-drivers= -Dllvm=disabled -Dplatforms= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+            -Dgles1=disabled -Dgles2=disabled -Dopengl=true -Dosmesa=true -Dshared-glapi=enabled \
+            -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled -Dvalgrind=disabled \
+            -Dlibunwind=disabled -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dgallium-xa=disabled \
+            -Dtools= -Dbuild-tests=false -Dmesa-clc=auto -Dprecomp-compiler=auto \
+            || { cat build/meson-logs/meson-log.txt | tail -80; exit 1; }
+      - name: Build
+        run: |
+          cd mesa-25.0.7
+          ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tail -150 || true
+          ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib
+      - name: Test program and package
+        run: |
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/mesa-ios/gltest/gltest.c -o gltest
+          mkdir -p out/usr/local/lib out/usr/local/bin
+          cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
+          cp gltest out/usr/local/bin/
+          install_name_tool -id /usr/local/lib/libOSMesa.8.dylib out/usr/local/lib/libOSMesa.8.dylib
+          otool -L out/usr/local/lib/libOSMesa.8.dylib
+          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest
+          ls -l out/usr/local/lib out/usr/local/bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesa-ios
+          path: out
