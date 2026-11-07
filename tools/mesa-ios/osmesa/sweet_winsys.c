@@ -1,4 +1,6 @@
 /* In place of winsys/panfrost/drm: the screen of the one GPU, opened through the SweetMali shim. */
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,4 +28,28 @@ sweet_panfrost_screen(void)
    if (screen == NULL)
       close(fd);
    return screen;
+}
+
+/* Mesa is built without its XML configuration (no expat): panfrost's options all keep their defaults. */
+void
+driParseConfigFiles(driOptionCache *cache, const driOptionCache *info, int screenNum, const char *driverName,
+    const char *kernelDriverName, const char *deviceName, const char *applicationName,
+    uint32_t applicationVersion, const char *engineName, uint32_t engineVersion)
+{
+   (void)cache; (void)info; (void)screenNum; (void)driverName; (void)kernelDriverName; (void)deviceName;
+   (void)applicationName; (void)applicationVersion; (void)engineName; (void)engineVersion;
+}
+
+bool
+driQueryOptionb(const driOptionCache *cache, const char *name)
+{
+   (void)cache; (void)name;
+   return false;
+}
+
+int
+driQueryOptioni(const driOptionCache *cache, const char *name)
+{
+   (void)cache; (void)name;
+   return 0;
 }
