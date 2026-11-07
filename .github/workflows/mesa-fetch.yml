@@ -1,0 +1,29 @@
+name: mesa-fetch
+on:
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Mesa 25.0.7 and pack the parts to read
+        run: |
+          set -e
+          curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
+          echo "592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6  mesa.tar.xz" | sha256sum -c
+          tar xJf mesa.tar.xz
+          cd mesa-25.0.7
+          list=""
+          for p in meson.build meson_options.txt VERSION src/meson.build src/gallium/meson.build \
+              src/panfrost src/gallium/drivers/panfrost src/gallium/targets/osmesa \
+              src/gallium/frontends/osmesa src/gallium/auxiliary/renderonly src/gallium/winsys/sw/null \
+              src/util/os_file.c src/util/os_misc.c src/util/os_mman.h src/util/meson.build \
+              include/drm-uapi/panfrost_drm.h include/drm-uapi/drm.h include/drm-uapi/drm_mode.h \
+              include/drm-uapi/drm_fourcc.h; do
+            if [ -e "$p" ]; then list="$list $p"; else echo "missing: $p"; fi
+          done
+          tar czf ../mesa-parts.tgz $list
+          ls -l ../mesa-parts.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesa-parts
+          path: mesa-parts.tgz
