@@ -1,0 +1,21 @@
+[binaries]
+c = ['xcrun', '--sdk', 'iphoneos', 'clang', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+cpp = ['xcrun', '--sdk', 'iphoneos', 'clang++', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+objc = ['xcrun', '--sdk', 'iphoneos', 'clang', '-arch', 'arm64', '-miphoneos-version-min=16.0']
+ar = 'ar'
+strip = 'strip'
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'darwin'
+subsystem = 'ios'
+kernel = 'xnu'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+
+[built-in options]
+c_args = ['-isysroot', '/Applications/Xcode_16.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+c_link_args = ['-isysroot', '/Applications/Xcode_16.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+cpp_args = ['-isysroot', '/Applications/Xcode_16.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+cpp_link_args = ['-isysroot', '/Applications/Xcode_16.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
