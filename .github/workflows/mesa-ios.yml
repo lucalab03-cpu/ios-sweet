@@ -35,7 +35,7 @@ jobs:
           ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib
       - name: Test program and package
         run: |
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/mesa-ios/gltest/gltest.c -o gltest
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/mesa-ios/gltest/gltest.c -framework IOKit -o gltest
           mkdir -p out/usr/local/lib out/usr/local/bin
           cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
           cp gltest out/usr/local/bin/
