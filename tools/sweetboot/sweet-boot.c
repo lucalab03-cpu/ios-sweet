@@ -20,6 +20,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include <signal.h>
+#include <dirent.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -27,7 +30,10 @@ extern char **environ;
 #define DROPBOX "/var/sweet/dropbox.bin"
 #define APPLIED "/var/sweet/applied.gen"
 #define LIST    "/usr/local/etc/sweet-boot.list"
-#define MAXPAYLOAD (240ull << 20)
+#define MAXPAYLOAD (100ull << 20)
+#define OUTBOX_OFFSET (128ull << 20)
+#define OUTBOX_MAX (32ull << 20)
+#define PROGRAM_TIMEOUT 420
 
 static void
 say(const char *fmt, ...)
@@ -74,6 +80,79 @@ read_all(int fd, uint8_t *buf, size_t len)
 		done += (size_t)n;
 	}
 	return 0;
+}
+
+
+/*
+ * The outbox: the second half of the dropbox file. Every few seconds the logs in /var/tmp are copied there,
+ * so that they can be read from Android (raw blocks) without a 50 minute image read. Header: "SWOUT001",
+ * u64 length, then the text.
+ */
+static void
+write_outbox(void)
+{
+	static char buf[OUTBOX_MAX];
+	size_t n = 16;
+	DIR *d = opendir("/var/tmp");
+	struct dirent *e;
+	int fd;
+
+	if (!d) {
+		return;
+	}
+	while ((e = readdir(d)) != NULL) {
+		char path[300];
+		int in;
+		size_t room;
+		ssize_t got;
+
+		if (strncmp(e->d_name, "malitest", 8) && strncmp(e->d_name, "gltest", 6) && strncmp(e->d_name, "sweet", 5)) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "/var/tmp/%s", e->d_name);
+		in = open(path, O_RDONLY);
+		if (in < 0) {
+			continue;
+		}
+		room = sizeof(buf) - n;
+		n += (size_t)snprintf(buf + n, room, "\n===== %s =====\n", e->d_name);
+		room = sizeof(buf) - n;
+		/* the end of a long file is what matters */
+		off_t size = lseek(in, 0, SEEK_END);
+		off_t start = size > (off_t)(room / 2) ? size - (off_t)(room / 2) : 0;
+		got = pread(in, buf + n, room / 2, start);
+		if (got > 0) {
+			n += (size_t)got;
+		}
+		close(in);
+	}
+	closedir(d);
+	memcpy(buf, "SWOUT001", 8);
+	uint64_t len = n - 16;
+	memcpy(buf + 8, &len, 8);
+	fd = open(DROPBOX, O_WRONLY);
+	if (fd >= 0) {
+		size_t total = (n + 4095) & ~(size_t)4095;
+		if (total > sizeof(buf)) {
+			total = sizeof(buf);
+		}
+		memset(buf + n, 0, total - n);
+		if (pwrite(fd, buf, total, OUTBOX_OFFSET) == (ssize_t)total) {
+			fsync(fd);
+		}
+		close(fd);
+	}
+}
+
+static void *
+outbox_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		write_outbox();
+		sleep(10);
+	}
+	return NULL;
 }
 
 static void
@@ -209,8 +288,20 @@ run_list(void)
 			say("SWEETBOOT: cannot start %s\n", line);
 			continue;
 		}
-		waitpid(pid, &status, 0);
-		say("SWEETBOOT: %s finished, status %d\n", line, status);
+		for (int t = 0;; t++) {
+			pid_t r = waitpid(pid, &status, WNOHANG);
+			if (r == pid) {
+				say("SWEETBOOT: %s finished, status %d\n", line, status);
+				break;
+			}
+			if (t >= PROGRAM_TIMEOUT) {
+				say("SWEETBOOT: %s did not finish in %d s, killed\n", line, PROGRAM_TIMEOUT);
+				kill(pid, SIGKILL);
+				waitpid(pid, &status, 0);
+				break;
+			}
+			sleep(1);
+		}
 	}
 	fclose(f);
 }
@@ -218,9 +309,14 @@ run_list(void)
 int
 main(void)
 {
+	pthread_t th;
+
 	say("SWEETBOOT: start\n");
 	apply_dropbox();
+	pthread_create(&th, NULL, outbox_thread, NULL);
 	run_list();
 	say("SWEETBOOT: done\n");
+	write_outbox();
+	sleep(100000);          /* keeps the outbox thread going */
 	return 0;
 }
