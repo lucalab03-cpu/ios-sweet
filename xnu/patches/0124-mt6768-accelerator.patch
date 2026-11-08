@@ -1,7 +1,7 @@
 diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
 --- a/iokit/Kernel/arm/SweetAccel.cpp	1970-01-01 01:00:00.000000000 +0100
-+++ b/iokit/Kernel/arm/SweetAccel.cpp	2026-11-08 11:57:54.005743531 +0100
-@@ -0,0 +1,185 @@
++++ b/iokit/Kernel/arm/SweetAccel.cpp	2026-11-08 15:01:39.160895677 +0100
+@@ -0,0 +1,186 @@
 +/*
 + * SweetAccel: a graphics accelerator that iOS can find, and that says what it is asked.
 + *
@@ -19,6 +19,7 @@ diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOService.h>
++#include <IOKit/IOPlatformExpert.h>
 +#include <IOKit/IOUserClient.h>
 +#include <pexpert/pexpert.h>
 +#include <sys/proc.h>
@@ -188,8 +189,8 @@ diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
---- a/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 11:57:53.876032093 +0100
-+++ b/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 11:57:54.005724322 +0100
+--- a/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 15:01:36.454315237 +0100
++++ b/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 15:01:39.160876731 +0100
 @@ -41,6 +41,7 @@
  void sweet_mali_to_memory(const void * start, uint64_t size);
  uint32_t sweet_mali_submit(uint64_t chain, bool fragment);
@@ -207,8 +208,8 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  }
  
 diff -ruN a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
---- a/iokit/conf/files.arm64	2026-11-08 11:57:53.876651827 +0100
-+++ b/iokit/conf/files.arm64	2026-11-08 11:57:54.006876077 +0100
+--- a/iokit/conf/files.arm64	2026-11-08 15:01:36.594315245 +0100
++++ b/iokit/conf/files.arm64	2026-11-08 15:01:39.167126559 +0100
 @@ -17,6 +17,7 @@
  iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
  iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
