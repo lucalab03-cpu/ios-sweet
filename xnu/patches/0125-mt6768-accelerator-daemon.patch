@@ -1,0 +1,411 @@
+diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
+--- a/iokit/Kernel/arm/SweetAccel.cpp	2026-11-08 15:27:02.448397547 +0100
++++ b/iokit/Kernel/arm/SweetAccel.cpp	2026-11-08 15:27:03.672279633 +0100
+@@ -1,5 +1,5 @@
+ /*
+- * SweetAccel: a graphics accelerator that iOS can find, and that says what it is asked.
++ * SweetAccel: a graphics accelerator that iOS can find, and that hands what it is asked to a program.
+  *
+  * backboardd (CoreAnimation's render server) looks for IOAcceleratorES, IOAcceleratorESLegacy and
+  * AGXAccelerator and finds none, so the whole screen is drawn by the CPU. This is the first step of
+@@ -63,8 +63,14 @@
+ 	return true;
+ }
+ 
++/* the daemon's protocol is shared with it: iokit/Kernel/arm/sweetaccel_proto.h */
++
++#include <sys/proc.h>
++#include <stdint.h>
++#include "sweetaccel_proto.h"
++
+ static uint32_t gSweetAccelLogged;      /* log lines written, in all clients */
+-#define SWEET_ACCEL_LOG_MAX 300
++#define SWEET_ACCEL_LOG_MAX 200
+ 
+ #define ACCEL_LOG(fmt, ...) \
+ 	do { \
+@@ -76,12 +82,34 @@
+ 	        } \
+ 	} while (0)
+ 
++/* The queue between the programs' calls and the daemon: a slot is free (0), waiting for the daemon (1),
++ * taken by it (2), answered (3) or given up by the caller (4, the daemon's answer frees it). */
++#define ACC_SLOTS 16
++struct accel_slot {
++	uint32_t state;
++	struct accel_ctrl_req req;
++	struct accel_ctrl_reply rep;
++};
++static struct accel_slot gSlots[ACC_SLOTS];
++static IOLock * gAccelLock;
++static bool gDaemonThere;
++static bool gWaitedForDaemon;
++
++static void
++accel_wait_ms(uint32_t ms)
++{
++	IOSleep(ms);
++}
++
+ class SweetAccelUserClient : public IOUserClient
+ {
+ 	OSDeclareDefaultStructors(SweetAccelUserClient);
+ 
+ 	UInt32 fType;
+ 
++	IOReturn forward(uint32_t selector, uint32_t nsin, const uint64_t * sin, const void * in, uint32_t insize,
++	    uint32_t outwanted, uint32_t nsoutwanted, uint32_t * nsout, uint64_t * sout, void * out, uint32_t * outsize);
++
+ public:
+ 	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+ 	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+@@ -94,6 +122,97 @@
+ };
+ OSDefineMetaClassAndStructors(SweetAccelUserClient, IOUserClient);
+ 
++/* Selectors above 0xff00 are not requests of a program: they are its events (open, close, memory, ...). */
++enum {
++	kEventOpen   = 0xff00,
++	kEventClose  = 0xff01,
++	kEventMemory = 0xff02,
++	kEventTrap   = 0xff03,
++	kEventNotify = 0xff04,
++};
++
++IOReturn
++SweetAccelUserClient::forward(uint32_t selector, uint32_t nsin, const uint64_t * sin, const void * in, uint32_t insize,
++    uint32_t outwanted, uint32_t nsoutwanted, uint32_t * nsout, uint64_t * sout, void * out, uint32_t * outsize)
++{
++	struct accel_slot * s = NULL;
++	uint32_t index = 0;
++	IOReturn result;
++
++	if (gAccelLock == NULL) {
++		return kIOReturnUnsupported;
++	}
++	/* the daemon may start a little after the first request: wait for it once, up to 15 s */
++	if (!gDaemonThere && !gWaitedForDaemon) {
++		for (uint32_t i = 0; i < 1500 && !gDaemonThere; i++) {
++			accel_wait_ms(10);
++		}
++		gWaitedForDaemon = true;
++	}
++	if (!gDaemonThere) {
++		return kIOReturnUnsupported;
++	}
++	IOLockLock(gAccelLock);
++	for (uint32_t i = 0; i < ACC_SLOTS; i++) {
++		if (gSlots[i].state == 0) {
++			s = &gSlots[i];
++			index = i;
++			break;
++		}
++	}
++	if (s == NULL) {
++		IOLockUnlock(gAccelLock);
++		return kIOReturnNoResources;
++	}
++	bzero(&s->req, sizeof(s->req));
++	bzero(&s->rep, sizeof(s->rep));
++	s->req.slot = index;
++	s->req.selector = selector;
++	s->req.type = fType;
++	s->req.pid = (uint32_t)proc_selfpid();
++	s->req.nsin = nsin > ACC_SCALARS ? ACC_SCALARS : nsin;
++	for (uint32_t i = 0; i < s->req.nsin; i++) {
++		s->req.sin[i] = sin[i];
++	}
++	s->req.insize = insize > ACC_MAXIN ? ACC_MAXIN : insize;
++	if (in != NULL && s->req.insize != 0) {
++		bcopy(in, s->req.in, s->req.insize);
++	}
++	s->req.outwanted = outwanted;
++	s->req.pad = nsoutwanted;
++	s->state = 1;
++	IOLockUnlock(gAccelLock);
++
++	for (uint32_t i = 0; i < 20000; i++) {     /* up to 20 s */
++		if (*(volatile uint32_t *)&s->state == 3) {
++			break;
++		}
++		accel_wait_ms(1);
++	}
++	IOLockLock(gAccelLock);
++	if (s->state != 3) {
++		s->state = 4;                           /* the daemon's late answer frees it */
++		IOLockUnlock(gAccelLock);
++		return kIOReturnTimeout;
++	}
++	result = (IOReturn)s->rep.result;
++	if (nsout != NULL) {
++		*nsout = s->rep.nsout > ACC_SCALARS ? ACC_SCALARS : s->rep.nsout;
++		for (uint32_t i = 0; i < *nsout && sout != NULL; i++) {
++			sout[i] = s->rep.sout[i];
++		}
++	}
++	if (outsize != NULL) {
++		*outsize = s->rep.outsize > ACC_MAXIN ? ACC_MAXIN : s->rep.outsize;
++		if (out != NULL && *outsize != 0) {
++			bcopy(s->rep.out, out, *outsize);
++		}
++	}
++	s->state = 0;
++	IOLockUnlock(gAccelLock);
++	return result;
++}
++
+ bool
+ SweetAccelUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type)
+ {
+@@ -102,6 +221,7 @@
+ 	}
+ 	fType = type;
+ 	ACCEL_LOG("opened the accelerator, type %llu\n", (unsigned long long)type);
++	(void)forward(kEventOpen, 0, NULL, NULL, 0, 0, 0, NULL, NULL, NULL, NULL);
+ 	return true;
+ }
+ 
+@@ -109,6 +229,7 @@
+ SweetAccelUserClient::clientClose(void)
+ {
+ 	ACCEL_LOG("closed (type %llu)\n", (unsigned long long)fType);
++	(void)forward(kEventClose, 0, NULL, NULL, 0, 0, 0, NULL, NULL, NULL, NULL);
+ 	terminate();
+ 	return kIOReturnSuccess;
+ }
+@@ -116,39 +237,69 @@
+ IOReturn
+ SweetAccelUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory)
+ {
++	uint64_t sin[1] = { type };
++
+ 	(void)options;
+ 	(void)memory;
+ 	ACCEL_LOG("asks for memory of type %llu\n", (unsigned long long)type);
+-	return kIOReturnUnsupported;
++	(void)forward(kEventMemory, 1, sin, NULL, 0, 0, 0, NULL, NULL, NULL, NULL);
++	return kIOReturnUnsupported;    /* memory is the daemon's next step: it needs buffers from here */
+ }
+ 
+ IOReturn
+ SweetAccelUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
+     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
+ {
++	uint64_t sout[ACC_SCALARS];
++	uint32_t nsout = 0, outsize = 0, outwanted = args->structureOutputSize;
++	uint8_t * out = (uint8_t *)args->structureOutput;
++	IOReturn result;
++
+ 	(void)dispatch;
+ 	(void)target;
+ 	(void)reference;
++	if (args->structureOutputDescriptor != NULL) {
++		out = NULL;     /* large outputs: not carried here yet */
++	}
+ 	ACCEL_LOG("method %llu: scalars in %llu, struct in %llu, scalars out %llu, struct out %llu\n",
+ 	    (unsigned long long)selector, (unsigned long long)args->scalarInputCount,
+ 	    (unsigned long long)args->structureInputSize, (unsigned long long)args->scalarOutputCount,
+ 	    (unsigned long long)args->structureOutputSize);
+-	return kIOReturnUnsupported;
++	result = forward(selector, args->scalarInputCount, args->scalarInput, args->structureInput,
++	    args->structureInputSize, outwanted, args->scalarOutputCount, &nsout, sout, out, &outsize);
++	if (result == kIOReturnSuccess) {
++		for (uint32_t i = 0; i < nsout && i < args->scalarOutputCount; i++) {
++			args->scalarOutput[i] = sout[i];
++		}
++		if (out != NULL) {
++			if (outsize < outwanted) {
++				bzero(out + outsize, outwanted - outsize);
++			}
++			args->structureOutputSize = outwanted;
++		}
++	}
++	return result;
+ }
+ 
+ IOExternalTrap *
+ SweetAccelUserClient::getTargetAndTrapForIndex(IOService ** target, UInt32 index)
+ {
++	uint64_t sin[1] = { index };
++
+ 	(void)target;
+ 	ACCEL_LOG("trap %llu\n", (unsigned long long)index);
++	(void)forward(kEventTrap, 1, sin, NULL, 0, 0, 0, NULL, NULL, NULL, NULL);
+ 	return NULL;
+ }
+ 
+ IOReturn
+ SweetAccelUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon)
+ {
++	uint64_t sin[2] = { type, refCon };
++
+ 	(void)port;
+ 	ACCEL_LOG("notification port, type %llu, ref %llu\n", (unsigned long long)type, (unsigned long long)refCon);
++	(void)forward(kEventNotify, 2, sin, NULL, 0, 0, 0, NULL, NULL, NULL, NULL);
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -160,17 +311,138 @@
+ 	return kIOReturnUnsupported;
+ }
+ 
++/* The daemon's side: a service of its own, so that its calls cannot be mistaken for a program's. */
++class SweetAccelControl : public IOService
++{
++	OSDeclareDefaultStructors(SweetAccelControl);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAccelControl, IOService);
++
++bool
++SweetAccelControl::start(IOService * provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "SweetAccelControlUserClient");
++	setName("SweetAccelControl");
++	registerService();
++	return true;
++}
++
++class SweetAccelControlUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(SweetAccelControlUserClient);
++
++public:
++	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn exportObjectToClient(task_t task, LIBKERN_CONSUMED OSObject * obj, io_object_t * clientObj) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAccelControlUserClient, IOUserClient);
++
++bool
++SweetAccelControlUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	gDaemonThere = true;
++	IOLog("SWEET ACCEL: the daemon is connected\n");
++	return true;
++}
++
++IOReturn
++SweetAccelControlUserClient::clientClose(void)
++{
++	gDaemonThere = false;
++	IOLog("SWEET ACCEL: the daemon left\n");
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetAccelControlUserClient::exportObjectToClient(task_t, LIBKERN_CONSUMED OSObject * obj, io_object_t *)
++{
++	obj->release();
++	return kIOReturnUnsupported;
++}
++
++IOReturn
++SweetAccelControlUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
++{
++	(void)dispatch;
++	(void)target;
++	(void)reference;
++	if (selector == 0) {
++		/* the next request: wait up to 5 s for one */
++		if (args->structureOutput == NULL || args->structureOutputSize < sizeof(struct accel_ctrl_req)) {
++			return kIOReturnBadArgument;
++		}
++		for (uint32_t i = 0; i < 5000; i++) {
++			IOLockLock(gAccelLock);
++			for (uint32_t n = 0; n < ACC_SLOTS; n++) {
++				if (gSlots[n].state == 1) {
++					gSlots[n].state = 2;
++					bcopy(&gSlots[n].req, args->structureOutput, sizeof(struct accel_ctrl_req));
++					args->structureOutputSize = sizeof(struct accel_ctrl_req);
++					IOLockUnlock(gAccelLock);
++					return kIOReturnSuccess;
++				}
++			}
++			IOLockUnlock(gAccelLock);
++			accel_wait_ms(1);
++		}
++		return kIOReturnTimeout;
++	}
++	if (selector == 1) {
++		const struct accel_ctrl_reply * r = (const struct accel_ctrl_reply *)args->structureInput;
++		IOReturn ret = kIOReturnSuccess;
++
++		if (r == NULL || args->structureInputSize < sizeof(*r) || r->slot >= ACC_SLOTS) {
++			return kIOReturnBadArgument;
++		}
++		IOLockLock(gAccelLock);
++		if (gSlots[r->slot].state == 2) {
++			bcopy(r, &gSlots[r->slot].rep, sizeof(*r));
++			gSlots[r->slot].state = 3;
++		} else if (gSlots[r->slot].state == 4) {
++			gSlots[r->slot].state = 0;      /* the caller gave up: nobody waits for this */
++		} else {
++			ret = kIOReturnNotPermitted;
++		}
++		IOLockUnlock(gAccelLock);
++		return ret;
++	}
++	return kIOReturnUnsupported;
++}
++
+ void
+ SweetAccelStart(void)
+ {
+ 	int mode = 0;
+ 	IOService * provider = IOService::getPlatform();
+ 	SweetAccelerator * accel;
++	SweetAccelControl * control;
+ 
+ 	(void)PE_parse_boot_argn("sweetaccel", &mode, sizeof(mode));
+ 	if (mode < 1) {
+ 		return;
+ 	}
++	gAccelLock = IOLockAlloc();
++	control = OSTypeAlloc(SweetAccelControl);
++	if (control != NULL && provider != NULL && gAccelLock != NULL && control->init() && control->attach(provider)) {
++		if (!control->start(provider)) {
++			control->detach(provider);
++		}
++	}
++	OSSafeReleaseNULL(control);
+ 	accel = OSTypeAlloc(SweetAccelerator);
+ 	if (accel == NULL || provider == NULL || !accel->init() || !accel->attach(provider)) {
+ 		OSSafeReleaseNULL(accel);
+diff -ruN a/iokit/Kernel/arm/sweetaccel_proto.h b/iokit/Kernel/arm/sweetaccel_proto.h
+--- a/iokit/Kernel/arm/sweetaccel_proto.h	1970-01-01 01:00:00.000000000 +0100
++++ b/iokit/Kernel/arm/sweetaccel_proto.h	2026-11-08 15:27:03.672391940 +0100
+@@ -0,0 +1,21 @@
++/* What the kernel's accelerator (SweetAccel.cpp) and its daemon (sweetaccel-d) pass to each other. */
++#ifndef SWEETACCEL_PROTO_H
++#define SWEETACCEL_PROTO_H
++#define ACC_MAXIN 2048          /* structure bytes in either direction; the call's own limit is 4096 */
++#define ACC_SCALARS 16
++
++/* control selector 0: wait for the next request of a program (answers kIOReturnTimeout after 5 s) */
++struct accel_ctrl_req {
++	uint32_t slot, selector, type, pid, nsin, insize, outwanted, pad;
++	uint64_t sin[ACC_SCALARS];
++	uint8_t  in[ACC_MAXIN];
++};
++
++/* control selector 1: answer the request in `slot` */
++struct accel_ctrl_reply {
++	uint32_t slot, nsout, outsize;
++	int32_t  result;
++	uint64_t sout[ACC_SCALARS];
++	uint8_t  out[ACC_MAXIN];
++};
++#endif
