@@ -40,13 +40,14 @@ jobs:
           mkdir -p out/usr/local/lib out/usr/local/bin
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/cpubench/cpubench.c -o cpubench
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -Itools/sweetaccel tools/sweetaccel/sweetaccel-d.c -framework IOKit -o sweetaccel-d
-          cp sweet-boot cpubench sweetaccel-d out/usr/local/bin/
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -fobjc-arc tools/metaltest/metaltest.m -framework Foundation -framework Metal -o metaltest
+          cp sweet-boot cpubench sweetaccel-d metaltest out/usr/local/bin/
           cp tools/sweetboot/pack-dropbox.py out/
           cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
           cp gltest out/usr/local/bin/
           install_name_tool -id /usr/local/lib/libOSMesa.8.dylib out/usr/local/lib/libOSMesa.8.dylib
           otool -L out/usr/local/lib/libOSMesa.8.dylib
-          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest out/usr/local/bin/sweet-boot out/usr/local/bin/cpubench out/usr/local/bin/sweetaccel-d
+          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest out/usr/local/bin/sweet-boot out/usr/local/bin/cpubench out/usr/local/bin/sweetaccel-d out/usr/local/bin/metaltest
           ls -l out/usr/local/lib out/usr/local/bin
       - uses: actions/upload-artifact@v4
         with:
