@@ -279,23 +279,34 @@ run_list(void)
 		pid_t pid;
 		int status = 0;
 
+		int background = 0;
+		char *path = line;
+
 		line[strcspn(line, "\r\n")] = 0;
-		if (line[0] != '/') {
+		if (line[0] == '&') {           /* "&/path": start it and go on without waiting */
+			background = 1;
+			path = line + 1;
+		}
+		if (path[0] != '/') {
 			continue;
 		}
-		say("SWEETBOOT: starting %s\n", line);
-		if (posix_spawn(&pid, line, NULL, NULL, argv, environ) != 0) {
-			say("SWEETBOOT: cannot start %s\n", line);
+		argv[0] = path;
+		say("SWEETBOOT: starting %s%s\n", path, background ? " (in the background)" : "");
+		if (posix_spawn(&pid, path, NULL, NULL, argv, environ) != 0) {
+			say("SWEETBOOT: cannot start %s\n", path);
+			continue;
+		}
+		if (background) {
 			continue;
 		}
 		for (int t = 0;; t++) {
 			pid_t r = waitpid(pid, &status, WNOHANG);
 			if (r == pid) {
-				say("SWEETBOOT: %s finished, status %d\n", line, status);
+				say("SWEETBOOT: %s finished, status %d\n", path, status);
 				break;
 			}
 			if (t >= PROGRAM_TIMEOUT) {
-				say("SWEETBOOT: %s did not finish in %d s, killed\n", line, PROGRAM_TIMEOUT);
+				say("SWEETBOOT: %s did not finish in %d s, killed\n", path, PROGRAM_TIMEOUT);
 				kill(pid, SIGKILL);
 				waitpid(pid, &status, 0);
 				break;
