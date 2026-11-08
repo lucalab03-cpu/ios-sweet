@@ -40,7 +40,7 @@ jobs:
           mkdir -p out/usr/local/lib out/usr/local/bin
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/cpubench/cpubench.c -o cpubench
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -Itools/sweetaccel tools/sweetaccel/sweetaccel-d.c -framework IOKit -o sweetaccel-d
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -fobjc-arc tools/metaltest/metaltest.m -framework Foundation -framework Metal -o metaltest
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/metaltest/metaltest.c -o metaltest
           cp sweet-boot cpubench sweetaccel-d metaltest out/usr/local/bin/
           cp tools/sweetboot/pack-dropbox.py out/
           cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
