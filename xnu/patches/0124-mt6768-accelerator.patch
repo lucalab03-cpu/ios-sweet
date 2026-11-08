@@ -1,0 +1,219 @@
+diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
+--- a/iokit/Kernel/arm/SweetAccel.cpp	1970-01-01 01:00:00.000000000 +0100
++++ b/iokit/Kernel/arm/SweetAccel.cpp	2026-11-08 11:57:54.005743531 +0100
+@@ -0,0 +1,185 @@
++/*
++ * SweetAccel: a graphics accelerator that iOS can find, and that says what it is asked.
++ *
++ * backboardd (CoreAnimation's render server) looks for IOAcceleratorES, IOAcceleratorESLegacy and
++ * AGXAccelerator and finds none, so the whole screen is drawn by the CPU. This is the first step of
++ * giving it a GPU: a service of those classes (boot-arg sweetaccel=1, off by default) whose user client
++ * answers "not supported" to everything and logs what was asked: which program opened it, with which
++ * type, which selectors with which argument sizes, which memory. What is logged decides what the next
++ * step builds (the Metal plugin the render server loads, and the requests it makes).
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <device/device_types.h> /* io_buf_ptr_t for private OSKext headers */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <pexpert/pexpert.h>
++#include <sys/proc.h>
++
++extern "C" void SweetAccelStart(void);
++
++/* The classes Apple's AGX driver derives from; no kext here defines them. */
++class IOAccelerator : public IOService
++{
++	OSDeclareDefaultStructors(IOAccelerator);
++};
++OSDefineMetaClassAndStructors(IOAccelerator, IOService);
++
++class IOAcceleratorES : public IOAccelerator
++{
++	OSDeclareDefaultStructors(IOAcceleratorES);
++};
++OSDefineMetaClassAndStructors(IOAcceleratorES, IOAccelerator);
++
++class AGXAccelerator : public IOAcceleratorES
++{
++	OSDeclareDefaultStructors(AGXAccelerator);
++};
++OSDefineMetaClassAndStructors(AGXAccelerator, IOAcceleratorES);
++
++class SweetAccelerator : public AGXAccelerator
++{
++	OSDeclareDefaultStructors(SweetAccelerator);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAccelerator, AGXAccelerator);
++
++bool
++SweetAccelerator::start(IOService * provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "SweetAccelUserClient");
++	setName("SweetAccelerator");
++	registerService();
++	IOLog("SWEET ACCEL: the accelerator is registered\n");
++	return true;
++}
++
++static uint32_t gSweetAccelLogged;      /* log lines written, in all clients */
++#define SWEET_ACCEL_LOG_MAX 300
++
++#define ACCEL_LOG(fmt, ...) \
++	do { \
++	        if (gSweetAccelLogged < SWEET_ACCEL_LOG_MAX) { \
++	                char name_[32]; \
++	                gSweetAccelLogged++; \
++	                proc_selfname(name_, sizeof(name_)); \
++	                IOLog("SWEET ACCEL: %s " fmt, name_, ##__VA_ARGS__); \
++	        } \
++	} while (0)
++
++class SweetAccelUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(SweetAccelUserClient);
++
++	UInt32 fType;
++
++public:
++	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
++	virtual IOExternalTrap * getTargetAndTrapForIndex(IOService ** target, UInt32 index) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn exportObjectToClient(task_t task, LIBKERN_CONSUMED OSObject * obj, io_object_t * clientObj) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(SweetAccelUserClient, IOUserClient);
++
++bool
++SweetAccelUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fType = type;
++	ACCEL_LOG("opened the accelerator, type %llu\n", (unsigned long long)type);
++	return true;
++}
++
++IOReturn
++SweetAccelUserClient::clientClose(void)
++{
++	ACCEL_LOG("closed (type %llu)\n", (unsigned long long)fType);
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetAccelUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory)
++{
++	(void)options;
++	(void)memory;
++	ACCEL_LOG("asks for memory of type %llu\n", (unsigned long long)type);
++	return kIOReturnUnsupported;
++}
++
++IOReturn
++SweetAccelUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
++{
++	(void)dispatch;
++	(void)target;
++	(void)reference;
++	ACCEL_LOG("method %llu: scalars in %llu, struct in %llu, scalars out %llu, struct out %llu\n",
++	    (unsigned long long)selector, (unsigned long long)args->scalarInputCount,
++	    (unsigned long long)args->structureInputSize, (unsigned long long)args->scalarOutputCount,
++	    (unsigned long long)args->structureOutputSize);
++	return kIOReturnUnsupported;
++}
++
++IOExternalTrap *
++SweetAccelUserClient::getTargetAndTrapForIndex(IOService ** target, UInt32 index)
++{
++	(void)target;
++	ACCEL_LOG("trap %llu\n", (unsigned long long)index);
++	return NULL;
++}
++
++IOReturn
++SweetAccelUserClient::registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon)
++{
++	(void)port;
++	ACCEL_LOG("notification port, type %llu, ref %llu\n", (unsigned long long)type, (unsigned long long)refCon);
++	return kIOReturnSuccess;
++}
++
++/* Same as SweetMali's: the vtable symbol for the base class's version is not linkable here. */
++IOReturn
++SweetAccelUserClient::exportObjectToClient(task_t, LIBKERN_CONSUMED OSObject * obj, io_object_t *)
++{
++	obj->release();
++	return kIOReturnUnsupported;
++}
++
++void
++SweetAccelStart(void)
++{
++	int mode = 0;
++	IOService * provider = IOService::getPlatform();
++	SweetAccelerator * accel;
++
++	(void)PE_parse_boot_argn("sweetaccel", &mode, sizeof(mode));
++	if (mode < 1) {
++		return;
++	}
++	accel = OSTypeAlloc(SweetAccelerator);
++	if (accel == NULL || provider == NULL || !accel->init() || !accel->attach(provider)) {
++		OSSafeReleaseNULL(accel);
++		IOLog("SWEET ACCEL: cannot create the accelerator\n");
++		return;
++	}
++	if (!accel->start(provider)) {
++		accel->detach(provider);
++		IOLog("SWEET ACCEL: the accelerator did not start\n");
++	}
++	accel->release();
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+--- a/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 11:57:53.876032093 +0100
++++ b/iokit/Kernel/arm/SweetMali.cpp	2026-11-08 11:57:54.005724322 +0100
+@@ -41,6 +41,7 @@
+ void sweet_mali_to_memory(const void * start, uint64_t size);
+ uint32_t sweet_mali_submit(uint64_t chain, bool fragment);
+ void SweetMaliStart(void);
++void SweetAccelStart(void);
+ }
+ 
+ /* Linux's include/uapi/drm/panfrost_drm.h and drm.h: the requests' numbers and structures. */
+@@ -155,6 +156,7 @@
+ 	} else {
+ 		IOLog("SweetMali: the GPU is there for programs to draw with\n");
+ 	}
++	SweetAccelStart();
+ 	gpu->release();
+ }
+ 
+diff -ruN a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64	2026-11-08 11:57:53.876651827 +0100
++++ b/iokit/conf/files.arm64	2026-11-08 11:57:54.006876077 +0100
+@@ -17,6 +17,7 @@
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetMali.cpp                                       optional iokitcpp
++iokit/Kernel/arm/SweetAccel.cpp                                      optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
