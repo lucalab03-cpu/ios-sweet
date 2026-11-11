@@ -75,6 +75,9 @@ int main(void)
 {
 	lg = fopen("/var/tmp/sweetshader.log", "w");
 	say("shadertest: start\n");
+	/* panfrost reports GL 2.1 for OSMesa; ask Mesa for the GL 3.3 the Mali can mostly do */
+	setenv("MESA_GL_VERSION_OVERRIDE", "3.3", 1);
+	setenv("MESA_GLSL_VERSION_OVERRIDE", "330", 1);
 	void *lib = dlopen("/usr/local/lib/libOSMesa.8.dylib", RTLD_NOW | RTLD_GLOBAL);
 	if (!lib) { say("dlopen: %s\n", dlerror()); return 1; }
 	attribs_t attribs = (attribs_t)dlsym(lib, "OSMesaCreateContextAttribs");
