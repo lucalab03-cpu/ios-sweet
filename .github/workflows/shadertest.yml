@@ -1,0 +1,17 @@
+name: shadertest
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/shadertest/shadertest.c -o shadertest
+          codesign -s - --force shadertest
+          mkdir -p out/usr/local/bin && cp shadertest out/usr/local/bin/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shadertest
+          path: out
