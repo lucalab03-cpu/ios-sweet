@@ -1,0 +1,28 @@
+name: bbprobe
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/bbprobe/**'
+      - '.github/workflows/bbprobe.yml'
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build shim and probe library for iOS arm64
+        run: |
+          set -e
+          CC="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -Wall"
+          mkdir -p out
+          $CC tools/bbprobe/bbshim.c -o out/bbshim
+          $CC -dynamiclib -install_name /usr/local/lib/libbbprobe.dylib tools/bbprobe/bbprobe.c -o out/libbbprobe.dylib
+          codesign -s - --force out/bbshim out/libbbprobe.dylib
+          cp tools/bbprobe/install-bbprobe.sh out/
+          file out/bbshim out/libbbprobe.dylib
+          otool -L out/libbbprobe.dylib
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bbprobe
+          path: out
