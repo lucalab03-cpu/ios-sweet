@@ -16,7 +16,7 @@ jobs:
           CC="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -Wall"
           mkdir -p out
           $CC tools/bbprobe/bbshim.c -o out/bbshim
-          $CC -dynamiclib -install_name /usr/local/lib/libbbprobe.dylib tools/bbprobe/bbprobe.c -o out/libbbprobe.dylib
+          $CC -fno-objc-arc -dynamiclib -install_name /usr/local/lib/libbbprobe.dylib tools/bbprobe/bbprobe.m -framework Foundation -framework Metal -o out/libbbprobe.dylib
           codesign -s - --force out/bbshim out/libbbprobe.dylib
           cp tools/bbprobe/install-bbprobe.sh out/
           file out/bbshim out/libbbprobe.dylib
