@@ -1,0 +1,25 @@
+name: inject
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1"
+          $C tools/inject/backboardd-wrap.c -o backboardd-wrap
+          $C tools/inject/install-wrap.c -o install-wrap
+          $C -dynamiclib tools/inject/sweetinject.c -install_name /usr/local/lib/sweetinject.dylib -o sweetinject.dylib
+          codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib
+          mkdir -p drop/usr/local/bin drop/usr/local/lib drop/usr/local/libexec drop/usr/local/etc
+          cp install-wrap drop/usr/local/bin/
+          cp sweetinject.dylib drop/usr/local/lib/
+          cp backboardd-wrap drop/usr/local/libexec/
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n' > drop/usr/local/etc/sweet-boot.list
+          find drop -type f
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inject
+          path: drop
