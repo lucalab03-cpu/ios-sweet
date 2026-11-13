@@ -2,6 +2,8 @@
  * Log: /var/tmp/sweetmetal.log */
 #include <dirent.h>
 #include <dlfcn.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +50,14 @@ int main(void) {
             say("calling it");
             void *dev = create();
             say("default device: %p", dev);
+            if (dev) {
+                /* [[dev name] UTF8String] and the device's class, through the Objective-C runtime */
+                void *(*send)(void *, void *) = (void *(*)(void *, void *))objc_msgSend;
+                const char *(*send_s)(void *, void *) = (const char *(*)(void *, void *))objc_msgSend;
+                void *name = send(dev, sel_registerName("name"));
+                say("device class: %s", object_getClassName((id)dev));
+                say("device name: %s", name ? send_s(name, sel_registerName("UTF8String")) : "(nil)");
+            }
         }
     }
     say("metaltest: done");

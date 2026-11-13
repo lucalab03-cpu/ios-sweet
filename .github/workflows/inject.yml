@@ -12,12 +12,21 @@ jobs:
           $C tools/inject/backboardd-wrap.c -o backboardd-wrap
           $C tools/inject/install-wrap.c -o install-wrap
           $C -dynamiclib tools/inject/sweetinject.c -install_name /usr/lib/sweetinject.dylib -o sweetinject.dylib
-          codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib
-          mkdir -p drop/usr/local/bin drop/usr/lib drop/usr/local/libexec drop/usr/local/etc
-          cp install-wrap drop/usr/local/bin/
+          # Metal driver bundle (loaded by Metal through the kernel's MetalPluginName) and its test program.
+          # _MTLDevice is private: its class symbols are looked up when the bundle loads (-U).
+          $C -fobjc-arc -bundle tools/metal/SweetMTLDriver.m -framework Foundation -lobjc \
+             '-Wl,-U,_OBJC_CLASS_$__MTLDevice' '-Wl,-U,_OBJC_METACLASS_$__MTLDevice' -o SweetMTLDriver
+          $C tools/metaltest/metaltest.c -lobjc -o metaltest
+          codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib SweetMTLDriver metaltest
+          mkdir -p drop/usr/local/bin drop/usr/lib drop/usr/local/libexec drop/usr/local/etc drop/var/sweet
+          mkdir -p drop/System/Library/Extensions/SweetMTLDriver.bundle
+          cp install-wrap metaltest drop/usr/local/bin/
           cp sweetinject.dylib drop/usr/lib/
           cp backboardd-wrap drop/usr/local/libexec/
-          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n' > drop/usr/local/etc/sweet-boot.list
+          cp SweetMTLDriver tools/metal/Info.plist drop/System/Library/Extensions/SweetMTLDriver.bundle/
+          # The backboardd injection is replaced by the Metal plugin: its kill switch keeps the original backboardd.
+          echo "Metal plugin instead of the injection" > drop/var/sweet/noinject
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/metaltest\n' > drop/usr/local/etc/sweet-boot.list
           find drop -type f
       - uses: actions/upload-artifact@v4
         with:

@@ -1,0 +1,29 @@
+diff -ruN a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
+--- a/iokit/Kernel/arm/SweetAccel.cpp
++++ b/iokit/Kernel/arm/SweetAccel.cpp
+@@ -53,12 +53,24 @@
+ bool
+ SweetAccelerator::start(IOService * provider)
+ {
++	int metal = 1;
++
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+ 	setProperty(kIOUserClientClassKey, "SweetAccelUserClient");
+ 	setName("SweetAccelerator");
++	/*
++	 * Metal of iOS 16 (_MTLRegisterDevices) matches IOAcceleratorES services, loads
++	 * /System/Library/Extensions/<MetalPluginName>.bundle and makes the device with
++	 * [[<MetalPluginClassName> alloc] initWithAcceleratorPort:service]. Boot-arg sweetmetal=0: no plugin.
++	 */
++	(void)PE_parse_boot_argn("sweetmetal", &metal, sizeof(metal));
++	if (metal) {
++		setProperty("MetalPluginName", "SweetMTLDriver");
++		setProperty("MetalPluginClassName", "SweetMTLDevice");
++	}
+ 	registerService();
+-	IOLog("SWEET ACCEL: the accelerator is registered\n");
++	IOLog("SWEET ACCEL: the accelerator is registered (Metal plugin %s)\n", metal ? "SweetMTLDriver" : "off");
+ 	return true;
+ }
