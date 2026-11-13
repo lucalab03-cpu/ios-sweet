@@ -188,9 +188,88 @@ static int verify_file(const char *path)
 	return r;
 }
 
+static int hash_of(unsigned htype, const uint8_t *d, uint32_t len, uint8_t *h)
+{
+	if (htype == 1) CC_SHA1(d, len, h);
+	else if (htype == 2 || htype == 3) CC_SHA256(d, len, h);
+	else if (htype == 4) CC_SHA384(d, len, h);
+	else return -1;
+	return 0;
+}
+
+/* Describes the signature of one 64-bit slice: every CodeDirectory (hash type, pages, how many page hashes do not match
+ * the file, special slots) and the entitlement blobs (present, length, hash matches its special slot). */
+static void sig_report(const char *tag, const uint8_t *b, long avail)
+{
+	uint32_t ncmds; memcpy(&ncmds, b + 16, 4);
+	const uint8_t *p = b + 32, *sig = NULL; uint32_t sigoff = 0, sigsize = 0;
+	for (uint32_t i = 0; i < ncmds; i++) {
+		uint32_t cmd, sz; memcpy(&cmd, p, 4); memcpy(&sz, p + 4, 4);
+		if (cmd == 0x1d) { memcpy(&sigoff, p + 8, 4); memcpy(&sigsize, p + 12, 4); sig = b + sigoff; }
+		p += sz;
+	}
+	if (!sig || sigoff + (long)sigsize > avail) { say("sig %s: no signature\n", tag); return; }
+	if (be32(sig) != 0xfade0cc0u) { say("sig %s: bad superblob magic %08x\n", tag, be32(sig)); return; }
+	uint32_t count = be32(sig + 8);
+	const uint8_t *ents = NULL, *der = NULL; uint32_t entslen = 0, derlen = 0;
+	for (uint32_t k = 0; k < count && 12 + 8 * k + 8 <= sigsize; k++) {
+		uint32_t type = be32(sig + 12 + 8 * k), off = be32(sig + 12 + 8 * k + 4);
+		if (off + 8 > sigsize) continue;
+		if (type == 5 && be32(sig + off) == 0xfade7171u) { ents = sig + off; entslen = be32(sig + off + 4); }
+		if (type == 7 && be32(sig + off) == 0xfade7172u) { der = sig + off; derlen = be32(sig + off + 4); }
+	}
+	say("sig %s: %u blobs, ncmds %u, xml ents %u bytes, der ents %u bytes\n", tag, count, ncmds, entslen, derlen);
+	for (uint32_t k = 0; k < count && 12 + 8 * k + 8 <= sigsize; k++) {
+		uint32_t type = be32(sig + 12 + 8 * k), off = be32(sig + 12 + 8 * k + 4);
+		const uint8_t *cd = sig + off;
+		if (off + 44 > sigsize || be32(cd) != 0xfade0c02u) continue;
+		uint32_t hoff = be32(cd + 16), nspecial = be32(cd + 24), ncode = be32(cd + 28), limit = be32(cd + 32);
+		unsigned hsize = cd[36], htype = cd[37], psz = cd[39];
+		uint32_t pg = psz ? (1u << psz) : limit, badpages = 0, firstbad = 0xffffffffu;
+		uint8_t h[64];
+		for (uint32_t i = 0; i < ncode && pg; i++) {
+			uint64_t start = (uint64_t)i * pg; uint32_t len = pg;
+			if (start >= limit) break;
+			if (start + len > limit) len = limit - (uint32_t)start;
+			if (start + len > (uint64_t)avail || hash_of(htype, b + start, len, h)) { badpages++; continue; }
+			if (memcmp(cd + hoff + i * hsize, h, hsize)) { if (firstbad == 0xffffffffu) firstbad = i; badpages++; }
+		}
+		const char *ent_ok = "absent", *der_ok = "absent";
+		if (ents && nspecial >= 5) { hash_of(htype, ents, entslen, h); ent_ok = memcmp(cd + hoff - 5 * hsize, h, hsize) ? "MISMATCH" : "ok"; }
+		if (der && nspecial >= 7) { hash_of(htype, der, derlen, h); der_ok = memcmp(cd + hoff - 7 * hsize, h, hsize) ? "MISMATCH" : "ok"; }
+		say("sig %s: cd type 0x%x ver %x flags %x hash %u page %u slots %u+%u limit %u: %u bad page(s) (first %d), xml ents %s, der ents %s\n",
+		    tag, type, be32(cd + 8), be32(cd + 12), htype, pg, nspecial, ncode, limit, badpages,
+		    firstbad == 0xffffffffu ? -1 : (int)firstbad, ent_ok, der_ok);
+	}
+}
+
+/* Writes a signature report for every 64-bit arm slice of `path` to the log. */
+static void sig_file(const char *path)
+{
+	long n = fsize(path);
+	if (n < 64) { say("sig %s: missing or too short (%ld)\n", path, n); return; }
+	uint8_t *b = malloc(n); FILE *f = fopen(path, "rb");
+	if (!f || fread(b, 1, n, f) != (size_t)n) { if (f) fclose(f); free(b); say("sig %s: unreadable\n", path); return; }
+	fclose(f);
+	uint32_t magic; memcpy(&magic, b, 4);
+	if (magic == 0xfeedfacfu) sig_report(path, b, n);
+	else if (ntohl(magic) == 0xcafebabeu) {
+		uint32_t na; memcpy(&na, b + 4, 4); na = ntohl(na);
+		for (uint32_t i = 0; i < na; i++) {
+			uint32_t cputype, sub, off, size;
+			memcpy(&cputype, b + 8 + 20 * i, 4); memcpy(&sub, b + 8 + 20 * i + 4, 4);
+			memcpy(&off, b + 8 + 20 * i + 8, 4); memcpy(&size, b + 8 + 20 * i + 12, 4);
+			say("sig %s: fat slice %u cpu %08x sub %08x at %u\n", path, i, ntohl(cputype), ntohl(sub), ntohl(off));
+			if (ntohl(cputype) == 0x0100000cu && ntohl(off) + (long)ntohl(size) <= n) sig_report(path, b + ntohl(off), ntohl(size));
+		}
+	} else say("sig %s: not a Mach-O (%08x)\n", path, magic);
+	free(b);
+}
+
 int main(int argc, char **argv)
 {
 	int changed = 0;
+	if (argc == 3 && !strcmp(argv[1], "--sig")) { sig_file(argv[2]); return 0; }
 	if (argc == 3 && !strcmp(argv[1], "--verify")) { int r = verify_file(argv[2]); printf("verify: %d\n", r); return r != 0; }
 	if (argc == 4 && !strcmp(argv[1], "--patch")) { int r = patch_file(argv[2], argv[3]); printf("patch: %d\n", r); return r < 0; }
 	say("install-wrap: start\n");
@@ -209,6 +288,8 @@ int main(int argc, char **argv)
 			if (r < 0) unlink(INJ); else changed = 1;
 		} else say("install-wrap: copy for the patch failed\n");
 	}
+	sig_file(ORIG);                         /* compare the two signatures in the log */
+	sig_file(INJ);
 	{ int fd = open("/var/tmp/sweetwrap.state", O_WRONLY | O_CREAT, 0666); if (fd >= 0) { fchmod(fd, 0666); close(fd); } }
 	if (!same(WRAP, BB)) {
 		say("install-wrap: installing the wrapper\n");
