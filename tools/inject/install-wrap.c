@@ -2,7 +2,6 @@
  * Safe to run on every boot: it does nothing when everything is already as it should be. */
 #include <errno.h>
 #include <fcntl.h>
-#include <libproc.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -10,6 +9,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* libproc.h is not in the iOS SDK; the functions are in libSystem */
+extern int proc_listallpids(void *buffer, int buffersize);
+extern int proc_name(int pid, void *buffer, unsigned buffersize);
 
 #define BB "/usr/libexec/backboardd"
 #define ORIG "/usr/libexec/backboardd.orig"
@@ -68,7 +71,7 @@ int main(void)
 		changed = 1;
 	}
 	if (changed) {
-		int pids[2048], n = proc_listallpids(pids, sizeof(pids));
+		int pids[2048], n = proc_listallpids(pids, sizeof(pids));   /* a count of pids */
 		for (int i = 0; i < n; i++) {
 			char name[64] = "";
 			proc_name(pids[i], name, sizeof(name));
