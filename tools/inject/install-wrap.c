@@ -1,5 +1,13 @@
 /* Puts the wrapper in place of backboardd (keeping the real one as backboardd.orig) and restarts backboardd once.
  * Safe to run on every boot: it does nothing when everything is already as it should be. */
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#else
+#include <openssl/sha.h>
+#define CC_SHA1(d, l, o) SHA1(d, l, o)
+#define CC_SHA256(d, l, o) SHA256(d, l, o)
+#define CC_SHA384(d, l, o) SHA384(d, l, o)
+#endif
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdint.h>
@@ -60,6 +68,45 @@ static int copy(const char *src, const char *dst, mode_t mode)
 }
 
 
+
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
+
+/*
+ * The kernel checks a binary's code signature page by page. Adding a load command changed the first page, so its hash in
+ * every CodeDirectory of the signature has to be recomputed (the rest of the signature, entitlements included, stays).
+ * fix != 0: rewrite the hashes; returns 0 when all of them match afterwards (or already did), negative on a problem.
+ */
+static int cs_page0(uint8_t *b, int fix)
+{
+	uint32_t ncmds, magic; memcpy(&magic, b, 4); memcpy(&ncmds, b + 16, 4);
+	uint8_t *p = b + 32, *sig = NULL; uint32_t sigsize = 0;
+	for (uint32_t i = 0; i < ncmds; i++) {
+		uint32_t cmd, sz; memcpy(&cmd, p, 4); memcpy(&sz, p + 4, 4);
+		if (cmd == 0x1d) { uint32_t o, n; memcpy(&o, p + 8, 4); memcpy(&n, p + 12, 4); sig = b + o; sigsize = n; }
+		p += sz;
+	}
+	if (!sig) return 0;                                    /* unsigned: nothing to keep valid */
+	if (be32(sig) != 0xfade0cc0u) return -10;
+	uint32_t count = be32(sig + 8), bad = 0;
+	for (uint32_t k = 0; k < count && 12 + 8 * k + 8 <= sigsize; k++) {
+		uint32_t off = be32(sig + 12 + 8 * k + 4);
+		uint8_t *cd = sig + off;
+		if (off + 44 > sigsize || be32(cd) != 0xfade0c02u) continue;
+		uint32_t hoff = be32(cd + 16), limit = be32(cd + 32);
+		unsigned hsize = cd[36], htype = cd[37], psz = cd[39];
+		uint32_t len = psz ? (1u << psz) : limit;
+		uint8_t h[64];
+		if (len > limit) len = limit;
+		if (htype == 1) CC_SHA1(b, len, h);
+		else if (htype == 2 || htype == 3) CC_SHA256(b, len, h);
+		else if (htype == 4) CC_SHA384(b, len, h);
+		else return -11;
+		if (hsize > sizeof(h) || off + hoff + hsize > sigsize) return -12;
+		if (memcmp(cd + hoff, h, hsize)) { if (fix) memcpy(cd + hoff, h, hsize); else bad++; }
+	}
+	return bad ? -13 : 0;
+}
+
 /* Adds an LC_LOAD_DYLIB for `dylib` to a 64-bit Mach-O slice, in the free room after the load commands. 0 ok, 1 already
  * there, negative on failure. */
 static int patch_slice(uint8_t *b, const char *dylib)
@@ -91,7 +138,7 @@ static int patch_slice(uint8_t *b, const char *dylib)
 	memcpy(w, v, 24); memcpy(w + 24, dylib, strlen(dylib));
 	ncmds++; sizeofcmds += need;
 	memcpy(b + 16, &ncmds, 4); memcpy(b + 20, &sizeofcmds, 4);
-	return 0;
+	return cs_page0(b, 1);
 }
 
 /* Patch a thin or fat Mach-O file in place (every arm64 slice). */
@@ -120,9 +167,31 @@ static int patch_file(const char *path, const char *dylib)
 	return r;
 }
 
+/* 0 when the first page of every arm64 slice matches its signature. */
+static int verify_file(const char *path)
+{
+	long n = fsize(path); int r = -1;
+	if (n < 64) return -1;
+	uint8_t *b = malloc(n); FILE *f = fopen(path, "rb");
+	if (!f || fread(b, 1, n, f) != (size_t)n) { if (f) fclose(f); free(b); return -1; }
+	fclose(f);
+	uint32_t magic; memcpy(&magic, b, 4);
+	if (magic == 0xfeedfacfu) r = cs_page0(b, 0);
+	else if (ntohl(magic) == 0xcafebabeu) {
+		uint32_t na; memcpy(&na, b + 4, 4); na = ntohl(na); r = 0;
+		for (uint32_t i = 0; i < na; i++) {
+			uint32_t cputype, off; memcpy(&cputype, b + 8 + 20 * i, 4); memcpy(&off, b + 8 + 20 * i + 8, 4);
+			if (ntohl(cputype) == 0x0100000cu) { int x = cs_page0(b + ntohl(off), 0); if (x) r = x; }
+		}
+	}
+	free(b);
+	return r;
+}
+
 int main(int argc, char **argv)
 {
 	int changed = 0;
+	if (argc == 3 && !strcmp(argv[1], "--verify")) { int r = verify_file(argv[2]); printf("verify: %d\n", r); return r != 0; }
 	if (argc == 4 && !strcmp(argv[1], "--patch")) { int r = patch_file(argv[2], argv[3]); printf("patch: %d\n", r); return r < 0; }
 	say("install-wrap: start\n");
 	if (access(WRAP, X_OK) != 0) { say("install-wrap: no wrapper at %s\n", WRAP); return 1; }
@@ -131,6 +200,7 @@ int main(int argc, char **argv)
 		if (copy(BB, ORIG, 0755) != 0) { say("install-wrap: copy of the original failed (%s)\n", strerror(errno)); return 2; }
 		changed = 1;
 	}
+	if (access(INJ, F_OK) == 0 && verify_file(INJ) != 0) { say("install-wrap: %s does not match its signature, rebuilding\n", INJ); unlink(INJ); }
 	if (access(INJ, F_OK) != 0 && access(DYLIB, R_OK) == 0) {
 		say("install-wrap: making %s\n", INJ);
 		if (copy(ORIG, INJ, 0755) == 0) {
