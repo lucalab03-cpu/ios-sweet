@@ -1,6 +1,8 @@
 /* Puts the wrapper in place of backboardd (keeping the real one as backboardd.orig) and restarts backboardd once.
  * Safe to run on every boot: it does nothing when everything is already as it should be. */
+#include <arpa/inet.h>
 #include <errno.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -14,6 +16,8 @@
 extern int proc_listallpids(void *buffer, int buffersize);
 extern int proc_name(int pid, void *buffer, unsigned buffersize);
 
+#define INJ "/usr/libexec/backboardd.inj"
+#define DYLIB "/usr/lib/sweetinject.dylib"
 #define BB "/usr/libexec/backboardd"
 #define ORIG "/usr/libexec/backboardd.orig"
 #define WRAP "/usr/local/libexec/backboardd-wrap"
@@ -55,9 +59,71 @@ static int copy(const char *src, const char *dst, mode_t mode)
 	return rename(tmp, dst);
 }
 
-int main(void)
+
+/* Adds an LC_LOAD_DYLIB for `dylib` to a 64-bit Mach-O slice, in the free room after the load commands. 0 ok, 1 already
+ * there, negative on failure. */
+static int patch_slice(uint8_t *b, const char *dylib)
+{
+	uint32_t magic, ncmds, sizeofcmds, first = 0xffffffffu;
+	memcpy(&magic, b, 4); memcpy(&ncmds, b + 16, 4); memcpy(&sizeofcmds, b + 20, 4);
+	if (magic != 0xfeedfacfu) return -1;
+	uint8_t *p = b + 32;
+	for (uint32_t i = 0; i < ncmds; i++) {
+		uint32_t cmd, sz; memcpy(&cmd, p, 4); memcpy(&sz, p + 4, 4);
+		if (cmd == 0x19) {                                  /* LC_SEGMENT_64: find the first section's file offset */
+			uint32_t ns; memcpy(&ns, p + 64, 4);
+			for (uint32_t k = 0; k < ns; k++) {
+				uint8_t *sec = p + 72 + 80 * k; uint32_t off; uint64_t size;
+				memcpy(&off, sec + 48, 4); memcpy(&size, sec + 40, 8);
+				if (size && off && off < first) first = off;
+			}
+		} else if (cmd == 0xc || cmd == 0xd || cmd == 0x18 || cmd == 0x1f) {      /* a dylib command: already ours? */
+			uint32_t no; memcpy(&no, p + 8, 4);
+			if (!strcmp((char *)p + no, dylib)) return 1;
+		}
+		p += sz;
+	}
+	uint32_t need = (24 + (uint32_t)strlen(dylib) + 1 + 7) & ~7u;
+	if (first == 0xffffffffu || first < 32 + sizeofcmds || first - (32 + sizeofcmds) < need) return -2;
+	uint8_t *w = b + 32 + sizeofcmds;
+	memset(w, 0, need);
+	uint32_t v[6] = { 0xc, need, 24, 2, 0x10000, 0x10000 };
+	memcpy(w, v, 24); memcpy(w + 24, dylib, strlen(dylib));
+	ncmds++; sizeofcmds += need;
+	memcpy(b + 16, &ncmds, 4); memcpy(b + 20, &sizeofcmds, 4);
+	return 0;
+}
+
+/* Patch a thin or fat Mach-O file in place (every arm64 slice). */
+static int patch_file(const char *path, const char *dylib)
+{
+	long n = fsize(path); int r = -1, any = 0;
+	if (n < 64) return -1;
+	uint8_t *b = malloc(n); FILE *f = fopen(path, "rb");
+	if (!f || fread(b, 1, n, f) != (size_t)n) { if (f) fclose(f); free(b); return -1; }
+	fclose(f);
+	uint32_t magic; memcpy(&magic, b, 4);
+	if (magic == 0xfeedfacfu) { r = patch_slice(b, dylib); any = 1; }
+	else if (ntohl(magic) == 0xcafebabeu) {
+		uint32_t na; memcpy(&na, b + 4, 4); na = ntohl(na); r = 0;
+		for (uint32_t i = 0; i < na; i++) {
+			uint32_t cputype, off; memcpy(&cputype, b + 8 + 20 * i, 4); memcpy(&off, b + 8 + 20 * i + 8, 4);
+			if (ntohl(cputype) == 0x0100000cu) { int x = patch_slice(b + ntohl(off), dylib); any = 1; if (x < 0) r = x; else if (x == 0 && r == 1) r = 0; }
+		}
+	}
+	if (!any) r = -3;
+	if (r == 0) {
+		f = fopen(path, "wb");
+		if (!f || fwrite(b, 1, n, f) != (size_t)n || fclose(f) != 0) r = -4;
+	}
+	free(b);
+	return r;
+}
+
+int main(int argc, char **argv)
 {
 	int changed = 0;
+	if (argc == 4 && !strcmp(argv[1], "--patch")) { int r = patch_file(argv[2], argv[3]); printf("patch: %d\n", r); return r < 0; }
 	say("install-wrap: start\n");
 	if (access(WRAP, X_OK) != 0) { say("install-wrap: no wrapper at %s\n", WRAP); return 1; }
 	if (access(ORIG, F_OK) != 0) {
@@ -65,6 +131,15 @@ int main(void)
 		if (copy(BB, ORIG, 0755) != 0) { say("install-wrap: copy of the original failed (%s)\n", strerror(errno)); return 2; }
 		changed = 1;
 	}
+	if (access(INJ, F_OK) != 0 && access(DYLIB, R_OK) == 0) {
+		say("install-wrap: making %s\n", INJ);
+		if (copy(ORIG, INJ, 0755) == 0) {
+			int r = patch_file(INJ, DYLIB);
+			say("install-wrap: patch result %d\n", r);
+			if (r < 0) unlink(INJ); else changed = 1;
+		} else say("install-wrap: copy for the patch failed\n");
+	}
+	{ int fd = open("/var/tmp/sweetwrap.state", O_WRONLY | O_CREAT, 0666); if (fd >= 0) { fchmod(fd, 0666); close(fd); } }
 	if (!same(WRAP, BB)) {
 		say("install-wrap: installing the wrapper\n");
 		if (copy(WRAP, BB, 0755) != 0) { say("install-wrap: could not install (%s)\n", strerror(errno)); return 3; }
