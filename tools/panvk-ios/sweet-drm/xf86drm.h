@@ -153,6 +153,11 @@ int drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd);
 void *sweet_os_mmap(void *address, size_t size, int prot, int flags, int fd, long long offset);
 int sweet_os_munmap(void *address, size_t size);
 
+/* Not libdrm's: host-pointer imports (sweet.drm.c), for PanVK's VK_EXT_external_memory_host. */
+int sweet_drm_import_host(void *address, uint64_t size);
+uint64_t sweet_drm_fd_size(int fd);
+void sweet_drm_forget_fd(int fd);
+
 #ifdef __cplusplus
 }
 #endif

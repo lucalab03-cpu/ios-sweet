@@ -84,7 +84,11 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    queries (gpuCoreCount, maxComputeThreadgroupMemory, ...), which answer 0 for now.
    Original plan for this step: SweetMTLDriver becomes the real frontend. metaltest creates a device, a
    queue, a buffer, a compute kernel and a render pass into a texture, and checks the bytes.
-4. **backboardd.** Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
+4. **backboardd.** First step (2026-11-14): host memory. Kernel patch 0128 adds SweetMali IMPORT_HOST (the
+   caller's pages wired and mapped for the GPU). The shim hands them to PanVK's dma-buf import, and patch-panvk.py
+   section 3f adds VK_EXT_external_memory_host on top (16 KB alignment). Section 3g turns on rasterization-order
+   attachment access (framebuffer fetch) for v7 (SWEET_NO_FBFETCH=1 turns it off). mtltest checks a no-copy buffer,
+   an IOSurface texture, a framebuffer-fetch draw and, on a second run, the pipeline cache. Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
    cold compile time, keep the pipeline cache across boots, and add real syncobjs / async submit.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 

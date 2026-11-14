@@ -98,7 +98,7 @@ jobs:
           nm -m "$B/SweetMTLDriver" | grep "weak external" | grep -v "dynamically looked up" || true
           cp tools/metal/Info.plist "$B/Info.plist"
           codesign -s - --force "$B/SweetMTLDriver"
-          $C -O1 -fobjc-arc tools/metal2/mtltest.m -framework Foundation -framework Metal -o mtltest
+          $C -O1 -fobjc-arc tools/metal2/mtltest.m -framework Foundation -framework Metal -framework IOSurface -o mtltest
           codesign -s - --force mtltest
           xcrun -sdk iphoneos metal -std=ios-metal2.4 -mios-version-min=16.0 -c tools/metal2/mtltest.metal -o mtltest.air
           xcrun -sdk iphoneos metallib mtltest.air -o mtltest.metallib
@@ -107,16 +107,23 @@ jobs:
         run: |
           set -e
           mkdir -p drop/usr/local/bin drop/usr/local/etc drop/usr/local/share/sweet drop/System/Library/Extensions/SweetMTLDriver.bundle
-          cp m2vtest mtltest drop/usr/local/bin/
+          # m2vtest (about 20 MB) stays out of the drop: the one already on the phone does; the artifact keeps it apart
+          cp mtltest drop/usr/local/bin/
+          mkdir -p extra && cp m2vtest extra/
           cp mtltest.metallib drop/usr/local/share/sweet/
           cp SweetMTLDriver.bundle/SweetMTLDriver SweetMTLDriver.bundle/Info.plist drop/System/Library/Extensions/SweetMTLDriver.bundle/
-          # the new Metal tests last: a slow dropbox install may still be copying them when the list starts (sweet-boot's 180 s deadline)
-          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/m2vtest\n/usr/local/bin/metaltest\n/usr/local/bin/mtltest\n' > drop/usr/local/etc/sweet-boot.list
+          # the Metal tests last (a slow dropbox install may still be copying them); mtltest twice: the second run's
+          # pipeline times show the shader cache
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/m2vtest\n/usr/local/bin/metaltest\n/usr/local/bin/mtltest\n/usr/local/bin/mtltest\n' > drop/usr/local/etc/sweet-boot.list
           find drop -type f -exec ls -l {} \;
       - uses: actions/upload-artifact@v4
         with:
           name: metal2
           path: drop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m2vtest
+          path: extra
       - uses: actions/upload-artifact@v4
         if: always()
         with:

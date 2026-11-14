@@ -25,3 +25,9 @@ fragment float4 quad_fragment(Varyings in [[stage_in]])
 {
 	return float4(1.0, 0.2, 0.0, 1.0);
 }
+
+// Framebuffer fetch (programmable blending): reads what the target holds and swaps red and blue.
+fragment float4 fetch_fragment(Varyings in [[stage_in]], float4 dst [[color(0)]])
+{
+	return dst.bgra;
+}

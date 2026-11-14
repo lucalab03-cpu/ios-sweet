@@ -1,0 +1,238 @@
+SweetMali: IMPORT_HOST, a program's own pages as a GPU buffer (VK_EXT_external_memory_host)
+
+The Metal runtime (metal2vulkan) imports IOSurfaces and no-copy buffers as host memory, which needs
+VK_EXT_external_memory_host in PanVK; m2vtest's import step failed without it (boot 2026-11-14). Request 0x4e
+(outside panfrost's numbers) takes a page-aligned address and size in the caller's task, wires the pages
+(IOMemoryDescriptor::withAddressRange + prepare), enters them into the GPU's address space and returns a handle
+and GPU address like CREATE_BO. GEM_CLOSE unwires them. The pages stay cached for the processor; the program
+cleans and invalidates them around the GPU's use, as the Metal frontend does for surfaces.
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index eca79e7..f4c5154 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -30,6 +30,7 @@
+ #include <mach/vm_param.h>
+ #include <sys/systm.h>
+ #include <pexpert/pexpert.h>
++#include <kern/task.h>                  /* current_task(): the caller of IMPORT_HOST */
+ 
+ extern "C" {
+ /* bsd/dev/sweet_mali.c */
+@@ -56,6 +57,7 @@ enum {
+ 	kPanfrostGetBOOffset    = 0x45,
+ 	kPanfrostMadvise        = 0x48,
+ 	kPanfrostSetLabelBO     = 0x49,
++	kSweetImportHost        = 0x4e,         /* ours: a program's own pages as a buffer (VK_EXT_external_memory_host) */
+ 	kDrmSyncobjCreate       = 0xbf,         /* Linux's drm_syncobj.h: what Mesa's panfrost waits with */
+ 	kDrmSyncobjDestroy      = 0xc0,
+ 	kDrmSyncobjWait         = 0xc3,
+@@ -103,6 +105,11 @@ struct sweet_panfrost_madvise {
+ struct sweet_syncobj_create {
+ 	uint32_t handle, flags;
+ };
++struct sweet_import_host {
++	uint64_t address, size;                 /* in: the caller's pages, page aligned */
++	uint32_t handle, pad;                   /* out */
++	uint64_t offset;                        /* out: the GPU address */
++};
+ 
+ #define SWEET_MALI_BUFFERS      4096
+ #define SWEET_MALI_BUFFER_MAX   (256ull << 20)
+@@ -110,7 +117,8 @@ struct sweet_syncobj_create {
+ #define SWEET_MALI_FLUSH_MAX    (8ull << 20)    /* buffers up to this size are cleaned and invalidated around each job */
+ 
+ struct sweet_mali_buffer {
+-	IOBufferMemoryDescriptor * memory;
++	IOBufferMemoryDescriptor * memory;      /* a buffer made here, or */
++	IOMemoryDescriptor * imported;          /* the caller's pages, wired while the buffer lives */
+ 	uint64_t address, size;
+ };
+ 
+@@ -173,6 +181,8 @@ class SweetMaliUserClient : public IOUserClient
+ 	struct sweet_mali_buffer * buffer(uint32_t handle);
+ 	void freeBuffer(struct sweet_mali_buffer * b);
+ 	IOReturn createBO(struct sweet_panfrost_create_bo * request);
++	IOReturn importHost(struct sweet_import_host * request);
++	struct sweet_mali_buffer * freeSlot(uint32_t * handle);
+ 	IOReturn submit(struct sweet_panfrost_submit * request);
+ 
+ public:
+@@ -203,7 +213,8 @@ SweetMaliUserClient::start(IOService * provider)
+ struct sweet_mali_buffer *
+ SweetMaliUserClient::buffer(uint32_t handle)
+ {
+-	if (handle == 0 || handle > SWEET_MALI_BUFFERS || fBuffers == NULL || fBuffers[handle - 1].memory == NULL) {
++	if (handle == 0 || handle > SWEET_MALI_BUFFERS || fBuffers == NULL ||
++	    (fBuffers[handle - 1].memory == NULL && fBuffers[handle - 1].imported == NULL)) {
+ 		return NULL;
+ 	}
+ 	return &fBuffers[handle - 1];
+@@ -214,10 +225,90 @@ void
+ SweetMaliUserClient::freeBuffer(struct sweet_mali_buffer * b)
+ {
+ 	sweet_mali_unmap(b->address, b->size);
+-	b->memory->release();
++	if (b->imported != NULL) {
++		b->imported->complete();
++		b->imported->release();
++	} else {
++		b->memory->release();
++	}
+ 	bzero(b, sizeof(*b));
+ }
+ 
++/* With the lock held: a free handle, or NULL. */
++struct sweet_mali_buffer *
++SweetMaliUserClient::freeSlot(uint32_t * handle)
++{
++	for (uint32_t n = 0; n < SWEET_MALI_BUFFERS; n++) {
++		uint32_t i = (fNextBuffer + n) % SWEET_MALI_BUFFERS;
++
++		if (fBuffers[i].memory == NULL && fBuffers[i].imported == NULL) {
++			*handle = i + 1;
++			fNextBuffer = i + 1;
++			return &fBuffers[i];
++		}
++	}
++	IOLog("SweetMali: no handles left\n");
++	return NULL;
++}
++
++/*
++ * With the lock held. IMPORT_HOST: the caller's own pages (an IOSurface's, a malloc'd buffer) become a buffer the GPU
++ * reads and writes in place: wired for as long as the buffer lives, entered into the GPU's address space 4 KB at a
++ * time. Mesa's PanVK uses it for VK_EXT_external_memory_host, which the Metal runtime needs for IOSurfaces. The pages
++ * stay cached for the processor: the program cleans and invalidates them around the GPU's use (the Metal driver's
++ * sys_dcache_flush), as the frontend does for surfaces.
++ */
++IOReturn
++SweetMaliUserClient::importHost(struct sweet_import_host * request)
++{
++	struct sweet_mali_buffer * b;
++	IOMemoryDescriptor * memory;
++	uint32_t handle = 0;
++	bool mapped = true;
++
++	if (request->address == 0 || request->size == 0 || request->size > SWEET_MALI_BUFFER_MAX ||
++	    (request->address & PAGE_MASK) != 0 || (request->size & PAGE_MASK) != 0) {
++		return kIOReturnBadArgument;
++	}
++	b = freeSlot(&handle);
++	if (b == NULL) {
++		return kIOReturnNoResources;
++	}
++	memory = IOMemoryDescriptor::withAddressRange((mach_vm_address_t) request->address, (mach_vm_size_t) request->size,
++	    kIODirectionInOut, current_task());
++	if (memory == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (memory->prepare() != kIOReturnSuccess) {
++		memory->release();
++		IOLog("SweetMali: the pages at %#llx (%llu bytes) cannot be wired\n", request->address, request->size);
++		return kIOReturnVMError;
++	}
++	b->address = sweet_mali_address(request->size);
++	for (uint64_t offset = 0; offset < request->size && mapped && b->address != 0; offset += 4096) {
++		IOByteCount length = 0;
++		addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
++
++		mapped = phys != 0 && sweet_mali_map(b->address + offset, phys);
++	}
++	if (b->address == 0 || !mapped) {
++		if (b->address != 0) {
++			sweet_mali_unmap(b->address, request->size);
++		}
++		bzero(b, sizeof(*b));
++		memory->complete();
++		memory->release();
++		IOLog("SweetMali: imported pages of %llu bytes cannot be entered into the GPU's address space\n", request->size);
++		return kIOReturnNoMemory;
++	}
++	sweet_mali_mapped();
++	b->imported = memory;
++	b->size = request->size;
++	request->handle = handle;
++	request->offset = b->address;
++	return kIOReturnSuccess;
++}
++
+ /* With the lock held. */
+ IOReturn
+ SweetMaliUserClient::createBO(struct sweet_panfrost_create_bo * request)
+@@ -230,18 +321,8 @@ SweetMaliUserClient::createBO(struct sweet_panfrost_create_bo * request)
+ 	if (size == 0 || size > SWEET_MALI_BUFFER_MAX) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	for (uint32_t n = 0; n < SWEET_MALI_BUFFERS; n++) {
+-		uint32_t i = (fNextBuffer + n) % SWEET_MALI_BUFFERS;
+-
+-		if (fBuffers[i].memory == NULL) {
+-			b = &fBuffers[i];
+-			request->handle = i + 1;
+-			fNextBuffer = i + 1;
+-			break;
+-		}
+-	}
++	b = freeSlot(&request->handle);
+ 	if (b == NULL) {
+-		IOLog("SweetMali: no handles left\n");
+ 		return kIOReturnNoResources;
+ 	}
+ 	/*
+@@ -310,7 +391,7 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 
+-		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
++		if (b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
+ 			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
+ 		}
+ 	}
+@@ -324,7 +405,7 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 
+-		if (b != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
++		if (b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
+ 			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
+ 		}
+ 	}
+@@ -339,7 +420,7 @@ SweetMaliUserClient::clientClose(void)
+ {
+ 	IOLockLock(gSweetMaliLock);
+ 	for (uint32_t i = 0; fBuffers != NULL && i < SWEET_MALI_BUFFERS; i++) {
+-		if (fBuffers[i].memory != NULL) {
++		if (fBuffers[i].memory != NULL || fBuffers[i].imported != NULL) {
+ 			freeBuffer(&fBuffers[i]);
+ 		}
+ 	}
+@@ -398,7 +479,7 @@ SweetMaliUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, IO
+ 
+ 	IOLockLock(gSweetMaliLock);
+ 	b = buffer(type);
+-	if (b != NULL) {
++	if (b != NULL && b->memory != NULL) {
+ 		b->memory->retain();
+ 		*memory = b->memory;
+ 		*options = sweet_mali_write_combined() ? kIOMapWriteCombineCache : kIOMapDefaultCache;
+@@ -422,6 +503,7 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		struct sweet_panfrost_get_bo_offset offset;
+ 		struct sweet_panfrost_madvise madvise;
+ 		struct sweet_syncobj_create syncCreate;
++		struct sweet_import_host import;
+ 		uint8_t raw[64];
+ 	} r;
+ 	size_t size = args->structureInputSize;
+@@ -450,8 +532,11 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 	case kPanfrostCreateBO:
+ 		ret = createBO(&r.create);
+ 		break;
++	case kSweetImportHost:
++		ret = importHost(&r.import);
++		break;
+ 	case kPanfrostMmapBO:                   /* the offset is the handle: the program maps client memory of that type */
+-		ret = buffer(r.mmap.handle) != NULL ? kIOReturnSuccess : kIOReturnNotFound;
++		ret = buffer(r.mmap.handle) != NULL && buffer(r.mmap.handle)->memory != NULL ? kIOReturnSuccess : kIOReturnNotFound;
+ 		r.mmap.offset = (uint64_t) r.mmap.handle << 12;
+ 		break;
+ 	case kPanfrostGetBOOffset:

@@ -214,6 +214,7 @@ install_file(int fd, uint64_t off, uint64_t size, const char *path, uint32_t mod
 			return -1;
 		}
 		done += n;
+		apply_bytes = off - 64 + done;  /* progress inside a big file too, for the watchdog */
 	}
 	if (fsync(out) != 0) {
 		close(out);
@@ -405,8 +406,13 @@ apply_thread(void *arg)
 	return NULL;
 }
 
-/* How long the programs of the list wait for the dropbox before they start anyway. */
-#define APPLY_DEADLINE 180
+/*
+ * The programs of the list wait for the dropbox as long as it makes progress: they start anyway after APPLY_STALL
+ * seconds without a byte more, or after APPLY_DEADLINE seconds in all. (180 s flat was too short for a 40 MB drop at
+ * 6-7 s per MB: the tests ran with the old files.)
+ */
+#define APPLY_STALL 60
+#define APPLY_DEADLINE 1200
 
 int
 main(void)
@@ -424,17 +430,27 @@ main(void)
 	 * waits for the dropbox too, but not beyond the deadline: the logs matter more than a clean first read.
 	 */
 	pthread_create(&ap, NULL, apply_thread, NULL);
-	for (int t = 0; !apply_finished && t < APPLY_DEADLINE; t++) {
+	int stalled = 0;
+	const char *seen_phase = NULL;
+	for (int t = 0; !apply_finished && t < APPLY_DEADLINE && stalled < APPLY_STALL; t++) {
 		sleep(1);
-		if (t % 10 == 9 && !apply_finished) {
-			uint64_t now = apply_bytes;
-			say("SWEETBOOT: still %s after %d s: %llu of %llu bytes%s\n", (const char *)apply_phase, t + 1,
-			    (unsigned long long)now, (unsigned long long)apply_total, now == last ? " (no progress)" : "");
+		uint64_t now = apply_bytes;
+		const char *phase = (const char *)apply_phase;
+		if (now != last || phase != seen_phase) {
+			stalled = 0;
 			last = now;
+			seen_phase = phase;
+		} else {
+			stalled++;
+		}
+		if (t % 10 == 9 && !apply_finished) {
+			say("SWEETBOOT: still %s after %d s: %llu of %llu bytes%s\n", phase, t + 1, (unsigned long long)now,
+			    (unsigned long long)apply_total, stalled >= 10 ? " (no progress)" : "");
 		}
 	}
 	if (!apply_finished) {
-		say("SWEETBOOT: the dropbox is not applied after %d s: starting the programs anyway\n", APPLY_DEADLINE);
+		say("SWEETBOOT: the dropbox is not applied (%s): starting the programs anyway\n",
+		    stalled >= APPLY_STALL ? "no progress for a minute" : "20 minutes passed");
 	}
 	pthread_create(&th, NULL, outbox_thread, NULL);
 	run_list();

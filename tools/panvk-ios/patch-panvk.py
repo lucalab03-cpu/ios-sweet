@@ -131,6 +131,177 @@ sub_once('src/panfrost/vulkan/panvk_instance.c',
 "   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {\n",
 "#ifdef SWEET_IOS\n   if (build_id_len < VK_UUID_SIZE) {\n#else\n   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {\n#endif\n")
 
+# 3f. VK_EXT_external_memory_host (phase 4: the Metal runtime imports IOSurfaces and no-copy buffers as host memory;
+#     m2vtest's import step failed without it, boot 2026-11-14). The kernel wires the caller's pages (SweetMali
+#     IMPORT_HOST, patch 0128); the shim hands the buffer to PanVK's own dma-buf import as a descriptor that stands
+#     for it (sweet_drm_import_host), so the rest of PanVK is unchanged. Mapping such memory gives back the caller's
+#     pointer, and unmapping or freeing it never unmaps the caller's pages. 16 KB alignment: iOS's page.
+sub_once('src/panfrost/lib/kmod/pan_kmod.c',
+"      size_t size = lseek(fd, 0, SEEK_END);\n",
+"""#ifdef SWEET_IOS
+      size_t size = (size_t)sweet_drm_fd_size(fd);
+      if (size == 0)
+         size = lseek(fd, 0, SEEK_END);
+#else
+      size_t size = lseek(fd, 0, SEEK_END);
+#endif
+""")
+
+s = rd('src/panfrost/vulkan/panvk_device_memory.c')
+i = s.index('#include')
+s = s[:i] + ("#ifdef SWEET_IOS\nint sweet_drm_import_host(void *address, uint64_t size);\nvoid sweet_drm_forget_fd(int fd);\n#endif\n") + s[i:]
+wr('src/panfrost/vulkan/panvk_device_memory.c', s)
+sub_once('src/panfrost/vulkan/panvk_device_memory.c',
+"   if (fd_info) {\n      assert(\n",
+"""#ifdef SWEET_IOS
+   if (mem->vk.host_ptr) {
+      int host_fd = sweet_drm_import_host(mem->vk.host_ptr, pAllocateInfo->allocationSize);
+      if (host_fd < 0) {
+         result = panvk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE, "host pointer %p (%" PRIu64 " bytes) not imported",
+                               mem->vk.host_ptr, (uint64_t)pAllocateInfo->allocationSize);
+         goto err_destroy_mem;
+      }
+      mem->bo = pan_kmod_bo_import(device->kmod.dev, host_fd);
+      sweet_drm_forget_fd(host_fd);
+      if (!mem->bo) {
+         result = panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+         goto err_destroy_mem;
+      }
+   } else
+#endif
+   if (fd_info) {
+      assert(
+""")
+sub_once('src/panfrost/vulkan/panvk_device_memory.c',
+"   void *host_addr = NULL;\n   int map_flags = MAP_SHARED;\n",
+"""#ifdef SWEET_IOS
+   /* imported host memory: it is the caller's own mapping */
+   if (mem->vk.host_ptr) {
+      mem->addr.host = mem->vk.host_ptr;
+      *ppData = (char *)mem->vk.host_ptr + offset;
+      return VK_SUCCESS;
+   }
+#endif
+   void *host_addr = NULL;
+   int map_flags = MAP_SHARED;
+""")
+sub_once('src/panfrost/vulkan/panvk_device_memory.c',
+"   if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {\n",
+"""#ifdef SWEET_IOS
+   if (mem->vk.host_ptr) {
+      mem->addr.host = NULL;
+      return VK_SUCCESS;
+   }
+#endif
+   if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
+""")
+sub_once('src/panfrost/vulkan/panvk_device_memory.c',
+"   if (mem->addr.host) {\n      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));\n      assert(!ret);\n   }\n",
+"""#ifdef SWEET_IOS
+   if (mem->vk.host_ptr)
+      mem->addr.host = NULL; /* the caller's pages: never unmapped here */
+#endif
+   if (mem->addr.host) {
+      ASSERTED int ret = os_munmap(mem->addr.host, pan_kmod_bo_size(mem->bo));
+      assert(!ret);
+   }
+""")
+s = rd('src/panfrost/vulkan/panvk_device_memory.c')
+s += """
+#ifdef SWEET_IOS
+/* VK_EXT_external_memory_host: any memory type can take host pages (all of ours are host-visible). */
+VKAPI_ATTR VkResult VKAPI_CALL
+panvk_GetMemoryHostPointerPropertiesEXT(VkDevice _device, VkExternalMemoryHandleTypeFlagBits handleType,
+                                        const void *pHostPointer,
+                                        VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
+{
+   VK_FROM_HANDLE(panvk_device, device, _device);
+   struct panvk_physical_device *physical_device = to_panvk_physical_device(device->vk.physical);
+
+   if (handleType != VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT ||
+       ((uintptr_t)pHostPointer & (16384 - 1)) != 0)
+      return panvk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   uint32_t bits = 0;
+   for (uint32_t i = 0; i < physical_device->memory.type_count; i++) {
+      if (physical_device->memory.types[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+         bits |= 1u << i;
+   }
+   pMemoryHostPointerProperties->memoryTypeBits = bits;
+   return VK_SUCCESS;
+}
+#endif
+"""
+wr('src/panfrost/vulkan/panvk_device_memory.c', s)
+
+sub_once('src/panfrost/vulkan/panvk_vX_physical_device.c',
+"      .EXT_external_memory_dma_buf = true,\n",
+"      .EXT_external_memory_dma_buf = true,\n#ifdef SWEET_IOS\n      .EXT_external_memory_host = true,\n#endif\n")
+sub_once('src/panfrost/vulkan/panvk_vX_physical_device.c',
+"      .minMemoryMapAlignment = os_page_size,\n",
+"      .minMemoryMapAlignment = os_page_size,\n#ifdef SWEET_IOS\n      .minImportedHostPointerAlignment = 16384,\n#endif\n")
+
+sub_once('src/panfrost/vulkan/panvk_physical_device.c',
+"""   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+   /* From the Vulkan 1.3.298 spec:
+""",
+"""#ifdef SWEET_IOS
+   if (pExternalBufferInfo->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) {
+      pExternalBufferProperties->externalMemoryProperties = (VkExternalMemoryProperties){
+         .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+         .exportFromImportedHandleTypes = 0,
+         .compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+      };
+      return;
+   }
+#endif
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT |
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+   /* From the Vulkan 1.3.298 spec:
+""")
+sub_once('src/panfrost/vulkan/panvk_physical_device.c',
+"""   VkExternalMemoryProperties *external_properties)
+{
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+""",
+"""   VkExternalMemoryProperties *external_properties)
+{
+#ifdef SWEET_IOS
+   /* linear 2D images over imported host pages (the runtime's textures over IOSurfaces) */
+   if (handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT) {
+      if (pImageFormatInfo->type != VK_IMAGE_TYPE_2D || pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR)
+         return panvk_errorf(physical_device, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                             "host memory: linear 2D images only");
+      *external_properties = (VkExternalMemoryProperties){
+         .externalMemoryFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT,
+         .compatibleHandleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+      };
+      return VK_SUCCESS;
+   }
+#endif
+   const VkExternalMemoryHandleTypeFlags supported_handle_types =
+""")
+
+# 3g. Framebuffer fetch (rasterization-order attachment access) on Bifrost v7 too: metal2vulkan needs it for
+#     QuartzCore's path_blit (m2vtest, 2026-11-14). PanVK enables it only for v10+, whose CSF path emits its own
+#     ordering; on v7's job manager the tile buffer is read in primitive order per pixel by the hardware.
+#     SWEET_NO_FBFETCH=1 in the environment turns it off again. mtltest checks a framebuffer-fetch draw.
+for old in ("      .EXT_rasterization_order_attachment_access = PAN_ARCH >= 10,\n",
+            "      .ARM_rasterization_order_attachment_access = PAN_ARCH >= 10,\n"):
+    name = old.strip().split(' ')[0]
+    sub_once('src/panfrost/vulkan/panvk_vX_physical_device.c', old,
+             "#ifdef SWEET_IOS\n      %s = PAN_ARCH >= 10 || (PAN_ARCH >= 7 && !getenv(\"SWEET_NO_FBFETCH\")),\n#else\n%s#endif\n" % (name, old))
+s = rd('src/panfrost/vulkan/panvk_vX_physical_device.c')
+old = "      .rasterizationOrderColorAttachmentAccess = PAN_ARCH >= 10,\n"
+if s.count(old) != 1:
+    sys.exit("patch-panvk: rasterizationOrderColorAttachmentAccess anchor")
+wr('src/panfrost/vulkan/panvk_vX_physical_device.c', s.replace(old,
+   "#ifdef SWEET_IOS\n      .rasterizationOrderColorAttachmentAccess = PAN_ARCH >= 10 || (PAN_ARCH >= 7 && !getenv(\"SWEET_NO_FBFETCH\")),\n#else\n" + old + "#endif\n"))
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')

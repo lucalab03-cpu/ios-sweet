@@ -11,7 +11,9 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
+#import <IOSurface/IOSurfaceRef.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
@@ -77,11 +79,40 @@ static BOOL render_once(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPi
 	[re setRenderPipelineState:rps];
 	[re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 	[re endEncoding];
-	id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-	[be copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(64, 64, 1)
-		   toBuffer:readback destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256 * 64];
-	[be endEncoding];
+	if (readback) {
+		id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+		[be copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			 sourceSize:MTLSizeMake(64, 64, 1) toBuffer:readback destinationOffset:0 destinationBytesPerRow:256
+		   destinationBytesPerImage:256 * 64];
+		[be endEncoding];
+	}
 	return wait_ok(cb, @"render", ms);
+}
+
+/* Texels of a 64x64 picture off the expected one: `inside` in the top-left quarter, `outside` elsewhere (bytes in memory order). */
+static int wrong_texels(const uint8_t *b, size_t row, const uint8_t inside[4], const uint8_t outside[4], uint32_t *first)
+{
+	int bad = 0;
+	for (int y = 0; y < 64; y++)
+		for (int x = 0; x < 64; x++) {
+			const uint8_t *t = b + y * row + x * 4;
+			const uint8_t *want = x < 32 && y < 32 ? inside : outside;
+			if (memcmp(t, want, 4)) {
+				if (!bad && first)
+					*first = (uint32_t)(t[0] | t[1] << 8 | t[2] << 16 | (uint32_t)t[3] << 24);
+				bad++;
+			}
+		}
+	return bad;
+}
+
+/* The pages a host import uses: what the CPU wrote goes to memory before the GPU's use, and nothing stale stays after. */
+static void flush_lines(void *start, size_t len)
+{
+	uintptr_t a = (uintptr_t)start & ~(uintptr_t)63, end = (uintptr_t)start + len;
+	for (; a < end; a += 64)
+		__asm__ volatile("dc civac, %0" :: "r"(a) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
 }
 
 int main(void)
@@ -102,8 +133,9 @@ int main(void)
 
 		double t0 = now();
 		id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+		double device_ms = (now() - t0) * 1000;
 		say(@"mtltest: device %@ (class %s) in %.0f ms", dev ? dev.name : @"nil", dev ? object_getClassName(dev) : "-",
-		    (now() - t0) * 1000);
+		    device_ms);
 		if (!dev) {
 			say(@"mtltest: RESULT no Metal device (see /var/tmp/sweetmtl2.log)");
 			return 1;
@@ -121,7 +153,9 @@ int main(void)
 
 		/* compute */
 		id<MTLFunction> kfn = [lib newFunctionWithName:@"scale_add"];
+		double p0 = now();
 		id<MTLComputePipelineState> cps = kfn ? [dev newComputePipelineStateWithFunction:kfn error:&err] : nil;
+		say(@"mtltest: compute pipeline in %.1f ms", (now() - p0) * 1000);
 		if (!cps) {
 			say(@"mtltest: compute pipeline: %@", err);
 		} else {
@@ -154,7 +188,9 @@ int main(void)
 		rd.vertexFunction = [lib newFunctionWithName:@"quad_vertex"];
 		rd.fragmentFunction = [lib newFunctionWithName:@"quad_fragment"];
 		rd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+		p0 = now();
 		id<MTLRenderPipelineState> rps = [dev newRenderPipelineStateWithDescriptor:rd error:&err];
+		say(@"mtltest: render pipeline in %.1f ms", (now() - p0) * 1000);
 		if (!rps) {
 			say(@"mtltest: render pipeline: %@", err);
 		} else {
@@ -198,8 +234,99 @@ int main(void)
 				say(@"mtltest: render: no target texture");
 			}
 		}
-		say(@"mtltest: RESULT device %s, compute %s, render %s, %.2f ms per render", object_getClassName(dev),
-		    compute_bad == 0 ? "ok" : "WRONG", render_bad == 0 ? "ok" : "WRONG", repeat_ms);
+		/* phase 4 checks, each on its own: host import, IOSurface, framebuffer fetch */
+		static const uint8_t rgba_in[4] = { 255, 51, 0, 255 }, rgba_out[4] = { 0, 0, 255, 255 };
+		static const uint8_t bgra_in[4] = { 0, 51, 255, 255 }, bgra_out[4] = { 255, 0, 0, 255 };
+		int import_bad = -1, surface_bad = -1, fetch_bad = -1;
+		uint32_t first = 0;
+
+		/* host import: a no-copy buffer over 16 KB of our own pages, a linear texture over it, the quad drawn in place */
+		if (rps) {
+			void *pages = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+			memset(pages, 0x5a, 16384);
+			flush_lines(pages, 16384);
+			id<MTLBuffer> nb = [dev newBufferWithBytesNoCopy:pages length:16384 options:MTLResourceStorageModeShared
+							    deallocator:nil];
+			MTLTextureDescriptor *ld = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+											width:64 height:64 mipmapped:NO];
+			ld.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+			ld.storageMode = MTLStorageModeShared;
+			id<MTLTexture> lt = nb ? [nb newTextureWithDescriptor:ld offset:0 bytesPerRow:256] : nil;
+			if (!nb || !lt) {
+				say(@"mtltest: import: no-copy buffer %@, texture over it %@ (see sweetmtl2.log)", nb ? @"ok" : @"refused",
+				    lt ? @"ok" : @"refused");
+			} else if (render_once(dev, q, rps, lt, nil, NULL)) {
+				flush_lines(pages, 16384);
+				import_bad = wrong_texels(pages, 256, rgba_in, rgba_out, &first);
+				say(@"mtltest: import: %d of 4096 texels wrong%@", import_bad,
+				    import_bad ? [NSString stringWithFormat:@" (first %#x)", first] : @" (PASS)");
+			}
+			lt = nil;
+			nb = nil;
+			munmap(pages, 16384);
+		}
+
+		/* IOSurface: what CoreAnimation renders into; a BGRA surface, a texture over it, read back by locking it */
+		{
+			NSDictionary *props = @{
+				(__bridge NSString *)kIOSurfaceWidth : @64, (__bridge NSString *)kIOSurfaceHeight : @64,
+				(__bridge NSString *)kIOSurfaceBytesPerElement : @4, (__bridge NSString *)kIOSurfaceBytesPerRow : @256,
+				(__bridge NSString *)kIOSurfacePixelFormat : @(0x42475241) /* 'BGRA' */
+			};
+			IOSurfaceRef surf = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+			MTLRenderPipelineDescriptor *bd = [MTLRenderPipelineDescriptor new];
+			bd.vertexFunction = [lib newFunctionWithName:@"quad_vertex"];
+			bd.fragmentFunction = [lib newFunctionWithName:@"quad_fragment"];
+			bd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+			id<MTLRenderPipelineState> bps = [dev newRenderPipelineStateWithDescriptor:bd error:&err];
+			MTLTextureDescriptor *sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+											width:64 height:64 mipmapped:NO];
+			sd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+			id<MTLTexture> st = surf ? [dev newTextureWithDescriptor:sd iosurface:surf plane:0] : nil;
+			if (!surf || !bps || !st) {
+				say(@"mtltest: iosurface: surface %@, BGRA pipeline %@, texture %@", surf ? @"ok" : @"refused",
+				    bps ? @"ok" : (id)err, st ? @"ok" : @"refused (see sweetmtl2.log)");
+			} else if (render_once(dev, q, bps, st, nil, NULL)) {
+				IOSurfaceLock(surf, kIOSurfaceLockReadOnly, NULL);
+				size_t row = IOSurfaceGetBytesPerRow(surf);
+				surface_bad = wrong_texels(IOSurfaceGetBaseAddress(surf), row, bgra_in, bgra_out, &first);
+				IOSurfaceUnlock(surf, kIOSurfaceLockReadOnly, NULL);
+				say(@"mtltest: iosurface: %d of 4096 texels wrong (row %zu)%@", surface_bad, row,
+				    surface_bad ? [NSString stringWithFormat:@" (first %#x)", first] : @" (PASS)");
+			}
+			st = nil;
+			if (surf)
+				CFRelease(surf);
+		}
+
+		/* framebuffer fetch: the quad reads the cleared blue and writes it with red and blue swapped */
+		{
+			MTLRenderPipelineDescriptor *fd = [MTLRenderPipelineDescriptor new];
+			fd.vertexFunction = [lib newFunctionWithName:@"quad_vertex"];
+			fd.fragmentFunction = [lib newFunctionWithName:@"fetch_fragment"];
+			fd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+			double p0 = now();
+			id<MTLRenderPipelineState> fps = [dev newRenderPipelineStateWithDescriptor:fd error:&err];
+			say(@"mtltest: fetch: pipeline %@ in %.1f ms", fps ? @"made" : (id)err, (now() - p0) * 1000);
+			MTLTextureDescriptor *td2 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+											 width:64 height:64 mipmapped:NO];
+			td2.usage = MTLTextureUsageRenderTarget;
+			td2.storageMode = MTLStorageModePrivate;
+			id<MTLTexture> ft = [dev newTextureWithDescriptor:td2];
+			id<MTLBuffer> frb = [dev newBufferWithLength:256 * 64 options:MTLResourceStorageModeShared];
+			if (fps && ft && render_once(dev, q, fps, ft, frb, NULL)) {
+				static const uint8_t swapped[4] = { 255, 0, 0, 255 };
+				fetch_bad = wrong_texels(frb.contents, 256, swapped, rgba_out, &first);
+				say(@"mtltest: fetch: %d of 4096 texels wrong%@", fetch_bad,
+				    fetch_bad ? [NSString stringWithFormat:@" (first %#x)", first] : @" (PASS)");
+			}
+		}
+
+		say(@"mtltest: RESULT device %s, compute %s, render %s, %.2f ms per render, import %s, iosurface %s, fetch %s, "
+		    @"device %.0f ms (pipelines: a second run of mtltest shows the cache)",
+		    object_getClassName(dev), compute_bad == 0 ? "ok" : "WRONG", render_bad == 0 ? "ok" : "WRONG", repeat_ms,
+		    import_bad == 0 ? "ok" : "WRONG", surface_bad == 0 ? "ok" : "WRONG", fetch_bad == 0 ? "ok" : "WRONG",
+		    device_ms);
 	}
 	return 0;
 }

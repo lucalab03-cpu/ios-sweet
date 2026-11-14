@@ -762,6 +762,78 @@ drmGetNodeTypeFromFd(int fd)
 	return DRM_NODE_RENDER;
 }
 
+/*
+ * Host-pointer imports (VK_EXT_external_memory_host, patched into PanVK): SweetMali's IMPORT_HOST (kernel patch 0128)
+ * wires the caller's pages and makes them a buffer. PanVK then takes the buffer through its dma-buf import
+ * (pan_kmod_bo_import(fd)), so the buffer travels as a descriptor of /dev/null that stands for its handle and size:
+ * drmPrimeFDToHandle and sweet_drm_fd_size answer for it, sweet_drm_forget_fd drops it.
+ */
+#define SWEET_IMPORT_HOST_NR 0x4e
+#define IMPORTS 256
+static struct { int fd; uint32_t handle; uint64_t size; } imports[IMPORTS];
+static pthread_mutex_t import_lock = PTHREAD_MUTEX_INITIALIZER;
+
+int
+sweet_drm_import_host(void *address, uint64_t size)
+{
+	struct { uint64_t address, size; uint32_t handle, pad; uint64_t offset; } r = { (uint64_t)(uintptr_t)address, size, 0, 0, 0 };
+	int error = call(SWEET_IMPORT_HOST_NR, &r, sizeof(r));
+	trace("sweetdrm: IMPORT_HOST %p size %#llx -> err %d, handle %u gpu %#llx", address, (unsigned long long)size, error,
+	    r.handle, (unsigned long long)r.offset);
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
+	int f = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	pthread_mutex_lock(&import_lock);
+	for (int i = 0; f >= 0 && i < IMPORTS; i++) {
+		if (imports[i].fd <= 0) {
+			imports[i].fd = f;
+			imports[i].handle = r.handle;
+			imports[i].size = size;
+			pthread_mutex_unlock(&import_lock);
+			return f;
+		}
+	}
+	pthread_mutex_unlock(&import_lock);
+	if (f >= 0) {
+		close(f);
+	}
+	struct drm_gem_close c = { .handle = r.handle };
+	(void)call(0x09, &c, sizeof(c));
+	errno = ENOMEM;
+	return -1;
+}
+
+uint64_t
+sweet_drm_fd_size(int fd)
+{
+	uint64_t size = 0;
+	pthread_mutex_lock(&import_lock);
+	for (int i = 0; i < IMPORTS; i++) {
+		if (imports[i].fd == fd && fd > 0) {
+			size = imports[i].size;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&import_lock);
+	return size;
+}
+
+void
+sweet_drm_forget_fd(int fd)
+{
+	pthread_mutex_lock(&import_lock);
+	for (int i = 0; i < IMPORTS; i++) {
+		if (imports[i].fd == fd && fd > 0) {
+			imports[i].fd = 0;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&import_lock);
+	close(fd);
+}
+
 /* Buffers as file descriptors, for other programs: not here. */
 int
 drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
@@ -773,7 +845,16 @@ drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd)
 int
 drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle)
 {
-	(void)fd; (void)prime_fd; (void)handle;
+	(void)fd;
+	pthread_mutex_lock(&import_lock);
+	for (int i = 0; i < IMPORTS; i++) {
+		if (imports[i].fd == prime_fd && prime_fd > 0) {
+			*handle = imports[i].handle;
+			pthread_mutex_unlock(&import_lock);
+			return 0;
+		}
+	}
+	pthread_mutex_unlock(&import_lock);
 	return fail(ENOSYS);
 }
 
