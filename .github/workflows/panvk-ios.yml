@@ -33,7 +33,9 @@ jobs:
           export PATH=/opt/homebrew/opt/llvm/bin:$PATH
           export PKG_CONFIG_PATH=/opt/homebrew/opt/llvm/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
           cd mesa-26.2.7
-          meson setup build-native --prefix "$PWD/native" -Dbuildtype=release \
+          # sweet-ios here too: panfrost_compile links the kmod code, which wants xf86drm.h; macOS has no libdrm,
+          # the shim builds on macOS as well (the compile tools never open the GPU).
+          meson setup build-native --prefix "$PWD/native" -Dbuildtype=release -Dsweet-ios=true \
             -Dgallium-drivers= -Dvulkan-drivers=panfrost -Dplatforms= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
             -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled \
             -Dmesa-clc=enabled -Dinstall-mesa-clc=true -Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true \
