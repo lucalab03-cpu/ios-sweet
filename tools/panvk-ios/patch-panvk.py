@@ -106,6 +106,14 @@ sub_once('src/panfrost/lib/kmod/panfrost_kmod.c',
 #endif
 """)
 
+# 3c. vk_image has drm_format_mod (VK_EXT_image_drm_format_modifier) only on Linux/BSD; PanVK uses it everywhere.
+for path, want in (('src/vulkan/runtime/vk_image.h', 1), ('src/vulkan/runtime/vk_image.c', 3)):
+    s = rd(path)
+    old = "#if DETECT_OS_LINUX || DETECT_OS_BSD\n"
+    if s.count(old) != want:
+        sys.exit("patch-panvk: %s: %d Linux/BSD gates, expected %d" % (path, s.count(old), want))
+    wr(path, s.replace(old, "#if DETECT_OS_LINUX || DETECT_OS_BSD || defined(SWEET_IOS)\n"))
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')
