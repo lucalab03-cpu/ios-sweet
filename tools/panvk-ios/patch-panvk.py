@@ -123,6 +123,14 @@ sub_once('src/panfrost/vulkan/meson.build',
 "  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id,\n"
 "               sweet_ios ? ['-Wl,-undefined,dynamic_lookup'] : []],\n")
 
+# 3e. On Apple the build-id is the Mach-O LC_UUID, 16 bytes; PanVK wants a 20-byte SHA-1 and refused to make an
+#     instance (vktest, boot 2026-11-14: vkCreateInstance -> INITIALIZATION_FAILED). Mesa's macOS driver takes
+#     VK_UUID_SIZE (kk_instance.c). PanVK uses at most VK_UUID_SIZE of it afterwards (driverUUID,
+#     optimalTilingLayoutUUID; the cache key hashes the zero-padded buffer).
+sub_once('src/panfrost/vulkan/panvk_instance.c',
+"   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {\n",
+"#ifdef SWEET_IOS\n   if (build_id_len < VK_UUID_SIZE) {\n#else\n   if (build_id_len < BUILD_ID_EXPECTED_HASH_LENGTH) {\n#endif\n")
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')
