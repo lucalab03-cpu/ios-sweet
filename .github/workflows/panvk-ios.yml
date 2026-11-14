@@ -1,0 +1,92 @@
+name: panvk-ios
+# PanVK (Mesa 26.2.7) for iOS 16 arm64 over SweetMali, plus vktest. docs/METAL-PANVK.md, phase 1.
+# Two builds from one patched tree: the native compile tools for this Mac (mesa_clc, vtn_bindgen2,
+# panfrost_compile need LLVM), then the driver for iOS, which uses them as "system" tools and needs no LLVM.
+# Errors are also printed as annotations, so they show on the run's summary page.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/panvk-ios/**'
+      - '.github/workflows/panvk-ios.yml'
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install meson ninja bison flex pkg-config llvm spirv-llvm-translator spirv-tools
+          pip3 install --break-system-packages mako pyyaml packaging || pip3 install mako pyyaml packaging
+          echo "/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+          /opt/homebrew/opt/llvm/bin/llvm-config --version
+          pkg-config --modversion LLVMSPIRVLib SPIRV-Tools || true
+      - name: Mesa 26.2.7
+        run: |
+          curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-26.2.7.tar.xz
+          echo "04294f75d22e9f61cd1e050206bc48b3d39366e788f1803a3368e3d5a872ce18  mesa.tar.xz" | shasum -a 256 -c
+          tar xJf mesa.tar.xz
+          python3 -I tools/panvk-ios/patch-panvk.py "$PWD/mesa-26.2.7" "$PWD/tools/panvk-ios/sweet-drm"
+      - name: Native compile tools
+        run: |
+          set -o pipefail
+          export PATH=/opt/homebrew/opt/llvm/bin:$PATH
+          export PKG_CONFIG_PATH=/opt/homebrew/opt/llvm/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+          cd mesa-26.2.7
+          meson setup build-native --prefix "$PWD/native" -Dbuildtype=release \
+            -Dgallium-drivers= -Dvulkan-drivers=panfrost -Dplatforms= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
+            -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled \
+            -Dmesa-clc=enabled -Dinstall-mesa-clc=true -Dprecomp-compiler=enabled -Dinstall-precomp-compiler=true \
+            -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled \
+            -Dvalgrind=disabled -Dlibunwind=disabled -Dtools= -Dbuild-tests=false -Dvideo-codecs= > ../native-setup.log 2>&1 \
+            || { grep -iE "error|not found" ../native-setup.log | tail -12 | sed 's/^/::error::native setup: /'; tail -60 ../native-setup.log; exit 1; }
+          ninja -C build-native src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile \
+            > ../native-build.log 2>&1 \
+            || { grep -E "error:|FAILED" ../native-build.log | head -12 | sed 's/^/::error::native build: /'; tail -60 ../native-build.log; exit 1; }
+          mkdir -p ../hosttools
+          cp build-native/src/compiler/clc/mesa_clc build-native/src/compiler/spirv/vtn_bindgen2 \
+             build-native/src/panfrost/clc/panfrost_compile ../hosttools/
+          echo "$PWD/../hosttools" >> $GITHUB_PATH
+      - name: PanVK for iOS
+        run: |
+          set -o pipefail
+          sudo xcode-select -s /Applications/Xcode_16.app
+          cd mesa-26.2.7
+          meson setup build-ios --cross-file ../tools/mesa-ios/ios.cross --prefix /usr/local \
+            -Dbuildtype=release -Dsweet-ios=true -Dvulkan-drivers=panfrost -Dgallium-drivers= -Dplatforms= \
+            -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
+            -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system -Dspirv-tools=disabled \
+            -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled \
+            -Dvalgrind=disabled -Dlibunwind=disabled -Dtools= -Dbuild-tests=false -Dvideo-codecs= -Dvulkan-layers= \
+            > ../ios-setup.log 2>&1 \
+            || { grep -iE "error|not found" ../ios-setup.log | tail -12 | sed 's/^/::error::ios setup: /'; tail -80 ../ios-setup.log; exit 1; }
+          ninja -k 0 -C build-ios src/panfrost/vulkan/libvulkan_panfrost.dylib > ../ios-build.log 2>&1 \
+            || { grep -E "error:" ../ios-build.log | sort -u | head -40 | sed 's/^/::error::ios build: /'; grep -E "error:|FAILED|undefined|Undefined" ../ios-build.log | head -120; exit 1; }
+      - name: Package
+        run: |
+          set -e
+          lib=mesa-26.2.7/build-ios/src/panfrost/vulkan/libvulkan_panfrost.dylib
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1"
+          $C -Imesa-26.2.7/include tools/panvk-ios/vktest.c -o vktest
+          mkdir -p drop/usr/local/lib drop/usr/local/bin drop/usr/local/etc
+          cp "$lib" drop/usr/local/lib/libvulkan_panfrost.dylib
+          install_name_tool -id /usr/local/lib/libvulkan_panfrost.dylib drop/usr/local/lib/libvulkan_panfrost.dylib
+          cp vktest drop/usr/local/bin/
+          nm -gU drop/usr/local/lib/libvulkan_panfrost.dylib | grep -E " _vk(_icd)?GetInstanceProcAddr$" \
+            || { echo "::error::the driver does not export vkGetInstanceProcAddr"; exit 1; }
+          echo "weak imports (missing on iOS 16 would be NULL):"; nm -m drop/usr/local/lib/libvulkan_panfrost.dylib | grep "weak external" || true
+          otool -L drop/usr/local/lib/libvulkan_panfrost.dylib
+          codesign -s - --force drop/usr/local/lib/libvulkan_panfrost.dylib drop/usr/local/bin/vktest
+          # vktest first, so nothing earlier can hold it up; the other tests as in the inject drop
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/metaltest\n' > drop/usr/local/etc/sweet-boot.list
+          ls -l drop/usr/local/lib drop/usr/local/bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panvk-ios
+          path: drop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: panvk-logs
+          path: '*.log'
+          if-no-files-found: ignore

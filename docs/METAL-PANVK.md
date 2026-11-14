@@ -54,6 +54,10 @@ MetalPluginClassName. Today the bundle is a tracing stub that the metaltest proc
 
 ## Phases (each ends with one boot and the usual outbox + log-area)
 
+Phase 1 code: `tools/panvk-ios` (patch-panvk.py for Mesa 26.2.7, its own fork of sweet-drm with in-process
+syncobjs, device enumeration and mmap routing, vktest) and `.github/workflows/panvk-ios.yml` (runs on every push
+to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: Mesa 25.1 dropped OSMesa.
+
 1. **Vulkan up (no Metal).** Build PanVK for iOS and a `vktest` (flame's phone/turnip/vktest.c, adapted).
    It should print the device, API version, extensions and features (our vulkaninfo), then clear an image
    and read it back. Run it from sweet-boot.list.
