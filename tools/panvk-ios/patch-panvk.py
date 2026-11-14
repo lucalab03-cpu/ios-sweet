@@ -149,7 +149,7 @@ sub_once('src/panfrost/lib/kmod/pan_kmod.c',
 
 s = rd('src/panfrost/vulkan/panvk_device_memory.c')
 i = s.index('#include')
-s = s[:i] + ("#ifdef SWEET_IOS\nint sweet_drm_import_host(void *address, uint64_t size);\nvoid sweet_drm_forget_fd(int fd);\n#endif\n") + s[i:]
+s = s[:i] + ("#ifdef SWEET_IOS\n#include <stdint.h>\nint sweet_drm_import_host(void *address, uint64_t size);\nvoid sweet_drm_forget_fd(int fd);\n#endif\n") + s[i:]
 wr('src/panfrost/vulkan/panvk_device_memory.c', s)
 sub_once('src/panfrost/vulkan/panvk_device_memory.c',
 "   if (fd_info) {\n      assert(\n",
