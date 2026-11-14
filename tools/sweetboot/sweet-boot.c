@@ -160,12 +160,65 @@ outbox_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * The payload is read in pieces of CHUNK bytes, never whole: a whole 60 MB payload in memory got sweet-boot killed
+ * by jetsam (per-process limit, boot 2026-11-14 with PanVK's driver in the dropbox).
+ */
+#define CHUNK (1u << 20)
+static uint8_t chunk[CHUNK];
+
+static int
+pread_all(int fd, void *buf, size_t len, uint64_t off)
+{
+	size_t done = 0;
+
+	while (done < len) {
+		ssize_t n = pread(fd, (uint8_t *)buf + done, len - done, (off_t)(off + done));
+		if (n <= 0) {
+			return -1;
+		}
+		done += (size_t)n;
+	}
+	return 0;
+}
+
+/* Copy `size` bytes at `off` of the dropbox to a new file at `path` (through path.sweettmp). */
+static int
+install_file(int fd, uint64_t off, uint64_t size, const char *path, uint32_t mode)
+{
+	char tmp[1040];
+	int out;
+
+	snprintf(tmp, sizeof(tmp), "%s.sweettmp", path);
+	out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
+	if (out < 0) {
+		return -1;
+	}
+	for (uint64_t done = 0; done < size;) {
+		size_t n = size - done > CHUNK ? CHUNK : (size_t)(size - done);
+		if (pread_all(fd, chunk, n, off + done) != 0 || write(out, chunk, n) != (ssize_t)n) {
+			close(out);
+			unlink(tmp);
+			return -1;
+		}
+		done += n;
+	}
+	if (fsync(out) != 0) {
+		close(out);
+		unlink(tmp);
+		return -1;
+	}
+	close(out);
+	chmod(tmp, mode & 0777);
+	return rename(tmp, path);
+}
+
 static void
 apply_dropbox(void)
 {
-	uint8_t head[64], digest[32];
+	uint8_t head[64], digest[32], entry[16];
 	uint64_t generation, length, applied = 0, pos = 0;
-	uint8_t *payload;
+	CC_SHA256_CTX sha;
 	int fd, files = 0, bad = 0;
 	FILE *f;
 
@@ -200,32 +253,46 @@ apply_dropbox(void)
 		close(fd);
 		return;
 	}
-	payload = malloc(length);
-	if (!payload || read_all(fd, payload, length) != 0) {
-		say("SWEETBOOT: cannot read the dropbox\n");
+	/* first the checksum of the whole payload, piece by piece; nothing is installed unless it matches */
+	say("SWEETBOOT: dropbox generation %llu, %llu bytes: checking\n", (unsigned long long)generation,
+	    (unsigned long long)length);
+	CC_SHA256_Init(&sha);
+	for (uint64_t done = 0; done < length;) {
+		size_t n = length - done > CHUNK ? CHUNK : (size_t)(length - done);
+		if (pread_all(fd, chunk, n, 64 + done) != 0) {
+			say("SWEETBOOT: cannot read the dropbox\n");
+			close(fd);
+			return;
+		}
+		CC_SHA256_Update(&sha, chunk, (CC_LONG)n);
+		done += n;
+	}
+	CC_SHA256_Final(digest, &sha);
+	if (memcmp(digest, head + 24, 32) != 0) {
+		say("SWEETBOOT: dropbox checksum does not match, not applied\n");
 		close(fd);
 		return;
 	}
-	close(fd);
-	CC_SHA256(payload, (CC_LONG)length, digest);
-	if (memcmp(digest, head + 24, 32) != 0) {
-		say("SWEETBOOT: dropbox checksum does not match, not applied\n");
-		free(payload);
-		return;
-	}
 	while (pos + 16 <= length) {
-		uint32_t plen = rd32(payload + pos), mode = rd32(payload + pos + 4);
-		uint64_t size = rd64(payload + pos + 8);
-		char path[1024], tmp[1040];
-		int out;
+		uint32_t plen, mode;
+		uint64_t size;
+		char path[1024];
 
+		if (pread_all(fd, entry, 16, 64 + pos) != 0) {
+			say("SWEETBOOT: cannot read entry at %llu\n", (unsigned long long)pos);
+			bad++;
+			break;
+		}
+		plen = rd32(entry);
+		mode = rd32(entry + 4);
+		size = rd64(entry + 8);
 		pos += 16;
-		if (plen == 0 || plen >= sizeof(path) || pos + plen + size > length) {
+		if (plen == 0 || plen >= sizeof(path) || pos + plen + size > length ||
+		    pread_all(fd, path, plen, 64 + pos) != 0) {
 			say("SWEETBOOT: damaged entry at %llu\n", (unsigned long long)pos);
 			bad++;
 			break;
 		}
-		memcpy(path, payload + pos, plen);
 		path[plen] = 0;
 		pos += plen;
 		if (path[0] != '/' || strstr(path, "..") != NULL) {
@@ -234,29 +301,16 @@ apply_dropbox(void)
 			pos += size;
 			continue;
 		}
-		snprintf(tmp, sizeof(tmp), "%s.sweettmp", path);
 		make_parents(path);
-		out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
-		if (out < 0 || write(out, payload + pos, size) != (ssize_t)size || fsync(out) != 0) {
-			say("SWEETBOOT: cannot write %s: %s\n", path, strerror(errno));
-			bad++;
-			if (out >= 0) {
-				close(out);
-			}
-			pos += size;
-			continue;
-		}
-		close(out);
-		chmod(tmp, mode & 0777);
-		if (rename(tmp, path) != 0) {
-			say("SWEETBOOT: cannot rename to %s: %s\n", path, strerror(errno));
+		if (install_file(fd, 64 + pos, size, path, mode) != 0) {
+			say("SWEETBOOT: cannot install %s: %s\n", path, strerror(errno));
 			bad++;
 		} else {
 			files++;
 		}
 		pos += size;
 	}
-	free(payload);
+	close(fd);
 	say("SWEETBOOT: dropbox generation %llu: %d file(s) installed, %d problem(s)\n",
 	    (unsigned long long)generation, files, bad);
 	if (bad == 0) {
@@ -328,8 +382,9 @@ main(void)
 	pthread_t th;
 
 	say("SWEETBOOT: start\n");
-	apply_dropbox();
+	/* the outbox first: if applying the dropbox goes wrong, its log still gets out */
 	pthread_create(&th, NULL, outbox_thread, NULL);
+	apply_dropbox();
 	run_list();
 	say("SWEETBOOT: done\n");
 	write_outbox();

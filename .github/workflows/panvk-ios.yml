@@ -75,6 +75,10 @@ jobs:
           mkdir -p drop/usr/local/lib drop/usr/local/bin drop/usr/local/etc
           cp "$lib" drop/usr/local/lib/libvulkan_panfrost.dylib
           install_name_tool -id /usr/local/lib/libvulkan_panfrost.dylib drop/usr/local/lib/libvulkan_panfrost.dylib
+          # local symbols out: the dropbox and sweet-boot have to carry less (exports stay)
+          echo "driver before strip: $(stat -f %z drop/usr/local/lib/libvulkan_panfrost.dylib) bytes"
+          strip -x drop/usr/local/lib/libvulkan_panfrost.dylib
+          echo "driver after strip: $(stat -f %z drop/usr/local/lib/libvulkan_panfrost.dylib) bytes"
           cp vktest drop/usr/local/bin/
           nm -gU drop/usr/local/lib/libvulkan_panfrost.dylib | grep -E " _vk(_icd)?GetInstanceProcAddr$" \
             || { echo "::error::the driver does not export vkGetInstanceProcAddr"; exit 1; }

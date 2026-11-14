@@ -17,10 +17,13 @@ jobs:
           $C -fobjc-arc -bundle tools/metal/SweetMTLDriver.m -framework Foundation -framework Metal -lobjc \
              '-Wl,-U,_OBJC_CLASS_$__MTLDevice' '-Wl,-U,_OBJC_METACLASS_$__MTLDevice' -o SweetMTLDriver
           $C tools/metaltest/metaltest.c -lobjc -o metaltest
-          codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib SweetMTLDriver metaltest
+          # sweet-boot that reads the dropbox in 1 MB pieces (the old one loaded it whole and jetsam killed it on
+          # PanVK's drop): this small drop installs it, the next boot can take the big one.
+          $C tools/sweetboot/sweet-boot.c -o sweet-boot
+          codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib SweetMTLDriver metaltest sweet-boot
           mkdir -p drop/usr/local/bin drop/usr/lib drop/usr/local/libexec drop/usr/local/etc drop/var/sweet
           mkdir -p drop/System/Library/Extensions/SweetMTLDriver.bundle
-          cp install-wrap metaltest drop/usr/local/bin/
+          cp install-wrap metaltest sweet-boot drop/usr/local/bin/
           cp sweetinject.dylib drop/usr/lib/
           cp backboardd-wrap drop/usr/local/libexec/
           cp SweetMTLDriver tools/metal/Info.plist drop/System/Library/Extensions/SweetMTLDriver.bundle/

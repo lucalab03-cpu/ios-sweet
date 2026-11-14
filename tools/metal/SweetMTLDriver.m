@@ -134,6 +134,23 @@ __attribute__((constructor)) static void loaded(void)
 		 * every MTLDevice method in this file. */
 		BOOL ok = class_addProtocol(objc_getClass("SweetMTLDevice"), @protocol(MTLDevice));
 		say("MTLDevice protocol: %s", ok ? "added" : "already there or refused");
+		/* Then it asserts [newDevice conformsToProtocol:@protocol(MTLDeviceSPI)] (line 835, boot 2026-11-14): the
+		 * private protocol, which Metal's own image defines. Every other MTL*Device* protocol is logged, for the
+		 * next assertion. */
+		unsigned int np = 0;
+		Protocol *__unsafe_unretained *all = objc_copyProtocolList(&np);
+		for (unsigned int i = 0; i < np; i++) {
+			const char *pn = protocol_getName(all[i]);
+			if (strncmp(pn, "MTL", 3) != 0 || strstr(pn, "Device") == NULL) continue;
+			if (!strcmp(pn, "MTLDeviceSPI")) {
+				BOOL spi = class_addProtocol(objc_getClass("SweetMTLDevice"), all[i]);
+				say("protocol %s: %s", pn, spi ? "added" : "already there or refused");
+			} else {
+				say("protocol %s: seen", pn);
+			}
+		}
+		free(all);
+		if (!objc_getProtocol("MTLDeviceSPI")) say("protocol MTLDeviceSPI: not found in the runtime");
 		signal(SIGABRT, on_abort);
 		install_trace(objc_getClass("SweetMTLDevice"));
 	}
