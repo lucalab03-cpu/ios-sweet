@@ -1,0 +1,78 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index 761a19b..b9f0009 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -30,6 +30,7 @@
+ #include <mach/vm_param.h>
+ #include <sys/systm.h>
+ #include <pexpert/pexpert.h>
++#include <kern/clock.h>                 /* mach_absolute_time(): what cleaning imported pages costs */
+ #include <kern/task.h>                  /* current_task(): the caller of IMPORT_HOST */
+ 
+ extern "C" {
+@@ -120,6 +121,7 @@ struct sweet_mali_buffer {
+ 	IOBufferMemoryDescriptor * memory;      /* a buffer made here, or */
+ 	IOMemoryDescriptor * imported;          /* the caller's pages, wired while the buffer lives */
+ 	uint64_t address, size;
++	bool readOnly;                          /* imported pages the caller may only read */
+ };
+ 
+ static IOLock * gSweetMaliLock;
+@@ -285,7 +287,9 @@ SweetMaliUserClient::importHost(struct sweet_import_host * request)
+ 	 * Both results are logged, so the next failure says why.
+ 	 */
+ 	IOReturn wired = memory->prepare();
++	bool readOnlyPages = false;
+ 	if (wired != kIOReturnSuccess) {
++		readOnlyPages = true;
+ 		memory->release();
+ 		memory = IOMemoryDescriptor::withAddressRange((mach_vm_address_t) request->address, (mach_vm_size_t) request->size,
+ 		    kIODirectionOut, current_task());
+@@ -321,6 +325,7 @@ SweetMaliUserClient::importHost(struct sweet_import_host * request)
+ 	sweet_mali_mapped();
+ 	b->imported = memory;
+ 	b->size = request->size;
++	b->readOnly = readOnlyPages;
+ 	request->handle = handle;
+ 	request->offset = b->address;
+ 	return kIOReturnSuccess;
+@@ -405,6 +410,27 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 		}
+ 	}
+ 	fSubmits++;
++	/*
++	 * Imported pages are the caller's (or, read-only, another process's: CA's clients, the wallpaper) and cached for the
++	 * processor; the Mali does not snoop. Boot 2026-11-14: with them imported, the wallpaper and the widgets' blur of it
++	 * read black. PanVK need not name them in bo_handles, so every imported buffer of this client is cleaned to memory
++	 * before each job (and the writable ones invalidated after it). The cost is logged now and then.
++	 */
++	uint64_t importedStart = mach_absolute_time(), importedBytes = 0;
++	uint32_t importedCount = 0;
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL) {
++			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOStore, 0, fBuffers[i].size);
++			importedBytes += fBuffers[i].size;
++			importedCount++;
++		}
++	}
++	if (importedCount != 0 && (fSubmits == 1 || fSubmits == 64 || (fSubmits & 1023) == 0)) {
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time() - importedStart, &ns);
++		IOLog("SweetMali: job %u: %u imported buffers (%llu KB) cleaned in %llu us\n", fSubmits, importedCount,
++		    importedBytes >> 10, ns / 1000);
++	}
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 
+@@ -419,6 +445,11 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 		ret = kIOReturnIOError;
+ 	}
+ 	/* the GPU wrote to the buffers: the processor must not see what it had cached of them */
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL && !fBuffers[i].readOnly) {
++			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
++		}
++	}
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 

@@ -116,6 +116,13 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    wired"), and with them CA's no-copy buffers; the 4.6 MB one is exactly a 720x1604 BGRA image (2880 bytes per
    row), probably the wallpaper. Kernel patch 0130: when the pages cannot be wired for writing, wire them for
    the GPU to read, and log both error codes.
+   **With 0130 (payload-mali):** all 40 imports succeed, each for reading only (KERN_PROTECTION_FAILURE 0x2 for
+   writing): backboardd maps them read-only, written by other processes (CA's clients, the wallpaper, sizes up to
+   6.6 MB). The wallpaper stays black and the widgets' blur of it turns black too: the GPU reads RAM that the
+   writer's CPU cache has not written back. The kernel cleaned only the buffers it made. Patch 0131 cleans every
+   imported buffer of the client before each job (performOperation kIOMemoryIncoherentIOStore) and invalidates the
+   writable ones after it, logging the cost at jobs 1, 64 and every 1024th. Same boot: pipeline cache 80 hits / 26
+   misses (it holds across boots), 388 commits in 250 s, 105 ms mean from commit to completion.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)
