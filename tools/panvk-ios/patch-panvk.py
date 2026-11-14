@@ -96,6 +96,16 @@ r'''#ifdef SWEET_IOS
 #endif
 ''')
 
+# 3b. Darwin has no sched_setscheduler (the perf-counter thread, never started here): POSIX's per-thread call.
+sub_once('src/panfrost/lib/kmod/panfrost_kmod.c',
+"   int ret = sched_setscheduler(0, SCHED_FIFO, &rt_params);\n",
+"""#ifdef SWEET_IOS
+   int ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &rt_params);
+#else
+   int ret = sched_setscheduler(0, SCHED_FIFO, &rt_params);
+#endif
+""")
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')

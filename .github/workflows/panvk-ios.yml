@@ -42,9 +42,9 @@ jobs:
             -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled \
             -Dvalgrind=disabled -Dlibunwind=disabled -Dtools= -Dbuild-tests=false -Dvideo-codecs= > ../native-setup.log 2>&1 \
             || { grep -iE "error|not found" ../native-setup.log | tail -12 | sed 's/^/::error::native setup: /'; tail -60 ../native-setup.log; exit 1; }
-          ninja -C build-native src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile \
+          ninja -k 0 -C build-native src/compiler/clc/mesa_clc src/compiler/spirv/vtn_bindgen2 src/panfrost/clc/panfrost_compile \
             > ../native-build.log 2>&1 \
-            || { grep -E "error:|FAILED" ../native-build.log | head -12 | sed 's/^/::error::native build: /'; tail -60 ../native-build.log; exit 1; }
+            || { grep -E "error:" ../native-build.log | sort -u | head -40 | sed 's/^/::error::native build: /'; grep -E "error:|FAILED|Undefined|undefined" ../native-build.log | head -120; exit 1; }
           mkdir -p ../hosttools
           cp build-native/src/compiler/clc/mesa_clc build-native/src/compiler/spirv/vtn_bindgen2 \
              build-native/src/panfrost/clc/panfrost_compile ../hosttools/
