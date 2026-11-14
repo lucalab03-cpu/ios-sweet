@@ -63,7 +63,9 @@ jobs:
             > ../ios-setup.log 2>&1 \
             || { grep -iE "error|not found" ../ios-setup.log | tail -12 | sed 's/^/::error::ios setup: /'; tail -80 ../ios-setup.log; exit 1; }
           ninja -k 0 -C build-ios src/panfrost/vulkan/libvulkan_panfrost.dylib > ../ios-build.log 2>&1 \
-            || { grep -E "error:" ../ios-build.log | sort -u | head -40 | sed 's/^/::error::ios build: /'; grep -E "error:|FAILED|undefined|Undefined" ../ios-build.log | head -120; exit 1; }
+            || { grep -E "error:" ../ios-build.log | sort -u | head -40 | sed 's/^/::error::ios build: /';
+                 grep -oE '^ +"[^"]+", referenced from:' ../ios-build.log | sed -E 's/^ +"([^"]+)".*/\1/' | sort -u | head -40 | sed 's/^/::error::undefined symbol: /';
+                 grep -E "error:|FAILED|undefined|Undefined" -A30 ../ios-build.log | head -200; exit 1; }
       - name: Package
         run: |
           set -e
