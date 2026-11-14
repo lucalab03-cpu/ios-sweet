@@ -88,7 +88,11 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    caller's pages wired and mapped for the GPU). The shim hands them to PanVK's dma-buf import, and patch-panvk.py
    section 3f adds VK_EXT_external_memory_host on top (16 KB alignment). Section 3g turns on rasterization-order
    attachment access (framebuffer fetch) for v7 (SWEET_NO_FBFETCH=1 turns it off). mtltest checks a no-copy buffer,
-   an IOSurface texture, a framebuffer-fetch draw and, on a second run, the pipeline cache. Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
+   an IOSurface texture, a framebuffer-fetch draw and, on a second run, the pipeline cache.
+   **Result 2026-11-14 (payload-imp, kernel with 0128):** import ok, IOSurface ok (IOSurfaceCreate, a texture over
+   it, drawn by the GPU, read back by locking it), fetch ok, each with 0 texels wrong. Pipelines take 110/49/303 ms
+   (compute/render/fetch) on the first run and 2/7/4 ms on the next, so the cache works across processes. A boot
+   on an older kernel answers "request 0x4e is not known here", and the import is then refused. Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
    cold compile time, keep the pipeline cache across boots, and add real syncobjs / async submit.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
