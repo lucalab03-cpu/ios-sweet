@@ -63,7 +63,11 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    and read it back. Run it from sweet-boot.list.
    Pass: Vulkan >= 1.2, timelineSemaphore = 1, and the readback is correct.
    If PanVK on v7 needs `PAN_I_WANT_A_BROKEN_VULKAN_DRIVER=1`, set it; it says nothing about our port.
-2. **Bridge self-test.** Run m2vtest (`nmb_selftest`: device, AIR fixture library, compute, render,
+   **Done 2026-11-14:** Vulkan 1.2 (MESA_VK_VERSION_OVERRIDE; PanVK says 1.0 below Valhall), timelineSemaphore and
+   bufferDeviceAddress on, fill, copy, timeline and clear pass. Two fixes were needed: the 16-byte Mach-O build-id,
+   and write-combined buffer mappings requested by the shim itself (IOKit keeps the caller's cache mode), with
+   kernel patch 0127 fixing pmap_sync_page_attributes_phys above 4 GB.
+2. **Bridge self-test** (`tools/metal2`, workflow `metal2`). Run m2vtest (`nmb_selftest`: device, AIR fixture library, compute, render,
    host-page import, QuartzCore metallib pairs) against PanVK.
    Pass: stage 0x650f, and counts of how many CA kernels and pairs compile. The refusal list from here is
    the PanVK/translator work list.

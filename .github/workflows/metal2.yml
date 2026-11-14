@@ -1,0 +1,96 @@
+name: metal2
+# Phase 2 of docs/METAL-PANVK.md: the native Metal bridge (tools/metal2/bridge, NativeMetal from ios-flame, MIT) over the
+# metal2vulkan runtime (steelbrain/metal2vulkan at UniXNU's/ios-flame's pin + tools/metal2/bridge/patches; GPL-2.0+ OR
+# LGPL-3.0+), built as a static library for iOS 16 arm64, and m2vtest, its self-test, which drives PanVK
+# (/usr/local/lib/libvulkan_panfrost.dylib from the panvk-ios drop). Runs on every push to these paths.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/metal2/**'
+      - '.github/workflows/metal2.yml'
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      M2V_REPO: https://github.com/steelbrain/metal2vulkan
+      M2V_PIN: 720ef1ce
+      RUST: 1.98.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install llvm
+          rustup toolchain install "$RUST" --profile minimal --target aarch64-apple-ios
+          rustup run "$RUST" rustc --version
+      - name: metal2vulkan at the pin, with the bridge's patches
+        run: |
+          set -e
+          git clone -q --filter=blob:none "$M2V_REPO" m2v
+          git -C m2v checkout -q "$M2V_PIN" || { echo "::error::metal2vulkan pin $M2V_PIN not found"; exit 1; }
+          git -C m2v log --oneline -1
+          for p in tools/metal2/bridge/patches/*.patch; do
+            git -C m2v apply --whitespace=nowarn "$PWD/$p" || { echo "::error::patch $(basename $p) does not apply"; exit 1; }
+            echo "applied $(basename $p)"
+          done
+      - name: Bridge for iOS
+        run: |
+          set -e
+          sudo xcode-select -s /Applications/Xcode_16.app
+          OUT=$PWD/m2v-bridge
+          mkdir -p "$OUT"
+          LLVM_AS=/opt/homebrew/opt/llvm/bin/llvm-as
+          "$LLVM_AS" -o "$OUT/runtime_examples.air" m2v/crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll
+          "$LLVM_AS" -o "$OUT/function_constant.air" m2v/crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll
+          cat > "$OUT/Cargo.toml" <<EOF
+          [package]
+          name = "native-metal-bridge"
+          version = "0.1.0"
+          edition = "2024"
+          rust-version = "1.98"
+          [workspace]
+          [lib]
+          crate-type = ["staticlib"]
+          path = "$PWD/tools/metal2/bridge/NativeMetalBridge.rs"
+          [dependencies]
+          metal2vulkan = { path = "$PWD/m2v/crates/metal2vulkan", features = ["ash"] }
+          metal2vulkan-runtime = { path = "$PWD/m2v/crates/metal2vulkan-runtime" }
+          libc = "0.2"
+          sha2 = { version = "0.10", features = ["asm"] }
+          [profile.release]
+          panic = "unwind"
+          debug = 1
+          EOF
+          NMB_FIXTURE_AIR=$OUT/runtime_examples.air NMB_FC_AIR=$OUT/function_constant.air IPHONEOS_DEPLOYMENT_TARGET=16.0 \
+            cargo +"$RUST" build --release --manifest-path "$OUT/Cargo.toml" --target aarch64-apple-ios \
+            --target-dir "$OUT/target" > bridge-build.log 2>&1 \
+            || { grep -E "^error" -A8 bridge-build.log | head -80; grep -E "^error" bridge-build.log | sort -u | head -20 | sed 's/^/::error::bridge: /'; exit 1; }
+          ls -la "$OUT/target/aarch64-apple-ios/release/libnative_metal_bridge.a"
+      - name: m2vtest and package
+        run: |
+          set -e
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O2"
+          $C -Itools/metal2 tools/metal2/m2vtest.c m2v-bridge/target/aarch64-apple-ios/release/libnative_metal_bridge.a \
+            -Wl,-dead_strip -o m2vtest > link.log 2>&1 || { cat link.log | head -60; grep -E "error|Undefined|\"_" link.log | head -30 | sed 's/^/::error::link: /'; exit 1; }
+          grep -v "was built for newer" link.log || true
+          echo "m2vtest before strip: $(stat -f %z m2vtest) bytes"
+          strip -x m2vtest
+          echo "m2vtest after strip: $(stat -f %z m2vtest) bytes"
+          echo "weak imports (missing on iOS 16 would be NULL):"; nm -m m2vtest | grep "weak external" || true
+          codesign -s - --force m2vtest
+          mkdir -p drop/usr/local/bin drop/usr/local/etc
+          cp m2vtest drop/usr/local/bin/
+          # m2vtest last: a slow dropbox install may still be copying it when the list starts (sweet-boot's 180 s deadline)
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/metaltest\n/usr/local/bin/m2vtest\n' > drop/usr/local/etc/sweet-boot.list
+          ls -l drop/usr/local/bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metal2
+          path: drop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: metal2-logs
+          path: '*.log'
+          if-no-files-found: ignore
