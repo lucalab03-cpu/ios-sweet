@@ -34,6 +34,9 @@ static void try_lib(const char *path) {
 int main(void) {
     lg = fopen("/var/tmp/sweetmetal.log", "w");
     if (!lg) return 1;
+    /* Metal's own failure messages (MTLReportFailure, failed assertions) go to stderr before it aborts */
+    freopen("/var/tmp/sweetmetal-stderr.log", "w", stderr);
+    setvbuf(stderr, NULL, _IONBF, 0);
     say("metaltest: start, pid %d", getpid());
     const char *dirs[] = { "/System/Library/Extensions", "/System/Library/PrivateFrameworks", "/System/Library/Frameworks" };
     const char *keys[] = { "AGX", "GPU", "Metal", "Accel", "GLES", "IOSurface" };
