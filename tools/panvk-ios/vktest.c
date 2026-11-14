@@ -45,6 +45,16 @@ on_alarm(int sig)
 	_exit(3);
 }
 
+/* Under PANVK_DEBUG=trace, pandecode aborts when a job faults: say so, the decode is in /var/tmp/sweetvk-decode.* */
+static void
+on_abort(int sig)
+{
+	(void)sig;
+	fflush(NULL);   /* pandecode's dump file is a stdio stream: abort() would drop what it still buffers */
+	say("vktest: RESULT aborted: a GPU job faulted (decoded jobs in /var/tmp/sweetvk-decode.*)");
+	_exit(4);
+}
+
 static double
 ms_since(const struct timespec *t0)
 {
@@ -246,7 +256,33 @@ gpu_tests(int timeline, int *passed)
 	if (bad) say("vktest: copy: first wrong word %#x", first);
 	*passed += !bad;
 
+	/* timeline (before the clear: under PANVK_DEBUG=trace a faulting job aborts the process) */
+	if (!timeline) {
+		say("vktest: timeline: not supported, skipped");
+	} else {
+		VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+			.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0 };
+		VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti };
+		VkSemaphore sem;
+		CHECK(vkCreateSemaphore(dev, &sci, NULL, &sem));
+		uint64_t value = 1;
+		VkTimelineSemaphoreSubmitInfo tsi = { .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+			.signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &value };
+		VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &tsi, .signalSemaphoreCount = 1,
+			.pSignalSemaphores = &sem };
+		CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+		VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+			.pSemaphores = &sem, .pValues = &value };
+		VkResult wr = vkWaitSemaphores(dev, &wi, 2000000000ull);
+		uint64_t now = 0;
+		vkGetSemaphoreCounterValue(dev, sem, &now);
+		say("vktest: timeline: wait -> %s, counter %llu%s", vkr(wr), (unsigned long long)now,
+		    wr == VK_SUCCESS && now == 1 ? " (PASS)" : "");
+		*passed += wr == VK_SUCCESS && now == 1;
+	}
+
 	/* clear */
+	say("vktest: clear: starting (the last check)");
 	VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
 		.format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { 64, 64, 1 }, .mipLevels = 1, .arrayLayers = 1,
 		.samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
@@ -266,30 +302,6 @@ gpu_tests(int timeline, int *passed)
 	say("vktest: clear: %d of 4096 texels wrong%s", bad, bad ? "" : " (PASS)");
 	if (bad) say("vktest: clear: first wrong texel %#x", first);
 	*passed += !bad;
-
-	/* timeline */
-	if (!timeline) {
-		say("vktest: timeline: not supported, skipped");
-		return 1;
-	}
-	VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
-		.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 0 };
-	VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti };
-	VkSemaphore sem;
-	CHECK(vkCreateSemaphore(dev, &sci, NULL, &sem));
-	uint64_t value = 1;
-	VkTimelineSemaphoreSubmitInfo tsi = { .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-		.signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &value };
-	VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &tsi, .signalSemaphoreCount = 1, .pSignalSemaphores = &sem };
-	CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
-	VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
-		.pSemaphores = &sem, .pValues = &value };
-	VkResult wr = vkWaitSemaphores(dev, &wi, 2000000000ull);
-	uint64_t now = 0;
-	vkGetSemaphoreCounterValue(dev, sem, &now);
-	say("vktest: timeline: wait -> %s, counter %llu%s", vkr(wr), (unsigned long long)now,
-	    wr == VK_SUCCESS && now == 1 ? " (PASS)" : "");
-	*passed += wr == VK_SUCCESS && now == 1;
 	return 1;
 }
 
@@ -301,10 +313,22 @@ main(void)
 	freopen("/var/tmp/sweetvk-stderr.log", "a", stderr);
 	setvbuf(stderr, NULL, _IONBF, 0);
 	signal(SIGALRM, on_alarm);
+	signal(SIGABRT, on_abort);
 	alarm(90);
 	/* PanVK refuses v6/v7 without it ("not well-tested"); PANVK_DEBUG=startup logs how it finds the device. */
 	setenv("PAN_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
-	setenv("PANVK_DEBUG", "startup", 0);
+	/*
+	 * PanVK claims Vulkan 1.0 below Valhall (get_api_version: 1.4 only for v10+), although v7 has the 1.2 pieces as
+	 * extensions (timeline semaphores, buffer device address, ...). metal2vulkan wants 1.2: see what 1.2 says.
+	 */
+	setenv("MESA_VK_VERSION_OVERRIDE", "1.2", 0);
+	/*
+	 * trace: every job chain is decoded (pandecode) into /var/tmp/sweetvk-decode.* (in the outbox) and submits are
+	 * synchronous. The clear's fragment job ended with IMPRECISE_FAULT (status 0x5b, boot 2026-11-14): its
+	 * descriptors are what to look at. A faulting job aborts vktest in this mode, so the clear runs last.
+	 */
+	setenv("PANVK_DEBUG", "startup,trace", 0);
+	setenv("PANDECODE_DUMP_FILE", "/var/tmp/sweetvk-decode", 0);
 	setenv("MESA_DEBUG", "1", 0);
 	time_t wall = time(NULL);
 	say("vktest: start %s", ctime(&wall));
