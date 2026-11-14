@@ -1,0 +1,68 @@
+SweetMali: buffers are write-combined for programs; fix pmap_sync_page_attributes_phys above 4 GB
+
+PanVK takes its memory to be host-coherent (memory type 1: DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT):
+what the processor writes must reach the GPU with no cache maintenance. SweetMali's buffers were mapped
+cached, and only the small buffers a job names were cleaned around it; PanVK's command pools are not among
+them, so a clear's fragment job read stale descriptors and ended with IMPRECISE_FAULT (status 0x5b, vktest,
+boot 2026-11-14). With PANVK_DEBUG=trace, which puts command data in a non-cached pool, the same clear passed.
+
+Write-combined mappings panicked before ("phystokv_range: illegal PA"): changing a page's cache attributes
+writes it back through pmap_sync_page_attributes_phys, which shifted the 32-bit ppnum_t by PAGE_SHIFT, so
+pages above 4 GB (the G05 has 8 GB) lost bit 32. ios-flame found and fixed the same line (their 0115).
+boot-arg sweetmaliwc=0 goes back to cached mappings.
+
+diff -ruN a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -6876,6 +6876,7 @@
+ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
++	/* ptoa, not pp << PAGE_SHIFT: ppnum_t is 32 bits, so pages above 4 GB lost bit 32 (the G05 has 8 GB) */
++	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
+ }
+
+diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -29,6 +29,7 @@
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <mach/vm_param.h>
+ #include <sys/systm.h>
++#include <pexpert/pexpert.h>
+
+ extern "C" {
+ /* bsd/dev/sweet_mali.c */
+@@ -374,6 +375,21 @@
+ 	return kIOReturnUnsupported;
+ }
+
++/*
++ * How a program maps a buffer: write-combined (boot-arg sweetmaliwc, default 1), so that what it writes reaches
++ * memory, where the GPU reads it, without cache maintenance: Mesa's PanVK takes the memory to be host-coherent.
++ * sweetmaliwc=0: cached, as before (only the small buffers a job names are cleaned around it).
++ */
++static bool
++sweet_mali_write_combined(void)
++{
++	static int wc = -1;
++	if (wc < 0 && !PE_parse_boot_argn("sweetmaliwc", &wc, sizeof(wc))) {
++		wc = 1;
++	}
++	return wc != 0;
++}
++
+ IOReturn
+ SweetMaliUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, IOMemoryDescriptor ** memory)
+ {
+@@ -385,7 +401,7 @@
+ 	if (b != NULL) {
+ 		b->memory->retain();
+ 		*memory = b->memory;
+-		*options = kIOMapDefaultCache;
++		*options = sweet_mali_write_combined() ? kIOMapWriteCombineCache : kIOMapDefaultCache;
+ 		ret = kIOReturnSuccess;
+ 	}
+ 	IOLockUnlock(gSweetMaliLock);

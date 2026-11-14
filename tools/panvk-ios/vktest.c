@@ -323,11 +323,27 @@ main(void)
 	 */
 	setenv("MESA_VK_VERSION_OVERRIDE", "1.2", 0);
 	/*
-	 * trace: every job chain is decoded (pandecode) into /var/tmp/sweetvk-decode.* (in the outbox) and submits are
-	 * synchronous. The clear's fragment job ended with IMPRECISE_FAULT (status 0x5b, boot 2026-11-14): its
-	 * descriptors are what to look at. A faulting job aborts vktest in this mode, so the clear runs last.
+	 * KEY=VALUE lines of /var/sweet/vktest.env go into the environment first, e.g. PANVK_DEBUG=startup,trace: every
+	 * job chain decoded (pandecode) into /var/tmp/sweetvk-decode.* (in the outbox), submits synchronous, command
+	 * data in a non-cached pool, and a faulting job aborts vktest (so the clear runs last). Not by default: trace's
+	 * non-cached pool hid the cache problem behind the clear's IMPRECISE_FAULT (boot 2026-11-14), which kernel
+	 * patch 0127 (write-combined mappings) is meant to fix.
 	 */
-	setenv("PANVK_DEBUG", "startup,trace", 0);
+	FILE *envf = fopen("/var/sweet/vktest.env", "r");
+	if (envf) {
+		char line[256];
+		while (fgets(line, sizeof(line), envf)) {
+			line[strcspn(line, "\r\n")] = 0;
+			char *eq = strchr(line, '=');
+			if (line[0] != '#' && eq) {
+				*eq = 0;
+				setenv(line, eq + 1, 1);
+				say("vktest: env %s=%s", line, eq + 1);
+			}
+		}
+		fclose(envf);
+	}
+	setenv("PANVK_DEBUG", "startup", 0);
 	setenv("PANDECODE_DUMP_FILE", "/var/tmp/sweetvk-decode", 0);
 	setenv("MESA_DEBUG", "1", 0);
 	time_t wall = time(NULL);
