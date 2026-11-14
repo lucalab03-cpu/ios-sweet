@@ -131,6 +131,11 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    refusal's pointer, length and options. The bottom strip was gone, but 0132 turned nothing off: only our layer
    (ovl0 L0 at 0x78200000) was on at that jump (src_con 0x101, ext_con 0x10000: bit 8 and the extended layers are
    still to be read when the strip shows).
+   **New driver (0245eb9) and payload-el (0133):** no no-copy buffer is refused any more, and the strip is gone, but the
+   wallpaper is still black: PosterBoard, which draws it with Metal, dies with SIGTRAP (a Swift trap) once per boot,
+   because its MTLCreateSystemDefaultDevice() is nil (it is not in metal.allow). The metal2 drop now allows
+   PosterBoard. The "host memory: linear 2D images only" warnings are PanVK answering format queries for optimal-tiled
+   images over host memory (patch-panvk.py 3f); no texture creation was refused (telemetry x0).
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)

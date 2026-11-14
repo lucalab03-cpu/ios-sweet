@@ -111,8 +111,9 @@ jobs:
           mkdir -p drop/usr/local/bin drop/usr/local/etc drop/usr/local/share/sweet drop/System/Library/Extensions/SweetMTLDriver.bundle drop/var/sweet
           # m2vtest (about 20 MB) stays out of the drop: the one already on the phone does; the artifact keeps it apart
           cp mtltest sweetsvc drop/usr/local/bin/
-          # phase 4: backboardd gets the Metal device (the wrapper runs it as backboardd.orig)
-          printf 'backboardd\nbackboardd.orig\nmetaltest\nmtltest\n' > drop/var/sweet/metal.allow
+          # phase 4: backboardd gets the Metal device (the wrapper runs it as backboardd.orig). PosterBoard draws the
+          # wallpaper with Metal; without a device it dies with SIGTRAP (boot 2026-11-15) and the wallpaper stays black
+          printf 'backboardd\nbackboardd.orig\nPosterBoard\nmetaltest\nmtltest\n' > drop/var/sweet/metal.allow
           # daemons that only respawn on this phone (boot 2026-11-14: 335 starts each); sweetsvc disables them from the next boot
           printf 'bluetoothd\nfairplayd.H2\n' > drop/var/sweet/svc-disable
           # the rescue drop: Metal back to the tests only (sweet-boot can overwrite, not delete)
