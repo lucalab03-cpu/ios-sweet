@@ -23,6 +23,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <dirent.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -167,14 +168,25 @@ outbox_thread(void *arg)
 #define CHUNK (1u << 20)
 static uint8_t chunk[CHUNK];
 
+/* What applying the dropbox is doing, for the watchdog in main() (boot 2026-11-14: 35 minutes at "checking"). */
+static volatile const char *apply_phase = "starting";
+static volatile uint64_t apply_bytes, apply_total;
+static volatile int apply_finished;
+
 static int
 pread_all(int fd, void *buf, size_t len, uint64_t off)
 {
 	size_t done = 0;
 
 	while (done < len) {
+		time_t t0 = time(NULL);
 		ssize_t n = pread(fd, (uint8_t *)buf + done, len - done, (off_t)(off + done));
+		if (time(NULL) - t0 >= 5) {
+			say("SWEETBOOT: slow read: %zu bytes at %llu took %ld s\n", len - done,
+			    (unsigned long long)(off + done), (long)(time(NULL) - t0));
+		}
 		if (n <= 0) {
+			say("SWEETBOOT: read at %llu: %s\n", (unsigned long long)(off + done), n == 0 ? "end of file" : strerror(errno));
 			return -1;
 		}
 		done += (size_t)n;
@@ -257,6 +269,8 @@ apply_dropbox(void)
 	say("SWEETBOOT: dropbox generation %llu, %llu bytes: checking\n", (unsigned long long)generation,
 	    (unsigned long long)length);
 	CC_SHA256_Init(&sha);
+	apply_phase = "checking";
+	apply_total = length;
 	for (uint64_t done = 0; done < length;) {
 		size_t n = length - done > CHUNK ? CHUNK : (size_t)(length - done);
 		if (pread_all(fd, chunk, n, 64 + done) != 0) {
@@ -266,7 +280,10 @@ apply_dropbox(void)
 		}
 		CC_SHA256_Update(&sha, chunk, (CC_LONG)n);
 		done += n;
+		apply_bytes = done;
 	}
+	apply_phase = "installing";
+	apply_bytes = 0;
 	CC_SHA256_Final(digest, &sha);
 	say("SWEETBOOT: checksum %s\n", memcmp(digest, head + 24, 32) == 0 ? "ok" : "wrong");
 	if (memcmp(digest, head + 24, 32) != 0) {
@@ -303,6 +320,7 @@ apply_dropbox(void)
 			continue;
 		}
 		make_parents(path);
+		apply_bytes = pos;
 		if (install_file(fd, 64 + pos, size, path, mode) != 0) {
 			say("SWEETBOOT: cannot install %s: %s\n", path, strerror(errno));
 			bad++;
@@ -378,18 +396,46 @@ run_list(void)
 	fclose(f);
 }
 
+static void *
+apply_thread(void *arg)
+{
+	(void)arg;
+	apply_dropbox();
+	apply_finished = 1;
+	return NULL;
+}
+
+/* How long the programs of the list wait for the dropbox before they start anyway. */
+#define APPLY_DEADLINE 180
+
 int
 main(void)
 {
-	pthread_t th;
+	pthread_t th, ap;
+	uint64_t last = (uint64_t)-1;
 
 	say("SWEETBOOT: start\n");
 	/*
-	 * The dropbox first, then the outbox thread, never both at once: with the outbox thread writing and syncing
-	 * the same file while the dropbox was read, sweet-boot hung for good (boot 2026-11-14, 18.7 MB drop: no
-	 * file installed, the list never started, so neither did sweetaccel-d, and backboardd crashed in a loop).
+	 * Reading the dropbox can be very slow or stall: boot 2026-11-14 spent about 3.5 minutes on an 18 MB drop, and
+	 * the next boot stayed at "checking" for 35 minutes, so no program of the list ever started (no sweetaccel-d:
+	 * backboardd crash loop; no tests; the outbox never refreshed). The dropbox is applied in its own thread; every
+	 * 10 s this one logs where it is, and after APPLY_DEADLINE seconds the list starts anyway with the files that
+	 * are there (a drop that finishes later takes effect for the programs started after it). The outbox thread
+	 * waits for the dropbox too, but not beyond the deadline: the logs matter more than a clean first read.
 	 */
-	apply_dropbox();
+	pthread_create(&ap, NULL, apply_thread, NULL);
+	for (int t = 0; !apply_finished && t < APPLY_DEADLINE; t++) {
+		sleep(1);
+		if (t % 10 == 9 && !apply_finished) {
+			uint64_t now = apply_bytes;
+			say("SWEETBOOT: still %s after %d s: %llu of %llu bytes%s\n", (const char *)apply_phase, t + 1,
+			    (unsigned long long)now, (unsigned long long)apply_total, now == last ? " (no progress)" : "");
+			last = now;
+		}
+	}
+	if (!apply_finished) {
+		say("SWEETBOOT: the dropbox is not applied after %d s: starting the programs anyway\n", APPLY_DEADLINE);
+	}
 	pthread_create(&th, NULL, outbox_thread, NULL);
 	run_list();
 	say("SWEETBOOT: done\n");
