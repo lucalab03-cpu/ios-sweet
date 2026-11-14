@@ -67,7 +67,13 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    bufferDeviceAddress on, fill, copy, timeline and clear pass. Two fixes were needed: the 16-byte Mach-O build-id,
    and write-combined buffer mappings requested by the shim itself (IOKit keeps the caller's cache mode), with
    kernel patch 0127 fixing pmap_sync_page_attributes_phys above 4 GB.
-2. **Bridge self-test** (`tools/metal2`, workflow `metal2`). Run m2vtest (`nmb_selftest`: device, AIR fixture library, compute, render,
+2. **Bridge self-test** (`tools/metal2`, workflow `metal2`).
+   **First run 2026-11-14:** every step ran in 2.3 s. Compute 0/1000 wrong and render 0/64 wrong, both through
+   metal2vulkan on PanVK. The import failed as expected (`HostMemory` needs VK_EXT_external_memory_host). QuartzCore
+   (iOS 16, 141 functions): 16 of 28 pipelines built. The refusals are 4 tile_downsample kernels (Apple tile shading,
+   refused on every non-Apple GPU), 6 pairs whose vertex stage needs a vertex descriptor the self-test does not give
+   (a test limit), and 2 path_blit pairs that need framebuffer fetch (rasterizationOrderColorAttachmentAccess, which
+   PanVK enables only for v10+; Bifrost can read the tile buffer, so it can be added for v7 later). Run m2vtest (`nmb_selftest`: device, AIR fixture library, compute, render,
    host-page import, QuartzCore metallib pairs) against PanVK.
    Pass: stage 0x650f, and counts of how many CA kernels and pairs compile. The refusal list from here is
    the PanVK/translator work list.
