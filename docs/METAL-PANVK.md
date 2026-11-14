@@ -99,6 +99,15 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    install. The driver answers six device queries with the G52's values, and backboardd's telemetry goes to
    /var/tmp/sweetmtl2-telemetry.log every 10 s for 10 minutes. The rescue drop (artifact metal2-rescue) puts back
    the allow list with only the tests.
+   **First boot with backboardd on Metal (payload-bb, kernel 0129):** backboardd.orig gets the device. In 40 s it
+   builds 14 pipelines (21.6 s in all, the slowest 5.7 s, 30 Vulkan cache entries written), 18 render passes and
+   5 blits, then nothing: 0 draws and 0 commits up to +520 s, and the screen stays black. Its textures include
+   formats 550-554 (BGRA10_XR family): CA's deep framebuffer, which ios-flame found makes CA draw nothing
+   ("Unexpected framebuffer format b3a8"). The driver set CAEnableDeepFramebuffer only in the app domain and only
+   in -initWithAcceleratorPort:. Fix: the bundle's constructor sets the three CA keys in the app and global domains,
+   and sweetsvc writes them into the global preferences of root and mobile. backboardd could not write
+   sweetmtl2.log (made 0644 by root's tests); the log is now 0666. Touch, same boot: a report every 8 ms, longest
+   gaps 8-25 ms (one of 453 ms at the left edge).
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)

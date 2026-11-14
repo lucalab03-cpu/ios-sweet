@@ -40,6 +40,8 @@ extern "C" void sm2_logs(const char *s)
 		n = (int)sizeof(buf) - 1;
 	int fd = open("/var/tmp/sweetmtl2.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
 	if (fd >= 0) {
+		/* the tests run as root, backboardd does not: whoever creates the file leaves it writable for the others */
+		fchmod(fd, 0666);
 		write(fd, buf, (size_t)n);
 		close(fd);
 	}
@@ -108,12 +110,38 @@ static void missing(const char *cls, const char *sel)
 	sm2_log("MISSING %s -%s", cls, sel);
 }
 
+/*
+ * Core Animation's framebuffer: plain BGRA8 rows. With CAEnableDeepFramebuffer on, CA's framebuffer is BGRA10_XR ('b3a8'),
+ * which only Apple GPUs scan out: CA logs "Unexpected framebuffer format" and draws nothing (ios-flame HANDOFF, stage 3).
+ * Boot 2026-11-14 with backboardd on Metal: XR textures (formats 550-554) were made, 18 passes, 0 draws, 0 commits in
+ * 520 s, black screen. Set for this process (the app domain) and for every app of this user (the global domain), before
+ * CA asks: this runs when Metal loads the bundle, earlier than -initWithAcceleratorPort:. sweetsvc also writes them into
+ * the global preferences of root and mobile, so they hold from the next boot on even if CA reads them first.
+ */
+static void ca_plain_framebuffer(void)
+{
+	setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
+	CFStringRef keys[] = { CFSTR("CAEnableDeepFramebuffer"), CFSTR("CAEnableFramebufferCompression"),
+			       CFSTR("CAEnableIOSurfaceCompression") };
+	for (CFStringRef key : keys) {
+		CFPreferencesSetAppValue(key, kCFBooleanFalse, kCFPreferencesCurrentApplication);
+		CFPreferencesSetValue(key, kCFBooleanFalse, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser,
+				      kCFPreferencesAnyHost);
+	}
+	CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+	CFPropertyListRef deep = CFPreferencesCopyAppValue(CFSTR("CAEnableDeepFramebuffer"), kCFPreferencesCurrentApplication);
+	sm2_log("CAEnableDeepFramebuffer now %s (uid %d)", deep == kCFBooleanFalse ? "off" : deep ? "ON" : "unset", getuid());
+	if (deep)
+		CFRelease(deep);
+}
+
 /* Metal validation failures abort by default; in allowed processes they are logged (5 = NSLog), as in ios-flame. */
 __attribute__((constructor)) static void sm2_loaded(void)
 {
 	if (!allowed())
 		return;
-	sm2_log("bundle loaded (allowed)");
+	sm2_log("bundle loaded (allowed, uid %d)", getuid());
+	ca_plain_framebuffer();
 	void (*set)(unsigned, unsigned) = (void (*)(unsigned, unsigned))dlsym(RTLD_DEFAULT, "MTLFailureTypeSetErrorModeType");
 	for (unsigned t = 0; set && t < 5; t++)
 		set(t, 5);
@@ -233,11 +261,6 @@ static void start_telemetry(void)
 				mkdir(cache, 0700);
 			}
 		}
-		/* plain rows: no Apple framebuffer compression, no 10-bit deep framebuffer */
-		setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
-		CFPreferencesSetAppValue(CFSTR("CAEnableFramebufferCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
-		CFPreferencesSetAppValue(CFSTR("CAEnableIOSurfaceCompression"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
-		CFPreferencesSetAppValue(CFSTR("CAEnableDeepFramebuffer"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
 		uint64_t registryID = 0;
 		IORegistryEntryGetRegistryEntryID(port, &registryID);
 		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();

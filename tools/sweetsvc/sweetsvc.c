@@ -17,7 +17,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define DISABLED "/private/var/db/com.apple.xpc.launchd/disabled.plist"
@@ -173,12 +175,50 @@ static void walk(char names[][64], int n, CFMutableDictionaryRef disabled, CFBoo
 		closedir(d);
 }
 
+/*
+ * Core Animation's framebuffer preferences, in the global domain of root and of mobile (501), through cfprefsd: CA must
+ * render into plain BGRA8 (a BGRA10_XR deep framebuffer is scanned out only by Apple GPUs; with it, backboardd on Metal
+ * drew nothing). Each user in its own child, since setuid cannot be undone.
+ */
+static void ca_prefs_for(uid_t uid)
+{
+	fflush(out);
+	pid_t pid = fork();
+	if (pid < 0)
+		return;
+	if (pid == 0) {
+		if (uid != 0 && (setgid(uid) != 0 || setuid(uid) != 0))
+			_exit(2);
+		CFStringRef keys[] = { CFSTR("CAEnableDeepFramebuffer"), CFSTR("CAEnableFramebufferCompression"),
+				       CFSTR("CAEnableIOSurfaceCompression") };
+		for (int i = 0; i < 3; i++)
+			CFPreferencesSetValue(keys[i], kCFBooleanFalse, kCFPreferencesAnyApplication, kCFPreferencesCurrentUser,
+					      kCFPreferencesAnyHost);
+		Boolean ok = CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+		CFPropertyListRef v = CFPreferencesCopyValue(keys[0], kCFPreferencesAnyApplication, kCFPreferencesCurrentUser,
+							     kCFPreferencesAnyHost);
+		say("sweetsvc: uid %d: CA framebuffer preferences %s, CAEnableDeepFramebuffer reads %s", (int)uid,
+		    ok ? "written" : "NOT synchronised", v == kCFBooleanFalse ? "off" : v ? "ON" : "unset");
+		_exit(0);
+	}
+	int status;
+	waitpid(pid, &status, 0);
+}
+
 int main(void)
 {
 	char off[32][64], on[32][64];
 	out = fopen("/var/tmp/sweetsvc.log", "a");
 	if (!out)
 		out = stdout;
+	ca_prefs_for(0);
+	ca_prefs_for(501);
+	/* the Metal driver's log: made by root's tests, appended to by backboardd (mobile) */
+	int fd = open("/var/tmp/sweetmtl2.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
+	if (fd >= 0) {
+		fchmod(fd, 0666);
+		close(fd);
+	}
 	int noff = read_names("/var/sweet/svc-disable", off, 32);
 	int non = read_names("/var/sweet/svc-enable", on, 32);
 	say("sweetsvc: %d name(s) to disable, %d to enable", noff, non);
