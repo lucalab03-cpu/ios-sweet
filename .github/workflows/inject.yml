@@ -14,7 +14,7 @@ jobs:
           $C -dynamiclib tools/inject/sweetinject.c -install_name /usr/lib/sweetinject.dylib -o sweetinject.dylib
           # Metal driver bundle (loaded by Metal through the kernel's MetalPluginName) and its test program.
           # _MTLDevice is private: its class symbols are looked up when the bundle loads (-U).
-          $C -fobjc-arc -bundle tools/metal/SweetMTLDriver.m -framework Foundation -lobjc \
+          $C -fobjc-arc -bundle tools/metal/SweetMTLDriver.m -framework Foundation -framework Metal -lobjc \
              '-Wl,-U,_OBJC_CLASS_$__MTLDevice' '-Wl,-U,_OBJC_METACLASS_$__MTLDevice' -o SweetMTLDriver
           $C tools/metaltest/metaltest.c -lobjc -o metaltest
           codesign -s - --force backboardd-wrap install-wrap sweetinject.dylib SweetMTLDriver metaltest

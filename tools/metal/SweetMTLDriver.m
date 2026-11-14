@@ -18,6 +18,7 @@
  * Log: /var/tmp/sweetmtl.log
  */
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <objc/message.h>
@@ -128,6 +129,11 @@ __attribute__((constructor)) static void loaded(void)
 {
 	say("bundle loaded%s", allowed() ? " (allowed: tracing)" : "");
 	if (allowed()) {
+		/* MTLAddDevice asserts [newDevice conformsToProtocol:@protocol(MTLDevice)] (boot 2026-11-14). _MTLDevice's
+		 * methods are all there at runtime; the conformance is declared at runtime so the compiler does not ask for
+		 * every MTLDevice method in this file. */
+		BOOL ok = class_addProtocol(objc_getClass("SweetMTLDevice"), @protocol(MTLDevice));
+		say("MTLDevice protocol: %s", ok ? "added" : "already there or refused");
 		signal(SIGABRT, on_abort);
 		install_trace(objc_getClass("SweetMTLDevice"));
 	}
