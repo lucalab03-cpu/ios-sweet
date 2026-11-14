@@ -119,6 +119,60 @@ __attribute__((constructor)) static void sm2_loaded(void)
 		set(t, 5);
 }
 
+/*
+ * Device queries the runtime has no measured answer for: the frontend logs "no device answer" and returns 0 for them
+ * (mtltest, 2026-11-14). The Mali-G52 r1 MC2's own values, so callers that size work by them get real numbers.
+ */
+static void answer_gaps(id device)
+{
+	static const struct { const char *sel; uint64_t value; } answers[] = {
+		{ "gpuCoreCount", 2 },                          /* MC2: two shader cores */
+		{ "maxComputeThreadgroupMemory", 16384 },       /* Metal's minimum; PanVK v7 shared memory is no smaller */
+		{ "maxVertexAmplificationCount", 1 },           /* no vertex amplification */
+		{ "isLargeMRTSupported", 0 },
+		{ "supportsComputeCompressedTextureWrite", 0 },
+		{ "supportsConditionalLoadStore", 0 },
+	};
+	Class cls = object_getClass(device);
+	for (size_t i = 0; i < sizeof(answers) / sizeof(answers[0]); i++) {
+		SEL sel = sel_registerName(answers[i].sel);
+		uint64_t value = answers[i].value;
+		Method m = class_getInstanceMethod(cls, sel);
+		const char *types = m ? method_getTypeEncoding(m) : "Q16@0:8";
+		/* integers and BOOLs come back in x0 alike */
+		class_replaceMethod(cls, sel, imp_implementationWithBlock(^uint64_t(id me) {
+			(void)me;
+			return value;
+		}), types);
+	}
+	sm2_log("answers: gpuCoreCount 2, maxComputeThreadgroupMemory 16384, and 4 more");
+}
+
+/*
+ * backboardd's work, every 10 s into /var/tmp/sweetmtl2-telemetry.log (in the outbox), for the first 10 minutes:
+ * passes, draws, pipelines made and refused, commits and their times (native_bridge_metal_telemetry).
+ */
+static void start_telemetry(void)
+{
+	if (strncmp(getprogname(), "backboardd", 10) != 0)
+		return;
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		static char text[8192];
+		for (int i = 0; i < 60; i++) {
+			sleep(10);
+			size_t n = native_bridge_metal_telemetry(text, sizeof(text) - 1);
+			text[n < sizeof(text) ? n : sizeof(text) - 1] = 0;
+			char status[400] = "";
+			native_bridge_metal_status(status, sizeof(status));
+			int fd = open("/var/tmp/sweetmtl2-telemetry.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
+			if (fd >= 0) {
+				dprintf(fd, "MTL2[%d %s] +%d s: %s\n%s\n", getpid(), getprogname(), (i + 1) * 10, status, text);
+				close(fd);
+			}
+		}
+	});
+}
+
 @interface NBDeviceMethods : NSObject
 @end
 
@@ -195,6 +249,10 @@ __attribute__((constructor)) static void sm2_loaded(void)
 		}
 		sm2_log("device %s in %.0f ms (cache %s)%s%s", device ? [[device name] UTF8String] : "refused",
 			(CFAbsoluteTimeGetCurrent() - t0) * 1000, cache, device ? "" : ": ", device ? "" : nmb_last_error());
+		if (device) {
+			answer_gaps(device);
+			start_telemetry();
+		}
 	});
 	return device;
 }

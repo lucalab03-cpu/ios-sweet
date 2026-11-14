@@ -8,6 +8,7 @@ on:
   push:
     paths:
       - 'tools/metal2/**'
+      - 'tools/sweetsvc/**'
       - '.github/workflows/metal2.yml'
 jobs:
   build:
@@ -99,22 +100,29 @@ jobs:
           cp tools/metal/Info.plist "$B/Info.plist"
           codesign -s - --force "$B/SweetMTLDriver"
           $C -O1 -fobjc-arc tools/metal2/mtltest.m -framework Foundation -framework Metal -framework IOSurface -o mtltest
-          codesign -s - --force mtltest
+          $C -O1 tools/sweetsvc/sweetsvc.c -framework CoreFoundation -o sweetsvc
+          codesign -s - --force mtltest sweetsvc
           xcrun -sdk iphoneos metal -std=ios-metal2.4 -mios-version-min=16.0 -c tools/metal2/mtltest.metal -o mtltest.air
           xcrun -sdk iphoneos metallib mtltest.air -o mtltest.metallib
           ls -l mtltest.metallib
       - name: Package
         run: |
           set -e
-          mkdir -p drop/usr/local/bin drop/usr/local/etc drop/usr/local/share/sweet drop/System/Library/Extensions/SweetMTLDriver.bundle
+          mkdir -p drop/usr/local/bin drop/usr/local/etc drop/usr/local/share/sweet drop/System/Library/Extensions/SweetMTLDriver.bundle drop/var/sweet
           # m2vtest (about 20 MB) stays out of the drop: the one already on the phone does; the artifact keeps it apart
-          cp mtltest drop/usr/local/bin/
+          cp mtltest sweetsvc drop/usr/local/bin/
+          # phase 4: backboardd gets the Metal device (the wrapper runs it as backboardd.orig)
+          printf 'backboardd\nbackboardd.orig\nmetaltest\nmtltest\n' > drop/var/sweet/metal.allow
+          # daemons that only respawn on this phone (boot 2026-11-14: 335 starts each); sweetsvc disables them from the next boot
+          printf 'bluetoothd\nfairplayd.H2\n' > drop/var/sweet/svc-disable
+          # the rescue drop: Metal back to the tests only (sweet-boot can overwrite, not delete)
+          mkdir -p rescue/var/sweet && printf 'metaltest\nmtltest\n' > rescue/var/sweet/metal.allow
           mkdir -p extra && cp m2vtest extra/
           cp mtltest.metallib drop/usr/local/share/sweet/
           cp SweetMTLDriver.bundle/SweetMTLDriver SweetMTLDriver.bundle/Info.plist drop/System/Library/Extensions/SweetMTLDriver.bundle/
           # the Metal tests last (a slow dropbox install may still be copying them); mtltest twice: the second run's
           # pipeline times show the shader cache
-          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/m2vtest\n/usr/local/bin/metaltest\n/usr/local/bin/mtltest\n/usr/local/bin/mtltest\n' > drop/usr/local/etc/sweet-boot.list
+          printf '/usr/local/bin/install-wrap\n/usr/local/bin/sweetsvc\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/m2vtest\n/usr/local/bin/metaltest\n/usr/local/bin/mtltest\n/usr/local/bin/mtltest\n' > drop/usr/local/etc/sweet-boot.list
           find drop -type f -exec ls -l {} \;
       - uses: actions/upload-artifact@v4
         with:
@@ -124,6 +132,10 @@ jobs:
         with:
           name: m2vtest
           path: extra
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metal2-rescue
+          path: rescue
       - uses: actions/upload-artifact@v4
         if: always()
         with:

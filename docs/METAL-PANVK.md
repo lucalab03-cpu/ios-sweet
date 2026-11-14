@@ -94,6 +94,11 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    (compute/render/fetch) on the first run and 2/7/4 ms on the next, so the cache works across processes. A boot
    on an older kernel answers "request 0x4e is not known here", and the import is then refused. Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
    cold compile time, keep the pipeline cache across boots, and add real syncobjs / async submit.
+   **backboardd on Metal (prepared 2026-11-14):** the metal2 drop writes /var/sweet/metal.allow with backboardd
+   and backboardd.orig. backboardd reads it when it loads the bundle, so it takes effect from the boot after the
+   install. The driver answers six device queries with the G52's values, and backboardd's telemetry goes to
+   /var/tmp/sweetmtl2-telemetry.log every 10 s for 10 minutes. The rescue drop (artifact metal2-rescue) puts back
+   the allow list with only the tests.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)

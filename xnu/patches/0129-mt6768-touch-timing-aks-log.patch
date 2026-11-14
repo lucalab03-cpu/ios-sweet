@@ -1,0 +1,163 @@
+Touch: timely polls and one log line per gesture; AppleKeyStore log behind a boot-arg
+
+A video of 2026-11-14 shows touch coordinates right (taps, scrolling, the edge swipe back) but some gestures
+taken for others: a swipe up opened the app switcher instead of going home (iOS does that when the swipe
+pauses), and a swipe on the lock screen opened the camera. Both look like gaps in the samples. The poll
+thread slept with assert_wait_deadline, whose timer the kernel may coalesce and fire late; it now asks for a
+critical, zero-leeway wakeup. Packet id 0xff is the IC's 'nothing new' answer to a poll: no longer logged as
+unknown. For finger 0 the driver logs, per gesture, the reports, the polls with nothing new, the duration,
+the longest gap between two reports and the path, so the next boot shows whether gaps are the cause.
+
+SweetKeyStore logged every call (hundreds of lines a minute); only with boot-arg sweetakslog=1 now.
+
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 2283241..d95c672 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -27,6 +27,7 @@
+ #include <kern/clock.h>
+ #include <kern/thread.h>
+ #include <kern/sched_prim.h>
++#include <kern/kern_types.h>
+ #include <machine/machine_routines.h>
+ #include <arm/caches_internal.h>
+ #include <pexpert/pexpert.h>
+@@ -68,6 +69,7 @@ void sweet_touch_init(void);
+ #define ILI_SPI_ACK     0xa3u
+ #define ILI_ID_DEMO     0x5au
+ #define ILI_ID_DEMO_HR  0x5bu
++#define ILI_ID_IDLE     0xffu   /* no new report since the last read (we poll; the IC is not asked by its IRQ) */
+ #define ILI_FINGERS     10
+ #define ILI_RX_MAX      72u
+ #define ILI_LEN_LOW     43u
+@@ -93,6 +95,11 @@ static struct {
+ 	bool fingers[ILI_FINGERS];
+ 	unsigned bad_ack, bad_sum, unk_pid, reads, touches, dumped;
+ 	int hx, hy, lr, flip;
++	/* one gesture of finger 0, for the log line at its release (why iOS takes a swipe for a pause) */
++	bool g_on;
++	unsigned g_count, g_reports, g_idle;
++	uint64_t g_start, g_last, g_maxgap;
++	int g_x0, g_y0, g_x1, g_y1;
+ } st;
+ 
+ static uint8_t touch_tx[128] __attribute__((aligned(128)));
+@@ -120,10 +127,55 @@ touch_wait(unsigned ms)
+ {
+ 	uint64_t deadline;
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+-	(void)assert_wait_deadline(&touch_sleep_chan, THREAD_UNINT, deadline);
++	/*
++	 * Woken on time: a plain assert_wait_deadline lets the kernel coalesce the timer and wake this poll late,
++	 * and a late poll is a gap in the finger's samples, which iOS reads as a pause (a swipe up that pauses
++	 * opens the app switcher instead of going home; seen 2026-11-14).
++	 */
++	(void)assert_wait_deadline_with_leeway(&touch_sleep_chan, THREAD_UNINT, TIMEOUT_URGENCY_SYS_CRITICAL | TIMEOUT_URGENCY_LEEWAY,
++	    deadline, 0);
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++static uint64_t
++touch_ms(uint64_t abs)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(abs, &ns);
++	return ns / NSEC_PER_MSEC;
++}
++
++/* Finger 0's samples: one log line per gesture (reports, duration, longest gap between two reports, path). */
++static void
++touch_gesture(bool down, int x, int y)
++{
++	uint64_t now = mach_absolute_time();
++	if (down) {
++		if (!st.g_on) {
++			st.g_on = true;
++			st.g_start = st.g_last = now;
++			st.g_maxgap = 0;
++			st.g_reports = 0;
++			st.g_idle = 0;
++			st.g_x0 = x;
++			st.g_y0 = y;
++		} else if (now - st.g_last > st.g_maxgap) {
++			st.g_maxgap = now - st.g_last;
++		}
++		st.g_last = now;
++		st.g_reports++;
++		st.g_x1 = x;
++		st.g_y1 = y;
++	} else if (st.g_on) {
++		st.g_on = false;
++		if (st.g_count++ < 80) {
++			printf("SWEET TOUCH: gesture %u: %u reports (%u idle polls) in %llu ms, longest gap %llu ms, %d,%d -> %d,%d\n",
++			    st.g_count, st.g_reports, st.g_idle, touch_ms(st.g_last - st.g_start), touch_ms(st.g_maxgap),
++			    st.g_x0, st.g_y0, st.g_x1, st.g_y1);
++		}
++	}
++}
++
+ /* One full-duplex DMA transfer of len bytes (touch_tx -> IC, IC -> touch_rx). */
+ static int
+ touch_xfer(unsigned len)
+@@ -275,6 +327,11 @@ touch_poll(void)
+ 	} else if (pid == ILI_ID_DEMO_HR) {
+ 		high = true;
+ 		len = ILI_LEN_HIGH;
++	} else if (pid == ILI_ID_IDLE) {
++		if (st.g_on) {
++			st.g_idle++;
++		}
++		return EAGAIN;  /* nothing new: the fingers stay as they are */
+ 	} else {
+ 		if ((st.unk_pid++ % 500) == 0) {
+ 			touch_dump("unknown packet id", pkt, 16);
+@@ -308,9 +365,15 @@ touch_poll(void)
+ 			}
+ 			st.fingers[i] = true;
+ 			sweet_hid_touch((int)i, 1, x, y);
++			if (i == 0) {
++				touch_gesture(true, x, y);
++			}
+ 		} else if (st.fingers[i]) {
+ 			st.fingers[i] = false;
+ 			sweet_hid_touch((int)i, 0, 0, 0);
++			if (i == 0) {
++				touch_gesture(false, 0, 0);
++			}
+ 		}
+ 	}
+ 	return 0;
+diff --git a/iokit/Kernel/arm/SweetKeyStore.cpp b/iokit/Kernel/arm/SweetKeyStore.cpp
+index d11fe26..1ada6f5 100644
+--- a/iokit/Kernel/arm/SweetKeyStore.cpp
++++ b/iokit/Kernel/arm/SweetKeyStore.cpp
+@@ -24,6 +24,7 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/proc.h>
++#include <pexpert/pexpert.h>
+ 
+ /* libaks selectors (AppleKeyStore.framework, iOS 16.7). */
+ enum {
+@@ -232,10 +233,17 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		break;
+ 	}
+ 
+-	char name[32];
+-	proc_selfname(name, sizeof(name));
+-	IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
+-	    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	/* every call logged only with boot-arg sweetakslog=1: hundreds of lines a minute otherwise (2026-11-14) */
++	static int akslog = -1;
++	if (akslog < 0 && !PE_parse_boot_argn("sweetakslog", &akslog, sizeof(akslog))) {
++		akslog = 0;
++	}
++	if (akslog) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET AKS: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	}
+ 	return ret;
+ }
+ #endif /* SWEET */
