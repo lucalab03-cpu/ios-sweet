@@ -108,6 +108,14 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    and sweetsvc writes them into the global preferences of root and mobile. backboardd could not write
    sweetmtl2.log (made 0644 by root's tests); the log is now 0666. Touch, same boot: a report every 8 ms, longest
    gaps 8-25 ms (one of 453 ms at the left edge).
+   **THE HOME SCREEN RENDERS THROUGH METAL (2026-11-14, same payload, with the BGRA8 fix):** icons, dock, search
+   pill, widgets and touch all work from the install boot on. Slow: 159 commits in about 6 minutes, 124 ms mean
+   from commit to completion (synchronous submits), 81 pipelines (17 s of compiling, the slowest 1.9 s). Still
+   wrong: the wallpaper is black, and the strip of garbage rows at the bottom of the screen is still there (so it
+   does not come from CA's CPU rendering). About 20 host imports of 32 KB-4.6 MB failed in the kernel ("cannot be
+   wired"), and with them CA's no-copy buffers; the 4.6 MB one is exactly a 720x1604 BGRA image (2880 bytes per
+   row), probably the wallpaper. Kernel patch 0130: when the pages cannot be wired for writing, wire them for
+   the GPU to read, and log both error codes.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)

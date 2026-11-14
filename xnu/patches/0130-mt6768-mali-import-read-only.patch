@@ -1,0 +1,35 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index f4c5154..761a19b 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -279,10 +279,27 @@ SweetMaliUserClient::importHost(struct sweet_import_host * request)
+ 	if (memory == NULL) {
+ 		return kIOReturnNoMemory;
+ 	}
+-	if (memory->prepare() != kIOReturnSuccess) {
++	/*
++	 * Boot 2026-11-14, backboardd on Metal: about 20 imports of 32 KB-4.6 MB failed here (no-copy buffers, one the size
++	 * of a 720x1604 frame). A mapping the caller may only read cannot be wired for writing: wire it for the GPU to read.
++	 * Both results are logged, so the next failure says why.
++	 */
++	IOReturn wired = memory->prepare();
++	if (wired != kIOReturnSuccess) {
+ 		memory->release();
+-		IOLog("SweetMali: the pages at %#llx (%llu bytes) cannot be wired\n", request->address, request->size);
+-		return kIOReturnVMError;
++		memory = IOMemoryDescriptor::withAddressRange((mach_vm_address_t) request->address, (mach_vm_size_t) request->size,
++		    kIODirectionOut, current_task());
++		IOReturn readOnly = memory != NULL ? memory->prepare() : kIOReturnNoMemory;
++		if (readOnly != kIOReturnSuccess) {
++			if (memory != NULL) {
++				memory->release();
++			}
++			IOLog("SweetMali: the pages at %#llx (%llu bytes) cannot be wired (%#x; for reading only %#x)\n",
++			    request->address, request->size, wired, readOnly);
++			return kIOReturnVMError;
++		}
++		IOLog("SweetMali: the pages at %#llx (%llu bytes) are wired for reading only (%#x for writing)\n",
++		    request->address, request->size, wired);
+ 	}
+ 	b->address = sweet_mali_address(request->size);
+ 	for (uint64_t offset = 0; offset < request->size && mapped && b->address != 0; offset += 4096) {
