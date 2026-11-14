@@ -17,36 +17,36 @@ mkdir -p $O/sys $O/modules $O/vendor-etc
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
 D=/sys/kernel/debug
 
-c() { cat "$1" > "$O/$2" 2>/dev/null; }
-r() { sh -c "$1" > "$O/$2" 2>&1; }
+grab() { cat "$1" > "$O/$2" 2>/dev/null; }
+run() { sh -c "$1" > "$O/$2" 2>&1; }
 
 # device tree and kernel
 cp /sys/firmware/fdt $O/fdt.dtb 2>/dev/null
-c /proc/iomem iomem.txt
-c /proc/interrupts interrupts.txt
-c /proc/cpuinfo cpuinfo.txt
-c /proc/cmdline cmdline.txt
-c /proc/bootconfig bootconfig.txt
-c /proc/modules modules.txt
-c /proc/meminfo meminfo.txt
-c /proc/version version.txt
-c /proc/config.gz config.gz
-c /proc/bus/input/devices input-devices.txt
-c /proc/asound/cards asound-cards.txt
-c /proc/asound/pcm asound-pcm.txt
-r "dmesg" dmesg.txt
-r "uname -a" uname.txt
-r "getprop" getprop.txt
-r "ls -l /dev/block/by-name /dev/block/platform/*/by-name" partitions.txt
+grab /proc/iomem iomem.txt
+grab /proc/interrupts interrupts.txt
+grab /proc/cpuinfo cpuinfo.txt
+grab /proc/cmdline cmdline.txt
+grab /proc/bootconfig bootconfig.txt
+grab /proc/modules modules.txt
+grab /proc/meminfo meminfo.txt
+grab /proc/version version.txt
+grab /proc/config.gz config.gz
+grab /proc/bus/input/devices input-devices.txt
+grab /proc/asound/cards asound-cards.txt
+grab /proc/asound/pcm asound-pcm.txt
+run "dmesg" dmesg.txt
+run "uname -a" uname.txt
+run "getprop" getprop.txt
+run "ls -l /dev/block/by-name /dev/block/platform/*/by-name" partitions.txt
 
 # kernel debug views (clocks, regulators, GPIO and pin muxing, memory, display)
-c $D/clk/clk_summary clk_summary.txt
-c $D/regulator/regulator_summary regulator_summary.txt
-c $D/gpio gpio.txt
-r "for f in $D/pinctrl/*/pinmux-pins $D/pinctrl/*/pins; do echo \"== \$f\"; cat \$f; done" pinctrl.txt
-c $D/memblock/memory memblock-memory.txt
-c $D/memblock/reserved memblock-reserved.txt
-r "ls -R $D/dri $D/mtkfb $D/disp* 2>/dev/null" debug-display-list.txt
+grab $D/clk/clk_summary clk_summary.txt
+grab $D/regulator/regulator_summary regulator_summary.txt
+grab $D/gpio gpio.txt
+run "for f in $D/pinctrl/*/pinmux-pins $D/pinctrl/*/pins; do echo \"== \$f\"; cat \$f; done" pinctrl.txt
+grab $D/memblock/memory memblock-memory.txt
+grab $D/memblock/reserved memblock-reserved.txt
+run "ls -R $D/dri $D/mtkfb $D/disp* 2>/dev/null" debug-display-list.txt
 
 # sysfs: one uevent / attribute file per device, by class
 for cls in leds backlight power_supply thermal regulator input sound net drm graphics misc; do
@@ -63,30 +63,30 @@ for cls in leds backlight power_supply thermal regulator input sound net drm gra
 		} > "$n" 2>/dev/null
 	done
 done
-r "for z in /sys/class/thermal/thermal_zone*; do echo \"\$z \$(cat \$z/type) \$(cat \$z/temp)\"; done" thermal.txt
-r "ls -l /sys/bus/platform/devices/" platform-devices.txt
-r "for d in /sys/bus/i2c/devices/*; do echo \"\$d \$(cat \$d/name 2>/dev/null) driver=\$(basename \$(readlink \$d/driver) 2>/dev/null)\"; done" i2c-devices.txt
-r "for d in /sys/bus/spi/devices/*; do echo \"\$d \$(cat \$d/modalias 2>/dev/null)\"; done" spi-devices.txt
-r "for d in /sys/bus/platform/drivers/*; do echo \"== \${d##*/}\"; ls \$d | grep -v -E '^(bind|unbind|uevent|module)\$'; done" platform-drivers.txt
+run "for z in /sys/class/thermal/thermal_zone*; do echo \"\$z \$(cat \$z/type) \$(cat \$z/temp)\"; done" thermal.txt
+run "ls -l /sys/bus/platform/devices/" platform-devices.txt
+run "for d in /sys/bus/i2c/devices/*; do echo \"\$d \$(cat \$d/name 2>/dev/null) driver=\$(basename \$(readlink \$d/driver) 2>/dev/null)\"; done" i2c-devices.txt
+run "for d in /sys/bus/spi/devices/*; do echo \"\$d \$(cat \$d/modalias 2>/dev/null)\"; done" spi-devices.txt
+run "for d in /sys/bus/platform/drivers/*; do echo \"== \${d##*/}\"; ls \$d | grep -v -E '^(bind|unbind|uevent|module)\$'; done" platform-drivers.txt
 
 # Android's dumps
-r "dumpsys display" dumpsys-display.txt
-r "dumpsys SurfaceFlinger" dumpsys-surfaceflinger.txt
-r "dumpsys power" dumpsys-power.txt
-r "dumpsys battery" dumpsys-battery.txt
-r "dumpsys sensorservice" dumpsys-sensors.txt
-r "dumpsys media.audio_flinger" dumpsys-audio.txt
-r "dumpsys wifi | head -300" dumpsys-wifi.txt
-r "dumpsys telephony.registry | head -200" dumpsys-telephony.txt
-r "dumpsys input" dumpsys-input.txt
-r "ip addr; ip link" net.txt
-r "logcat -d -b all -t 20000" logcat.txt
+run "dumpsys display" dumpsys-display.txt
+run "dumpsys SurfaceFlinger" dumpsys-surfaceflinger.txt
+run "dumpsys power" dumpsys-power.txt
+run "dumpsys battery" dumpsys-battery.txt
+run "dumpsys sensorservice" dumpsys-sensors.txt
+run "dumpsys media.audio_flinger" dumpsys-audio.txt
+run "dumpsys wifi | head -300" dumpsys-wifi.txt
+run "dumpsys telephony.registry | head -200" dumpsys-telephony.txt
+run "dumpsys input" dumpsys-input.txt
+run "ip addr; ip link" net.txt
+run "logcat -d -b all -t 20000" logcat.txt
 
 # vendor: modules (the .ko binaries: display, panel, backlight, charger, audio, Wi-Fi drivers to read), firmware, configs
 for m in /vendor_dlkm/lib/modules /vendor/lib/modules /system_dlkm/lib/modules; do
 	[ -d $m ] && cp $m/*.ko $m/modules.* $O/modules/ 2>/dev/null
 done
-r "ls -lR /vendor/firmware /vendor/firmware_mnt /vendor/etc/firmware 2>/dev/null" firmware-list.txt
+run "ls -lR /vendor/firmware /vendor/firmware_mnt /vendor/etc/firmware 2>/dev/null" firmware-list.txt
 for f in /vendor/etc/*.xml /vendor/etc/*.conf /vendor/etc/*.cfg /vendor/etc/*.ini /vendor/etc/audio/* /vendor/etc/wifi/* /vendor/etc/init/*.rc /vendor/etc/init/hw/*.rc; do
 	[ -f "$f" ] && cp "$f" $O/vendor-etc/ 2>/dev/null
 done
