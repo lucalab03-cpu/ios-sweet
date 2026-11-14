@@ -77,7 +77,12 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    host-page import, QuartzCore metallib pairs) against PanVK.
    Pass: stage 0x650f, and counts of how many CA kernels and pairs compile. The refusal list from here is
    the PanVK/translator work list.
-3. **Metal in metaltest only.** SweetMTLDriver becomes the real frontend. metaltest creates a device, a
+3. **Metal in metaltest only.** **Done 2026-11-14** (`mtltest`, workflow `metal2`):
+   MTLCreateSystemDefaultDevice() returns the frontend's NativeBridgeMetalDevice ("Mali-G52 r1 MC2") in about 0.6 s.
+   A compute kernel over 4096 floats and a 64x64 render with blit readback are both exact, and the render repeated
+   100 times takes 3.81 ms each (synchronous submits, small target). The driver logs "no device answer" for six
+   queries (gpuCoreCount, maxComputeThreadgroupMemory, ...), which answer 0 for now.
+   Original plan for this step: SweetMTLDriver becomes the real frontend. metaltest creates a device, a
    queue, a buffer, a compute kernel and a render pass into a texture, and checks the bytes.
 4. **backboardd.** Add backboardd to metal.allow. CA composites the home screen on the GPU. Then measure
    cold compile time, keep the pipeline cache across boots, and add real syncobjs / async submit.
