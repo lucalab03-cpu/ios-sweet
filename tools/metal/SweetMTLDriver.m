@@ -185,6 +185,18 @@ __attribute__((constructor)) static void loaded(void)
 	return @"Sweet Mali-G52 (stub)";
 }
 
+/*
+ * MTLAddDevice runs these four on every device it registers. _MTLDevice's own versions fill the limits and feature
+ * tables from an Apple GPU's hardware profile: its featureProfile has none here and recursed until the stack ran out
+ * (metaltest, boot 2026-11-14: 2416 calls). Empty, as in ios-flame's frontend (NativeBridgeMetalFrontend.mm): every
+ * limit and feature stays the base class's neutral 0/NO until this driver answers it itself.
+ */
+- (void)initLimits { say("call initLimits (empty)"); }
+- (void)initFeatureQueries { say("call initFeatureQueries (empty)"); }
+- (void)initGPUFamilySupport { say("call initGPUFamilySupport (empty)"); }
+- (void)initWorkarounds { say("call initWorkarounds (empty)"); }
+- (BOOL)supportsFeatureSet:(MTLFeatureSet)set { (void)set; return NO; }
+
 - (void)forwardInvocation:(NSInvocation *)inv
 {
 	SEL s = inv.selector;

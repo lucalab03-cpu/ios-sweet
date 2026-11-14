@@ -268,6 +268,7 @@ apply_dropbox(void)
 		done += n;
 	}
 	CC_SHA256_Final(digest, &sha);
+	say("SWEETBOOT: checksum %s\n", memcmp(digest, head + 24, 32) == 0 ? "ok" : "wrong");
 	if (memcmp(digest, head + 24, 32) != 0) {
 		say("SWEETBOOT: dropbox checksum does not match, not applied\n");
 		close(fd);
@@ -307,6 +308,7 @@ apply_dropbox(void)
 			bad++;
 		} else {
 			files++;
+			say("SWEETBOOT: installed %s (%llu bytes)\n", path, (unsigned long long)size);
 		}
 		pos += size;
 	}
@@ -382,9 +384,13 @@ main(void)
 	pthread_t th;
 
 	say("SWEETBOOT: start\n");
-	/* the outbox first: if applying the dropbox goes wrong, its log still gets out */
-	pthread_create(&th, NULL, outbox_thread, NULL);
+	/*
+	 * The dropbox first, then the outbox thread, never both at once: with the outbox thread writing and syncing
+	 * the same file while the dropbox was read, sweet-boot hung for good (boot 2026-11-14, 18.7 MB drop: no
+	 * file installed, the list never started, so neither did sweetaccel-d, and backboardd crashed in a loop).
+	 */
 	apply_dropbox();
+	pthread_create(&th, NULL, outbox_thread, NULL);
 	run_list();
 	say("SWEETBOOT: done\n");
 	write_outbox();
