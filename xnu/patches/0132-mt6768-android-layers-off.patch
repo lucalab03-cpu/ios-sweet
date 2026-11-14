@@ -1,0 +1,82 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index bfa446a..96ca431 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -50,6 +50,69 @@ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <sys/proc.h>
++#include <IOKit/IOMemoryDescriptor.h>
++
++/*
++ * Android's hardware layers. Lineage composes the screen with the MT6768's overlay engines (the phone's device tree:
++ * disp_ovl0 @ 0x1400b000 with 4 layers, disp_ovl0_2l @ 0x1400c000 with 2), and at the jump they stay as SurfaceFlinger
++ * left them. SurfaceFlinger's dump of 2026-11-14 shows the navigation bar as a layer of its own over rows 1562-1604:
++ * after the jump it reads memory iOS has reused, the strip of changing pixels at the bottom of the screen (seen from
++ * the verbose text on, with CPU or GPU rendering alike). Every layer is logged, and the enabled ones whose address is
++ * not inside our framebuffer are turned off (boot-arg sweetovl=0: log only). Registers as in Linux's mtk_disp_ovl.c:
++ * SRC_CON 0x2c (bit n = layer n on), per layer n at +0x20*n: CON 0x30, SRC_SIZE 0x38, OFFSET 0x3c, PITCH 0x44,
++ * ADDR 0xf40.
++ */
++static void
++sweet_ovl_layers(uint64_t fbPhys, uint64_t fbSize)
++{
++	static const struct {
++		const char *name;
++		uint64_t phys;
++		unsigned layers;
++	} engines[] = {
++		{ "ovl0", 0x1400b000ULL, 4 },
++		{ "ovl0_2l", 0x1400c000ULL, 2 },
++	};
++	uint32_t apply = 1;
++
++	PE_parse_boot_argn("sweetovl", &apply, sizeof(apply));
++	for (unsigned e = 0; e < sizeof(engines) / sizeof(engines[0]); e++) {
++		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(engines[e].phys, 0x1000, kIODirectionInOut);
++		IOMemoryMap *map = md != NULL ? md->map(kIOMapInhibitCache) : NULL;
++
++		if (map == NULL) {
++			IOLog("SWEET OVL: %s cannot be mapped\n", engines[e].name);
++			OSSafeReleaseNULL(md);
++			continue;
++		}
++		volatile uint32_t *r = (volatile uint32_t *)map->getVirtualAddress();
++		uint32_t src = r[0x2c / 4], keep = src;
++
++		IOLog("SWEET OVL: %s en %#x src_con %#x roi_size %#x ext_con %#x\n", engines[e].name, r[0x0c / 4], src,
++		    r[0x20 / 4], r[0x324 / 4]);
++		for (unsigned n = 0; n < engines[e].layers; n++) {
++			uint32_t con = r[(0x30 + 0x20 * n) / 4], size = r[(0x38 + 0x20 * n) / 4];
++			uint32_t offset = r[(0x3c + 0x20 * n) / 4], pitch = r[(0x44 + 0x20 * n) / 4];
++			uint32_t addr = r[(0xf40 + 0x20 * n) / 4];
++			bool on = ((src >> n) & 1) != 0;
++			bool ours = addr >= fbPhys && addr < fbPhys + fbSize;
++
++			IOLog("SWEET OVL: %s L%u %s addr %#x %ux%u at %u,%u pitch %u con %#x%s\n", engines[e].name, n,
++			    on ? "on" : "off", addr, size & 0xffff, size >> 16, offset & 0xffff, offset >> 16, pitch & 0xffff, con,
++			    on && !ours ? (apply ? ": not ours, turned off" : ": not ours") : (on ? ": ours" : ""));
++			if (on && !ours) {
++				keep &= ~(1u << n);
++			}
++		}
++		if (apply && keep != src) {
++			r[0x2c / 4] = keep;
++			IOSleep(50);            /* a frame or two: the engine takes new values at the start of a frame */
++			IOLog("SWEET OVL: %s src_con %#x -> %#x, reads back %#x\n", engines[e].name, src, keep, r[0x2c / 4]);
++		}
++		map->release();
++		md->release();
++	}
++}
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -218,6 +281,7 @@ AppleCLCD::start(IOService *provider)
+ 	registerService();
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight);
+ 	return true;
+ }
+ 
