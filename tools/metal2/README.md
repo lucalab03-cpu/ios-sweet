@@ -10,5 +10,10 @@
 - metal2vulkan itself (https://github.com/steelbrain/metal2vulkan, GPL-2.0-or-later OR LGPL-3.0-or-later) is
   fetched by `.github/workflows/metal2.yml` at the pin 720ef1ce and linked statically. A shipped binary that
   contains it must come with its source (the pin and these patches).
+- `NativeBridgeMetalFrontend.mm/.h`: NativeMetal's Metal frontend (MIT) as ios-flame patched it for iOS 16, unchanged.
+- `SweetMTLDriver.mm`: the Metal plugin (phase 3), after ios-flame's `SweetMetal2.mm` (MIT). It is our bundle and
+  class (kernel patch 0126), uses PanVK, and gives devices only to the processes in `/var/sweet/metal.allow`
+  (default: metaltest, mtltest).
+- `mtltest.m` + `mtltest.metal`: compute, render and 100 repeated renders through `MTLCreateSystemDefaultDevice()`.
 - `m2vtest.c`: the bridge's self-test runner, after ios-flame's `phone/metal2/m2vtest.c` (MIT), using PanVK
   (`/usr/local/lib/libvulkan_panfrost.dylib`) and logging to `/var/tmp/sweetm2v.log`.

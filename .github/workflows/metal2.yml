@@ -79,11 +79,40 @@ jobs:
           echo "m2vtest after strip: $(stat -f %z m2vtest) bytes"
           echo "weak imports (missing on iOS 16 would be NULL):"; nm -m m2vtest | grep "weak external" || true
           codesign -s - --force m2vtest
-          mkdir -p drop/usr/local/bin drop/usr/local/etc
-          cp m2vtest drop/usr/local/bin/
-          # m2vtest last: a slow dropbox install may still be copying it when the list starts (sweet-boot's 180 s deadline)
-          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/metaltest\n/usr/local/bin/m2vtest\n' > drop/usr/local/etc/sweet-boot.list
-          ls -l drop/usr/local/bin
+      - name: Metal driver bundle, mtltest and its shaders (phase 3)
+        run: |
+          set -e
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
+          BRIDGE=m2v-bridge/target/aarch64-apple-ios/release/libnative_metal_bridge.a
+          B=SweetMTLDriver.bundle
+          mkdir -p "$B"
+          # _MTLDevice is Metal's private class: its symbols are looked up when the bundle loads (-U)
+          $C -O2 -x objective-c++ -std=c++17 -fobjc-arc -Wno-deprecated-declarations -bundle -Itools/metal2 \
+            tools/metal2/SweetMTLDriver.mm tools/metal2/NativeBridgeMetalFrontend.mm -x none "$BRIDGE" -Wl,-dead_strip -lc++ \
+            -framework Foundation -framework Metal -framework IOSurface -framework IOKit -framework CoreFoundation \
+            '-Wl,-U,_OBJC_CLASS_$__MTLDevice' '-Wl,-U,_OBJC_METACLASS_$__MTLDevice' -o "$B/SweetMTLDriver" > bundle.log 2>&1 \
+            || { grep -E "error" bundle.log | sort -u | head -30 | sed 's/^/::error::bundle: /'; head -80 bundle.log; exit 1; }
+          grep -v "was built for newer" bundle.log || true
+          strip -x "$B/SweetMTLDriver"
+          echo "bundle: $(stat -f %z $B/SweetMTLDriver) bytes"
+          nm -m "$B/SweetMTLDriver" | grep "weak external" | grep -v "dynamically looked up" || true
+          cp tools/metal/Info.plist "$B/Info.plist"
+          codesign -s - --force "$B/SweetMTLDriver"
+          $C -O1 -fobjc-arc tools/metal2/mtltest.m -framework Foundation -framework Metal -o mtltest
+          codesign -s - --force mtltest
+          xcrun -sdk iphoneos metal -std=ios-metal2.4 -mios-version-min=16.0 -c tools/metal2/mtltest.metal -o mtltest.air
+          xcrun -sdk iphoneos metallib mtltest.air -o mtltest.metallib
+          ls -l mtltest.metallib
+      - name: Package
+        run: |
+          set -e
+          mkdir -p drop/usr/local/bin drop/usr/local/etc drop/usr/local/share/sweet drop/System/Library/Extensions/SweetMTLDriver.bundle
+          cp m2vtest mtltest drop/usr/local/bin/
+          cp mtltest.metallib drop/usr/local/share/sweet/
+          cp SweetMTLDriver.bundle/SweetMTLDriver SweetMTLDriver.bundle/Info.plist drop/System/Library/Extensions/SweetMTLDriver.bundle/
+          # the new Metal tests last: a slow dropbox install may still be copying them when the list starts (sweet-boot's 180 s deadline)
+          printf '/usr/local/bin/install-wrap\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/vktest\n/usr/local/bin/gltest\n/usr/local/bin/shadertest\n/usr/local/bin/drawtest\n/usr/local/bin/m2vtest\n/usr/local/bin/metaltest\n/usr/local/bin/mtltest\n' > drop/usr/local/etc/sweet-boot.list
+          find drop -type f -exec ls -l {} \;
       - uses: actions/upload-artifact@v4
         with:
           name: metal2
