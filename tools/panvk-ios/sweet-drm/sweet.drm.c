@@ -28,6 +28,7 @@
 #include <sys/ioccom.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 
 #include "xf86drm.h"
 
@@ -800,6 +801,29 @@ device_fd(int fd)
 	return fd >= 0 && fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == null_rdev;
 }
 
+/*
+ * How buffers are mapped: write-combined, so that what this process writes reaches memory where the GPU reads it
+ * with no cache maintenance; PanVK takes its memory to be host-coherent. The cache mode is the caller's to choose:
+ * IOUserClient::mapClientMemory64 keeps the kIOMapUserOptionsMask bits (the cache mode among them) of these flags
+ * over what clientMemoryForType answered, so the kernel's choice (patch 0127) alone did nothing (boot 2026-11-14:
+ * the clear still faulted). boot-arg sweetmaliwc=0 (payload-wc0) keeps the cached mappings.
+ */
+#define SWEET_WRITE_COMBINE 0x400u      /* kIOMapWriteCombineCache = kIOWriteCombineCache (4) << kIOMapCacheShift (8) */
+
+static uint32_t
+map_options(void)
+{
+	static int wc = -1;
+
+	if (wc < 0) {
+		char args[1024] = "";
+		size_t len = sizeof(args) - 1;
+		wc = !(sysctlbyname("kern.bootargs", args, &len, NULL, 0) == 0 && strstr(args, "sweetmaliwc=0") != NULL);
+		trace("sweetdrm: buffers are mapped %s", wc ? "write-combined" : "cached (sweetmaliwc=0)");
+	}
+	return SWEET_ANYWHERE | (wc ? SWEET_WRITE_COMBINE : 0);
+}
+
 /* MMAP_BO answered offset = handle << 12: the buffer is the service's client memory of type `handle`. */
 static void *
 map_buffer(size_t size, uint64_t offset)
@@ -812,7 +836,7 @@ map_buffer(size_t size, uint64_t offset)
 	if (connection == 0) {
 		return MAP_FAILED;
 	}
-	kr = IOConnectMapMemory64(connection, type, mach_task_self(), &address, &mapped, SWEET_ANYWHERE);
+	kr = IOConnectMapMemory64(connection, type, mach_task_self(), &address, &mapped, map_options());
 	if (kr != 0 || mapped < size) {
 		trace("sweetdrm: MMAP handle %u size %#zx -> %#x (mapped %#llx)", type, size, kr,
 		    (unsigned long long)mapped);
