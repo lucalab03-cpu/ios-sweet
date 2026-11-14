@@ -114,6 +114,15 @@ for path, want in (('src/vulkan/runtime/vk_image.h', 1), ('src/vulkan/runtime/vk
         sys.exit("patch-panvk: %s: %d Linux/BSD gates, expected %d" % (path, s.count(old), want))
     wr(path, s.replace(old, "#if DETECT_OS_LINUX || DETECT_OS_BSD || defined(SWEET_IOS)\n"))
 
+# 3d. The generated entrypoint tables refer to every possible panvk_* function as a weak symbol. ELF resolves the
+#     missing ones to NULL at link time; Apple's ld refuses them unless they are looked up at load time, which is
+#     what Mesa's own macOS driver does (src/kosmickrisp/vulkan/meson.build). panvk-ios.yml lists every symbol
+#     left to load time that is not an entrypoint.
+sub_once('src/panfrost/vulkan/meson.build',
+"  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],\n",
+"  link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id,\n"
+"               sweet_ios ? ['-Wl,-undefined,dynamic_lookup'] : []],\n")
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')

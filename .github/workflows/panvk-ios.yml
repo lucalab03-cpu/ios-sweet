@@ -79,6 +79,18 @@ jobs:
           nm -gU drop/usr/local/lib/libvulkan_panfrost.dylib | grep -E " _vk(_icd)?GetInstanceProcAddr$" \
             || { echo "::error::the driver does not export vkGetInstanceProcAddr"; exit 1; }
           echo "weak imports (missing on iOS 16 would be NULL):"; nm -m drop/usr/local/lib/libvulkan_panfrost.dylib | grep "weak external" || true
+          # Symbols left to load time (-undefined dynamic_lookup): the unimplemented entrypoints are expected
+          # (NULL in the dispatch tables); anything else would be a real missing function.
+          nm -m drop/usr/local/lib/libvulkan_panfrost.dylib | grep "dynamically looked up" | awk '{print $(NF-3)}' \
+            | sort -u > lookups.txt || true
+          echo "$(wc -l < lookups.txt) symbols looked up at load time"
+          grep -vE '^_(panvk|panvk_v[0-9]+|vk_common|vk_cmd_enqueue|vk_cmd_enqueue_unless_primary|wsi)_[A-Z][A-Za-z0-9]*$' \
+            lookups.txt > other-lookups.txt || true
+          if [ -s other-lookups.txt ]; then
+            sed 's/^/::warning::looked up at load time, not an entrypoint: /' other-lookups.txt | head -40
+          else
+            echo "every load-time lookup is an entrypoint"
+          fi
           otool -L drop/usr/local/lib/libvulkan_panfrost.dylib
           codesign -s - --force drop/usr/local/lib/libvulkan_panfrost.dylib drop/usr/local/bin/vktest
           # vktest first, so nothing earlier can hold it up; the other tests as in the inject drop
