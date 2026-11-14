@@ -123,6 +123,14 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    imported buffer of the client before each job (performOperation kIOMemoryIncoherentIOStore) and invalidates the
    writable ones after it, logging the cost at jobs 1, 64 and every 1024th. Same boot: pipeline cache 80 hits / 26
    misses (it holds across boots), 388 commits in 250 s, 105 ms mean from commit to completion.
+   **With 0131 and 0132 (payload-ovl):** cleaning the imported pages costs little (42 buffers, 10.9 MB, 267 us
+   per job) but the wallpaper stays black: 23 no-copy buffers are still refused by the runtime itself
+   ("NotRepresentable"), before any kernel import. The likely cause is their length: page-aligned pointers with
+   lengths that are not a multiple of 16 KiB, where imported host memory must span whole pages. The frontend now
+   imports the whole last page (reporting the caller's length), copies whatever is still refused, and logs each
+   refusal's pointer, length and options. The bottom strip was gone, but 0132 turned nothing off: only our layer
+   (ovl0 L0 at 0x78200000) was on at that jump (src_con 0x101, ext_con 0x10000: bit 8 and the extended layers are
+   still to be read when the strip shows).
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)

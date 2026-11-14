@@ -120,6 +120,7 @@ static void waitForResource(id resource);
 @property(nonatomic) MTLResourceOptions options;
 @property(nonatomic,copy) void (^deallocator)(void *,NSUInteger);
 @property(nonatomic) void *wrapped;
+@property(nonatomic) NSUInteger callerLength;   // a no-copy buffer's length as the caller gave it (0: the runtime's)
 @property(nonatomic) IOSurfaceRef surfaceOwner; // keeps a shared import's CPU mapping alive
 @property(nonatomic,strong) id<MTLHeap> parentHeap;   // the heap that made the buffer, nil otherwise
 @property(nonatomic) NSUInteger heapOffset;
@@ -136,11 +137,11 @@ static void waitForResource(id resource);
 @end
 @implementation NBBuffer
 - (void)dealloc {
- const NSUInteger length=nmb_buffer_length(_handle);nmb_buffer_release(_handle);
+ const NSUInteger length=_callerLength?_callerLength:nmb_buffer_length(_handle);nmb_buffer_release(_handle);
  if(_deallocator)_deallocator(_wrapped,length);
  if(_surfaceOwner)CFRelease(_surfaceOwner);
 }
-- (NSUInteger)length {return nmb_buffer_length(_handle);}
+- (NSUInteger)length {return _callerLength?_callerLength:nmb_buffer_length(_handle);}
 - (void *)contents {return nmb_buffer_contents(_handle);}
 - (uint64_t)gpuAddress {return nmb_buffer_gpu_address(_handle);}
 - (MTLResourceOptions)resourceOptions {return _options;}
@@ -1398,10 +1399,28 @@ static char sweetMemoryOwnerKey;
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;return (id<MTLBuffer>)buffer;
 }
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
- NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,pointer,length,options);
- if(!handle){NBLOG(@"native-metal: no-copy buffer refused: %@",lastError());return nil;}
+ // SweetMTLDriver (2026-11-14, backboardd on the Mali-G52): imported host memory must span whole 16 KiB pages
+ // (minImportedHostPointerAlignment), and CA passes page-aligned pointers with lengths that are not, which the runtime
+ // refused ("NotRepresentable"): the wallpaper and its blur came out black. The import covers the whole last page
+ // (mapped anyway); the buffer still reports the caller's length. Whatever is still refused is copied, so the GPU
+ // gets the bytes as they are now rather than no buffer at all.
+ const size_t page=(size_t)getpagesize();
+ NSUInteger importLength=length;
+ if(pointer && !((uintptr_t)pointer&(page-1)))importLength=(length+page-1)&~(NSUInteger)(page-1);
+ NmbBuffer *handle=nmb_buffer_new_no_copy(gDevice,pointer,importLength,options);
+ bool copied=false;
+ if(!handle){
+  static std::atomic<int> told{0};
+  if(told++<40)NBLOG(@"native-metal: no-copy buffer %p length %lu (import %lu) options %#lx refused: %@; copied instead",pointer,
+   (unsigned long)length,(unsigned long)importLength,(unsigned long)options,lastError());
+  if(!pointer || !length)return nil;
+  handle=nmb_buffer_new(gDevice,length,options,pointer);
+  if(!handle){NBLOG(@"native-metal: no-copy buffer: the copy was refused too: %@",lastError());return nil;}
+  copied=true;
+ }
  NBBuffer *buffer=[NBBuffer new];buffer.handle=handle;buffer.options=options;
  buffer.wrapped=pointer;buffer.deallocator=deallocator;
+ if(!copied && importLength!=length)buffer.callerLength=length;
  return (id<MTLBuffer>)buffer;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
