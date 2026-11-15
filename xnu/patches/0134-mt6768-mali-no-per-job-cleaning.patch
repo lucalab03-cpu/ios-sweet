@@ -1,0 +1,90 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index b9f0009..a30592a 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -125,6 +125,15 @@ struct sweet_mali_buffer {
+ };
+ 
+ static IOLock * gSweetMaliLock;
++static bool sweet_mali_write_combined(void);
++
++/*
++ * Where a job's time goes, over all clients, logged every 256 jobs (boot 2026-11-15: backboardd's frames took 100-190 ms
++ * from commit to completion, with the Mali at 364 MHz): the GPU's own run, and the cache maintenance around it.
++ */
++static struct {
++	uint64_t jobs, gpu, gpuMax, cleaning, named, namedBytes;
++} gSweetMaliTimes;
+ 
+ class SweetMali : public IOService
+ {
+@@ -377,6 +386,11 @@ SweetMaliUserClient::createBO(struct sweet_panfrost_create_bo * request)
+ 		return kIOReturnNoMemory;
+ 	}
+ 	sweet_mali_mapped();
++	/*
++	 * The kernel made the pages zero through its own cached mapping: out of the caches once, now. With write-combined
++	 * mappings (the default) the program's writes reach memory directly, so nothing is cleaned around each job.
++	 */
++	sweet_mali_to_memory(memory->getBytesNoCopy(), size);
+ 	b->memory = memory;
+ 	b->size = size;
+ 	request->offset = b->address;
+@@ -431,14 +445,22 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 		IOLog("SweetMali: job %u: %u imported buffers (%llu KB) cleaned in %llu us\n", fSubmits, importedCount,
+ 		    importedBytes >> 10, ns / 1000);
+ 	}
++	/* the buffers the job names: cleaned around it only when the program maps them cached (sweetmaliwc=0) */
++	const bool cleanNamed = !sweet_mali_write_combined();
++	uint64_t namedBytes = 0;
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 
+-		if (b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
++		if (b != NULL && b->memory != NULL) {
++			namedBytes += b->size;
++		}
++		if (cleanNamed && b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
+ 			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
+ 		}
+ 	}
++	uint64_t gpuStart = mach_absolute_time();
+ 	status = sweet_mali_submit(request->jc, (request->requirements & SWEET_PANFROST_JD_REQ_FS) != 0);
++	uint64_t gpuEnd = mach_absolute_time();
+ 	if (status != 0) {
+ 		fFailed++;
+ 		IOLog("SweetMali: job chain %#llx did not finish (status %#x)\n", request->jc, status);
+@@ -450,13 +472,32 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
+ 		}
+ 	}
+-	for (uint32_t i = 0; i < count; i++) {
++	for (uint32_t i = 0; cleanNamed && i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
+ 
+ 		if (b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
+ 			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
+ 		}
+ 	}
++	{
++		uint64_t gpu, all;
++		absolutetime_to_nanoseconds(gpuEnd - gpuStart, &gpu);
++		absolutetime_to_nanoseconds(mach_absolute_time() - importedStart, &all);
++		gSweetMaliTimes.jobs++;
++		gSweetMaliTimes.gpu += gpu;
++		gSweetMaliTimes.cleaning += all > gpu ? all - gpu : 0;
++		gSweetMaliTimes.named += count;
++		gSweetMaliTimes.namedBytes += namedBytes;
++		if (gpu > gSweetMaliTimes.gpuMax) {
++			gSweetMaliTimes.gpuMax = gpu;
++		}
++		if (gSweetMaliTimes.jobs == 256) {
++			IOLog("SweetMali: 256 jobs: GPU %llu ms (longest %llu ms), cleaning %llu ms, %llu buffers (%llu MB) named per job%s\n",
++			    gSweetMaliTimes.gpu / 1000000, gSweetMaliTimes.gpuMax / 1000000, gSweetMaliTimes.cleaning / 1000000,
++			    gSweetMaliTimes.named / 256, (gSweetMaliTimes.namedBytes / 256) >> 20, cleanNamed ? ", cleaned" : "");
++			bzero(&gSweetMaliTimes, sizeof(gSweetMaliTimes));
++		}
++	}
+ 	if (handles != NULL) {
+ 		IOFreeData(handles, count * sizeof(uint32_t));
+ 	}

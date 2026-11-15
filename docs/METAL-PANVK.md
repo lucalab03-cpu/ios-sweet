@@ -136,6 +136,12 @@ to those paths). The Gallium build (mesa-ios.yml, Mesa 25.0.7) stays as it is: M
    because its MTLCreateSystemDefaultDevice() is nil (it is not in metal.allow). The metal2 drop now allows
    PosterBoard. The "host memory: linear 2D images only" warnings are PanVK answering format queries for optimal-tiled
    images over host memory (patch-panvk.py 3f); no texture creation was refused (telemetry x0).
+   **Speed, first step (patch 0134):** with write-combined mappings (the default since 0127) the kernel still cleaned
+   every buffer a job names, up to 8 MB each, before and after each job, under the service's one lock. A buffer is now
+   cleaned once, when it is made (the kernel zeroed it through its cached mapping); sweetmaliwc=0 brings the per-job
+   cleaning back. Every 256 jobs the kernel logs the GPU's own time, the cleaning time and the buffers named per job.
+   The Mali runs at 364 MHz (mfg_sel = syspll_d3), about a third of what the MT6768's G52 reaches on MFGPLL; raising
+   it needs the GPU voltage (the PMIC's VGPU buck) as well, after these numbers.
 5. **Everyone.** SpringBoard, widgets (RenderBox: MRT, depth/stencil), apps, then WebKit's GPU process.
 
 ## Open questions (answered in order by the phases)
