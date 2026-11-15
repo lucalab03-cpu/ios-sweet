@@ -1,0 +1,21 @@
+name: sweetfs
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetfs/sweetfs.c -o sweetfs
+          codesign -s - --force sweetfs
+          mkdir -p drop/usr/local/bin drop/usr/local/etc
+          cp sweetfs drop/usr/local/bin/
+          # Same programs as the metal2 drop keeps running (CA preferences, the accelerator), then the listing.
+          printf '/usr/local/bin/install-wrap\n/usr/local/bin/sweetsvc\n&/usr/local/bin/sweetaccel-d\n/usr/local/bin/sweetfs\n' > drop/usr/local/etc/sweet-boot.list
+          find drop -type f
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweetfs
+          path: drop
