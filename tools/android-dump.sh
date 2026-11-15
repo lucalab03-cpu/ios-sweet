@@ -41,27 +41,30 @@ run "uname -a" uname.txt
 run "getprop" getprop.txt
 run "ls -l /dev/block/by-name /dev/block/platform/*/by-name" partitions.txt
 
-# kernel debug views (clocks, regulators, GPIO and pin muxing, memory, display)
-grab $D/clk/clk_summary clk_summary.txt
-grab $D/regulator/regulator_summary regulator_summary.txt
-grab $D/gpio gpio.txt
-run "for f in $D/pinctrl/*/pinmux-pins $D/pinctrl/*/pins; do echo \"== \$f\"; cat \$f; done" pinctrl.txt
+# kernel debug views: only with "all" as the first argument. On the lamu (2026-11-15) the first full run rebooted
+# Android: MediaTek kernels can crash reading debugfs views of clocks, regulators, GPIOs or pins that touch
+# powered-down blocks.
+if [ "$1" = all ]; then
+	grab $D/clk/clk_summary clk_summary.txt
+	grab $D/regulator/regulator_summary regulator_summary.txt
+	grab $D/gpio gpio.txt
+	run "for f in $D/pinctrl/*/pinmux-pins; do echo \"== \$f\"; cat \$f; done" pinctrl.txt
+fi
 grab $D/memblock/memory memblock-memory.txt
 grab $D/memblock/reserved memblock-reserved.txt
-run "ls -R $D/dri $D/mtkfb $D/disp* 2>/dev/null" debug-display-list.txt
 
 # sysfs: one uevent / attribute file per device, by class
-for cls in leds backlight power_supply thermal regulator input sound net drm graphics misc; do
+for cls in leds backlight power_supply thermal regulator input sound net drm graphics; do
 	for d in /sys/class/$cls/*; do
 		[ -e "$d" ] || continue
 		n=$O/sys/$cls-${d##*/}.txt
 		echo "dump: sysfs $cls ${d##*/}"
 		{
 			echo "== $d -> $(readlink -f $d)"
-			for f in "$d"/*; do
-				[ -f "$f" ] && [ -r "$f" ] || continue
-				case "${f##*/}" in descriptors|config|rom|edid|*_bin|data) continue;; esac
-				printf '%s: ' "${f##*/}"; timeout 2 head -c 400 "$f" 2>/dev/null | tr '\n' ' '; echo
+			# uevent and plain attributes only: reading every attribute can reach hardware that is off (a reboot)
+			for a in uevent name type max_brightness brightness actual_brightness bl_power status present online health technology capacity voltage_now current_now charge_full charge_full_design temp mode microvolts state; do
+				[ -f "$d/$a" ] || continue
+				printf '%s: ' "$a"; timeout 2 head -c 400 "$d/$a" 2>/dev/null | tr '\n' ' '; echo
 			done
 		} > "$n" 2>/dev/null
 	done
