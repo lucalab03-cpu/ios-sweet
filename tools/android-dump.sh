@@ -17,11 +17,13 @@ mkdir -p $O/sys $O/modules $O/vendor-etc
 mount -t debugfs none /sys/kernel/debug 2>/dev/null
 D=/sys/kernel/debug
 
-grab() { cat "$1" > "$O/$2" 2>/dev/null; }
-run() { sh -c "$1" > "$O/$2" 2>&1; }
+# Each step says its name and has a time limit: some debugfs/sysfs files and dumpsys services can block forever
+# (2026-11-15: the first run sat still for minutes, with no way to tell where).
+grab() { echo "dump: $2"; timeout 10 cat "$1" > "$O/$2" 2>/dev/null; }
+run() { echo "dump: $2"; timeout 30 sh -c "$1" > "$O/$2" 2>&1; }
 
 # device tree and kernel
-cp /sys/firmware/fdt $O/fdt.dtb 2>/dev/null
+echo "dump: fdt.dtb"; cp /sys/firmware/fdt $O/fdt.dtb 2>/dev/null
 grab /proc/iomem iomem.txt
 grab /proc/interrupts interrupts.txt
 grab /proc/cpuinfo cpuinfo.txt
@@ -53,12 +55,13 @@ for cls in leds backlight power_supply thermal regulator input sound net drm gra
 	for d in /sys/class/$cls/*; do
 		[ -e "$d" ] || continue
 		n=$O/sys/$cls-${d##*/}.txt
+		echo "dump: sysfs $cls ${d##*/}"
 		{
 			echo "== $d -> $(readlink -f $d)"
 			for f in "$d"/*; do
 				[ -f "$f" ] && [ -r "$f" ] || continue
 				case "${f##*/}" in descriptors|config|rom|edid|*_bin|data) continue;; esac
-				printf '%s: ' "${f##*/}"; head -c 400 "$f" 2>/dev/null | tr '\n' ' '; echo
+				printf '%s: ' "${f##*/}"; timeout 2 head -c 400 "$f" 2>/dev/null | tr '\n' ' '; echo
 			done
 		} > "$n" 2>/dev/null
 	done
@@ -83,6 +86,7 @@ run "ip addr; ip link" net.txt
 run "logcat -d -b all -t 20000" logcat.txt
 
 # vendor: modules (the .ko binaries: display, panel, backlight, charger, audio, Wi-Fi drivers to read), firmware, configs
+echo "dump: vendor modules, firmware list and configs"
 for m in /vendor_dlkm/lib/modules /vendor/lib/modules /system_dlkm/lib/modules; do
 	[ -d $m ] && cp $m/*.ko $m/modules.* $O/modules/ 2>/dev/null
 done
@@ -91,5 +95,6 @@ for f in /vendor/etc/*.xml /vendor/etc/*.conf /vendor/etc/*.cfg /vendor/etc/*.in
 	[ -f "$f" ] && cp "$f" $O/vendor-etc/ 2>/dev/null
 done
 
+echo "dump: packing"
 cd /data/local/tmp && tar czf sweetdump.tgz sweetdump && rm -rf sweetdump
 ls -l /data/local/tmp/sweetdump.tgz
