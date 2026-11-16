@@ -33,7 +33,12 @@
 		(const void *)(unsigned long)&replacement, (const void *)(unsigned long)&replacee          \
 	}
 
-/* Neither name is declared by the iOS SDK; interposition needs the symbol to point at. */
+/*
+ * Neither name is declared by the iOS SDK, and _bs_set_crash_log_message is not in it either: it lives in
+ * BoardServices (the image that also gives PosterBoard BSXPCServiceConnection, and the one the crash report's
+ * registers point into). The dylib is therefore linked with -undefined dynamic_lookup and the address is bound when
+ * PosterBoard starts.
+ */
 extern void _bs_set_crash_log_message(const char *);
 extern int renamex_np(const char *, const char *, unsigned int);
 
