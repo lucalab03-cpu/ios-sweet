@@ -1,6 +1,39 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## Agent handoff / active work (2026-10-15, latest)
+## Agent handoff / active work (2026-11-16, latest)
+
+**Read `docs/METAL-PANVK.md` first: it is the up-to-date log.** Everything from "UPDATE 2026-10-18" down
+describes the first device (`sweet`, Redmi Note 10 Pro, SM7150, CPU rendering) and stops there.
+
+**The live target is the Moto G05 (MT6768 "lamu", Mali-G52 MC2).** Kernel patches 0100-0119 (eMMC root,
+framebuffer, touch, keys, CONN, DMA) and 0121-0134 (SweetMali GPU service, Metal plugin, write-combined
+buffers, host-page import, no per-job cache cleaning). The iOS userland gets Metal through the NativeMetal
+frontend + metal2vulkan + PanVK (`tools/metal2`, `tools/panvk-ios`, `tools/mesa-ios`); the Gallium path
+(`gltest`, `drawtest`, `shadertest`) is the older fallback.
+
+**State 2026-11-16:** the home screen renders through Metal (icons, dock, search pill, widgets, touch).
+Open, in order:
+
+1. **The wallpaper is black.** PosterBoard dies 30-70 s after every launch with SIGTRAP in
+   `-[PBFPosterExtensionDataStore _stateLock_setupSwitcherConfigurationForFirstTime]`, reached from the
+   prewarm path (`PRSServer` -> `PBFPosterExtensionDataStoreXPCServiceGlue` -> `prewarmWithCompletion:` ->
+   `executeUpdate:` -> `_stateLock_updateExtensions:`): a switcher configuration is already in memory while
+   the store believes it is the first run. `tools/sweetfs` (outbox3, 2026-11-15) finds no such state on
+   disk: `.../Application Support/PRBPosterExtensionDataStore/59/{Extensions,GalleryCache}` exist and are
+   empty, while `com.apple.PosterBoard.plist` already holds PosterBoard's own keys (locale en_US,
+   SnapshotsBuildVersion 20H392). The configuration is therefore built in memory and never persisted, so
+   every later update re-enters the first-time path. **sweetfs v3 (2026-11-16) waits 45 s, re-lists the
+   store and probes the write pattern (create/write/fsync/close/rename/unlink/mkdir) inside it, printing
+   every errno; not built or run yet.** After that: disassemble that method in `PosterBoard.framework` for
+   the exact precondition, or make the store's state coherently absent before the first prewarm.
+2. **Speed.** Frames go through synchronous submits: 105-124 ms from commit to completion, 159 commits in
+   about 6 minutes. Patch 0134 removed the per-job cache cleaning (a buffer is cleaned when it is made);
+   every 256 jobs the kernel logs GPU time, the longest job and the cleaning time. The Mali runs at 364 MHz
+   (`mfg_sel = syspll_d3`); raising it needs the PMIC's VGPU buck as well.
+3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
+   apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
+
+## Agent handoff / active work (2026-10-15, superseded)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
 

@@ -1,18 +1,26 @@
 /*
  * sweetfs: read-only look at where PosterBoard keeps its state (diagnosis, changes nothing).
  *
- * PosterBoard asserts "!_stateLock_switcherConfiguration" in -[PBFPosterExtensionDataStore
- * _stateLock_setupSwitcherConfigurationForFirstTime] on every boot: a switcher configuration is already in memory
- * while the data store believes it is the first run. The configuration can only come from disk, so this lists
- * what is there. Output: /var/tmp/sweetfs.log (the outbox fetches /var/tmp/sweet*).
+ * PosterBoard asserts in -[PBFPosterExtensionDataStore _stateLock_setupSwitcherConfigurationForFirstTime]
+ * 30 to 70 s after every launch, on the prewarm path (PRSServer -> PBFPosterExtensionDataStoreXPCServiceGlue
+ * -> prewarmWithCompletion: -> executeUpdate: -> _stateLock_updateExtensions:): a switcher configuration is
+ * already in memory while the data store believes it is the first run. The store on disk holds nothing but
+ * empty directories (59/Extensions, 59/GalleryCache) while com.apple.PosterBoard.plist already has
+ * PosterBoard's own keys (locale en_US, SnapshotsBuildVersion 20H392), so either the configuration never
+ * reaches the disk or it is written somewhere else. Output: /var/tmp/sweetfs.log (the outbox fetches
+ * /var/tmp/sweet*).
  *
- * Second version: it also dumps com.apple.PosterBoard.plist, the two newest PosterBoard crash reports (all threads)
- * and the contents of the system posters' PlugIns.
+ * Third version: it sleeps 45 s first, so the first prewarm (and its store setup) has happened and
+ * PosterBoard has had the time to write something or to crash; then it lists the store tree, tries the
+ * write pattern a data store uses (create, write, fsync, close, rename, unlink) inside the store and prints
+ * the errno of every step, lists again, and dumps the preferences and the newest crash reports.
  *
- * It looks for entries whose name contains "oster" under the places an app or extension keeps data, prints each
- * one (type, size, mtime), and walks into the directories it found, a few levels deep.
+ * It also looks for entries whose name contains "oster" under the places an app or extension keeps data,
+ * prints each one (type, size, mtime), and walks into the directories it found, a few levels deep.
  */
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +32,8 @@
 #define LOG "/var/tmp/sweetfs.log"
 #define MAXLINES 8000
 #define DUMPMAX (64 * 1024)
+#define STORE "/var/mobile/Library/Application Support/PRBPosterExtensionDataStore"
+#define PREF "/var/mobile/Library/Preferences/com.apple.PosterBoard.plist"
 
 static FILE *lf;
 static int lines;
@@ -191,6 +201,85 @@ dump_newest(const char *dir, const char *prefix, const char *suffix, int count)
 	}
 }
 
+/* the store's own tree, with sizes and mtimes (the mtime of a directory moves when a file lands in it) */
+static void
+tree(const char *tag)
+{
+	say("== store tree (root, then 4 levels): %s\n", tag);
+	show(STORE);
+	walk(STORE, 4);
+}
+
+/* the write pattern a data store uses: temp file, write, fsync, close, atomic rename, unlink */
+static void
+probe(void)
+{
+	char tmp[512], fin[512], dir[512], buf[4096];
+	int fd, i, err, nw = 0;
+	ssize_t n;
+
+	snprintf(tmp, sizeof(tmp), "%s/sweetfs-probe.tmp", STORE);
+	snprintf(fin, sizeof(fin), "%s/sweetfs-probe.final", STORE);
+	memset(buf, 'a' + (int)(getpid() % 26), sizeof(buf));
+
+	say("== write probe in the store (what the data store itself would do)\n");
+	errno = 0;
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	say("  open   -> %d (errno %d)\n", fd, fd < 0 ? errno : 0);
+	if (fd < 0) {
+		say("  ! the store directory cannot be written: no file can be persisted there\n");
+		return;
+	}
+	n = 0;
+	for (i = 0; i < 16; i++) {
+		n = write(fd, buf, sizeof(buf));
+		if (n != (ssize_t)sizeof(buf)) {
+			break;
+		}
+		nw += (int)n;
+	}
+	say("  write  %d bytes -> %d (errno %d)\n", nw, (int)n, n < 0 ? errno : 0);
+	errno = 0;
+	err = fsync(fd);
+	say("  fsync  -> %d (errno %d)\n", err, err ? errno : 0);
+	errno = 0;
+	err = close(fd);
+	say("  close  -> %d (errno %d)\n", err, err ? errno : 0);
+	errno = 0;
+	err = rename(tmp, fin);
+	say("  rename -> %d (errno %d)\n", err, err ? errno : 0);
+	show(fin);
+	{
+		unsigned char back[8];
+		size_t got;
+		int e;
+		FILE *f = fopen(fin, "rb");
+
+		e = f == NULL ? errno : 0;
+		got = f == NULL ? 0 : fread(back, 1, sizeof(back), f);
+		if (f != NULL) {
+			fclose(f);
+		}
+		say("  (read back: %zu bytes, first 0x%02x, open errno %d)\n", got, got ? back[0] : 0, e);
+	}
+	errno = 0;
+	err = unlink(fin);
+	say("  unlink -> %d (errno %d)\n", err, err ? errno : 0);
+
+	/* and a directory, as a store does for each extension */
+	snprintf(dir, sizeof(dir), "%s/sweetfs-probe-dir", STORE);
+	errno = 0;
+	err = mkdir(dir, 0755);
+	say("  mkdir  -> %d (errno %d)\n", err, err ? errno : 0);
+	show(dir);
+	if (err == 0) {
+		errno = 0;
+		err = rmdir(dir);
+		say("  rmdir  -> %d (errno %d)\n", err, err ? errno : 0);
+	}
+	tree("right after the probe");
+}
+
 int
 main(void)
 {
@@ -198,7 +287,11 @@ main(void)
 	if (lf == NULL) {
 		return 1;
 	}
-	say("SWEETFS: start\n");
+	say("SWEETFS: start, pid %d\n", (int)getpid());
+	say("SWEETFS: waiting 45 s, so PosterBoard's first prewarm has run (it asserts 30 to 70 s after launch)\n");
+	sleep(45);
+	tree("at +45 s");
+	probe();
 	find_posters("/var/mobile/Library", 3, 6);
 	find_posters("/var/mobile/Containers/Data/PluginKitPlugin", 2, 6);
 	find_posters("/var/mobile/Containers/Data/Application", 2, 6);
@@ -207,16 +300,7 @@ main(void)
 	find_posters("/var/mobile/Containers/Shared/SystemGroup", 2, 6);
 	find_posters("/var/root/Library", 3, 4);
 	find_posters("/var/db", 2, 4);
-	/* where the system posters (extensions) are */
-	find_posters("/System/Library/PrivateFrameworks", 1, 1);
-	find_posters("/System/Library/ExtensionKit/Extensions", 1, 3);
-	find_posters("/System/Library/PrivateFrameworks/PosterBoard.framework", 1, 1);
-	/* what the system posters' extensions hold, and what PosterBoard wrote and its crash reports */
-	walk("/System/Library/PrivateFrameworks/EmojiPoster.framework/PlugIns", 3);
-	walk("/System/Library/PrivateFrameworks/GradientPoster.framework/PlugIns", 3);
-	walk("/System/Library/PrivateFrameworks/PridePoster.framework/PlugIns", 3);
-	walk("/System/Library/PrivateFrameworks/UnityPoster.framework/PlugIns", 3);
-	dump_file("/var/mobile/Library/Preferences/com.apple.PosterBoard.plist");
+	dump_file(PREF);
 	dump_newest("/var/mobile/Library/Logs/CrashReporter", "PosterBoard-", ".ips", 2);
 	say("SWEETFS: done\n");
 	fclose(lf);
