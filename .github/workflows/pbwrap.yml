@@ -1,0 +1,26 @@
+name: pbwrap
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetroot/sweetroot.c -o sweetroot
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/pbwrap/pbwrap.c -o pbwrap
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -dynamiclib \
+              -install_name /usr/lib/sweetposter.dylib tools/pbwrap/sweetposter.c -o sweetposter.dylib
+          codesign -s - --force sweetroot pbwrap sweetposter.dylib
+          mkdir -p drop/usr/local/bin drop/usr/local/libexec drop/usr/lib drop/usr/local/etc drop/var/sweet
+          cp sweetroot drop/usr/local/bin/
+          cp pbwrap drop/usr/local/libexec/
+          cp sweetposter.dylib drop/usr/lib/
+          cp tools/pbwrap/root.cmd drop/var/sweet/
+          cp tools/pbwrap/sweet-boot.list drop/usr/local/etc/
+          find drop -type f -exec shasum -a 256 {} +
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pbwrap
+          path: drop

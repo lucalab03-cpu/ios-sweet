@@ -33,6 +33,24 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### New on 2026-11-16: sweetroot and the PosterBoard trace (written, NOT built, NOT run)
+
+- **`tools/sweetroot/sweetroot.c`** applies `/var/sweet/root.cmd` at boot: `cp [-n]`, `mv`, `rm [-r]`, `mkdir`,
+  `chmod`, `write`, `touch`, `ls`, `cat`, `run PROG ARGS`, `sync`. Nothing runs unless the file's first operation
+  is `apply` (dry run otherwise). Log `/var/tmp/sweetroot.log`. This turns a root experiment into one boot
+  instead of a 7 minute flash plus the fastboot hang. `/var/sweet/root.cmd` arrives with the dropbox.
+- **`tools/pbwrap/`** + **`.github/workflows/pbwrap.yml`**: `pbwrap` stands in for
+  `/Applications/PosterBoard.app/PosterBoard` and execs `PosterBoard.inj` = `PosterBoard.orig` with
+  `LC_LOAD_DYLIB /usr/lib/sweetposter.dylib` added by `install-wrap --patch` (which also fixes the first page's
+  code-signature hash). After two quick crashes it runs `.orig`. Kill switch `/var/sweet/noinject`.
+  `sweetposter.dylib` logs (a) the string handed to BaseBoard's `_bs_set_crash_log_message` - the assertion text
+  that never reaches the `.ips` - and (b) every `rename`/`renamex_np`/`fsync`/`mkdir`/`rmdir`/`unlink`/`fopen` on
+  poster and Preferences paths, with errno. Log `/var/tmp/sweetposter.log`.
+- Boot order (`tools/pbwrap/sweet-boot.list`): `sweetroot`, `install-wrap`, `sweetsvc`, `&sweetaccel-d`,
+  `&sweetfs`.
+- Local check only: `gcc -fsyntax-only -Wall -Wextra` is clean on all three sources. The iPhoneOS build is the
+  `pbwrap` workflow (macos-15, Xcode 16); its artifact is a drop tree for `tools/sweetboot/pack-dropbox.py`.
+
 ## Agent handoff / active work (2026-10-15, superseded)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
