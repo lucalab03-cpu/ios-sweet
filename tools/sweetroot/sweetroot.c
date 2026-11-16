@@ -313,24 +313,72 @@ cat_file(const char *path)
 	return 0;
 }
 
+/*
+ * The child's stdout and stderr, drained without blocking and written to the log with a marker, so that the result of
+ * a tool that only prints (install-wrap's "patch: N" and "verify: N") is in the same place as everything else.
+ */
+static int child_line_start = 1;
+
+static void
+drain(int fd)
+{
+	char buf[512];
+	ssize_t n;
+
+	while ((n = read(fd, buf, sizeof(buf))) > 0) {
+		for (ssize_t i = 0; i < n && lines < MAXLINES; i++) {
+			if (child_line_start) {
+				fputs("  | ", lf);
+				child_line_start = 0;
+			}
+			fputc(buf[i], lf);
+			if (buf[i] == '\n') {
+				child_line_start = 1;
+				lines++;
+			}
+		}
+		fflush(lf);
+	}
+}
+
 static int
 run_prog(char **argv)
 {
 	pid_t pid;
-	int status = 0;
+	int status = 0, p[2] = { -1, -1 };
+	posix_spawn_file_actions_t fa;
 
 	if (!sane(argv[0])) {
 		say("run: refused %s\n", argv[0] ? argv[0] : "(null)");
 		return -1;
 	}
-	if (posix_spawn(&pid, argv[0], NULL, NULL, argv, environ) != 0) {
-		say("run: cannot start %s: %s\n", argv[0], strerror(errno));
+	if (pipe(p) != 0) {
+		say("run: pipe: %s\n", strerror(errno));
 		return -1;
 	}
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_adddup2(&fa, p[1], STDOUT_FILENO);
+	posix_spawn_file_actions_adddup2(&fa, p[1], STDERR_FILENO);
+	posix_spawn_file_actions_addclose(&fa, p[0]);
+	posix_spawn_file_actions_addclose(&fa, p[1]);
+	if (posix_spawn(&pid, argv[0], &fa, NULL, argv, environ) != 0) {
+		say("run: cannot start %s: %s\n", argv[0], strerror(errno));
+		posix_spawn_file_actions_destroy(&fa);
+		close(p[0]);
+		close(p[1]);
+		return -1;
+	}
+	posix_spawn_file_actions_destroy(&fa);
+	close(p[1]);
+	fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
 	for (int t = 0;; t++) {
-		pid_t r = waitpid(pid, &status, WNOHANG);
+		pid_t r;
 
+		drain(p[0]);
+		r = waitpid(pid, &status, WNOHANG);
 		if (r == pid) {
+			drain(p[0]);          /* whatever is still in the pipe */
+			close(p[0]);
 			say("run: %s exited with status %d\n", argv[0], status);
 			return 0;
 		}
@@ -338,6 +386,8 @@ run_prog(char **argv)
 			say("run: %s did not finish in %d s, killed\n", argv[0], RUN_TIMEOUT);
 			kill(pid, 9);
 			waitpid(pid, &status, 0);
+			drain(p[0]);
+			close(p[0]);
 			return -1;
 		}
 		sleep(1);

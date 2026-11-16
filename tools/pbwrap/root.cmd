@@ -9,7 +9,12 @@ cp -n /Applications/PosterBoard.app/PosterBoard /Applications/PosterBoard.app/Po
 
 # the copy that install-wrap adds LC_LOAD_DYLIB to; it also fixes the first page's code signature hash
 cp -n /Applications/PosterBoard.app/PosterBoard.orig /Applications/PosterBoard.app/PosterBoard.inj
+# "patch: 0" done, "patch: 1" already there, "patch: -2" no room for the load command (the binary's header is full),
+# other negatives: not a Mach-O, not arm64, or a signature this code cannot rewrite
 run /usr/local/bin/install-wrap --patch /Applications/PosterBoard.app/PosterBoard.inj /usr/lib/sweetposter.dylib
+# "verify: 0" first page of every arm64 slice matches its signature again; negative: the hash still differs, so the
+# kernel will not take the binary and the interposition would look like a failure of its own
+run /usr/local/bin/install-wrap --verify /Applications/PosterBoard.app/PosterBoard.inj
 
 # the wrapper takes the place of the real binary and starts .inj (after two quick crashes: .orig)
 cp /usr/local/libexec/pbwrap /Applications/PosterBoard.app/PosterBoard

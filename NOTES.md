@@ -42,7 +42,9 @@ Open, in order:
 - **`tools/pbwrap/`** + **`.github/workflows/pbwrap.yml`**: `pbwrap` stands in for
   `/Applications/PosterBoard.app/PosterBoard` and execs `PosterBoard.inj` = `PosterBoard.orig` with
   `LC_LOAD_DYLIB /usr/lib/sweetposter.dylib` added by `install-wrap --patch` (which also fixes the first page's
-  code-signature hash). After two quick crashes it runs `.orig`. Kill switch `/var/sweet/noinject`.
+  code-signature hash), then checked with `install-wrap --verify`; both print their result and root.cmd keeps it
+  in the log (`patch: -2` = no room for the load command, `verify` negative = signature still differs), and
+  sweetroot now drains a child's stdout/stderr into its own log for exactly this. After two quick crashes it runs `.orig`. Kill switch `/var/sweet/noinject`.
   `sweetposter.dylib` logs (a) the string handed to BaseBoard's `_bs_set_crash_log_message` - the assertion text
   that never reaches the `.ips` - and (b) every `rename`/`renamex_np`/`fsync`/`mkdir`/`rmdir`/`unlink`/`fopen` on
   poster and Preferences paths, with errno. Log `/var/tmp/sweetposter.log`.
