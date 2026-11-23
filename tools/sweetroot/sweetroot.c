@@ -19,6 +19,7 @@
  *   touch PATH [MODE]         create empty if missing, then chmod
  *   ls PATH
  *   cat PATH                  first 4 KiB
+ *   newest DIR PREFIX DST     copy the newest DIR/PREFIX* (first 64 KiB) to DST
  *   run PROG [ARG...]         run a program, wait up to 300 s, log its status
  *   sync
  *
@@ -286,6 +287,54 @@ list_dir(const char *path)
 	return 0;
 }
 
+/* newest DIR PREFIX DST: the newest file of DIR whose name starts with PREFIX, its first 64 KiB copied to DST
+ * (crash reports: their names carry a date, the newest one is the last crash). */
+static int
+copy_newest(const char *dir, const char *prefix, const char *dst)
+{
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	char best[1024] = "";
+	time_t newest = 0;
+
+	if (d == NULL) {
+		say("newest: %s: %s\n", dir, strerror(errno));
+		return -1;
+	}
+	while ((e = readdir(d)) != NULL) {
+		char path[1024];
+		struct stat st;
+
+		if (strncmp(e->d_name, prefix, strlen(prefix)) != 0) {
+			continue;
+		}
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		if (stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_mtime >= newest) {
+			newest = st.st_mtime;
+			snprintf(best, sizeof(best), "%s", path);
+		}
+	}
+	closedir(d);
+	if (!best[0]) {
+		say("newest: no %s* in %s\n", prefix, dir);
+		return -1;
+	}
+	static char buf[64 << 10];
+	int in = open(best, O_RDONLY), out = in >= 0 ? open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+	ssize_t n = in >= 0 && out >= 0 ? read(in, buf, sizeof(buf)) : -1;
+	if (n > 0) {
+		(void)write(out, buf, (size_t)n);
+	}
+	if (in >= 0) {
+		close(in);
+	}
+	if (out >= 0) {
+		close(out);
+	}
+	say("newest: %s (%zd bytes) -> %s\n", best, n, dst);
+	return n > 0 ? 0 : -1;
+}
+
 static int
 cat_file(const char *path)
 {
@@ -452,7 +501,7 @@ main(int argc, char **argv)
 		return 0;
 	}
 	while (fgets(line, sizeof(line), f)) {
-		char *tok[20];
+		char *tok[21];          /* 20 words and the NULL that ends them: "run" hands &tok[1] to posix_spawn as argv */
 		int nt = 0;
 		char *p = line;
 
@@ -471,6 +520,7 @@ main(int argc, char **argv)
 				p++;
 			}
 		}
+		tok[nt] = NULL;         /* boot 2026-11-23: without it every "run" failed with EFAULT (garbage after argv) */
 		if (nt == 0 || tok[0][0] == '#') {
 			continue;
 		}
@@ -539,6 +589,10 @@ main(int argc, char **argv)
 			list_dir(tok[1]);
 		} else if (!strcmp(tok[0], "cat") && nt >= 2) {
 			cat_file(tok[1]);
+		} else if (!strcmp(tok[0], "newest") && nt >= 4) {
+			if (sane(tok[3])) {
+				copy_newest(tok[1], tok[2], tok[3]);
+			}
 		} else if (!strcmp(tok[0], "run") && nt >= 2) {
 			run_prog(&tok[1]);
 		} else if (!strcmp(tok[0], "sync")) {

@@ -4,6 +4,10 @@
 # operation must be "apply": without it sweetroot only prints what it would do. Log: /var/tmp/sweetroot.log
 apply
 
+# the last crash of PosterBoard (and of SpringBoard), whatever its date, into the outbox
+newest /var/mobile/Library/Logs/CrashReporter PosterBoard /var/tmp/sweetcrash.PosterBoard.log
+newest /var/mobile/Library/Logs/CrashReporter SpringBoard /var/tmp/sweetcrash.SpringBoard.log
+
 # the untouched binary, kept once (cp -n never overwrites what an earlier boot made)
 cp -n /Applications/PosterBoard.app/PosterBoard /Applications/PosterBoard.app/PosterBoard.orig
 
