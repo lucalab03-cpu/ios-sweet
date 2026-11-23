@@ -54,7 +54,21 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
-### New on 2026-11-23 (evening): the GPU job queue, kernel patch 0135 (written, NOT built, NOT run)
+### Boot 2026-11-24 00:10: kernel 0135 (payload-q.bin) + drop-queue (observed)
+
+- CI: xnu run 45277485613, panvk-ios run 45277485638 (both from upload 4159784), pbwrap run 45271769401 (f524ceb).
+  `payload-q.bin` = payload-60b's ADT and boot-args + kernel.development.sweet sha256 81623abd... (tools/repayload.py).
+- Observed (log-area_4, fetch13): `job queue on`; home reached; **0 faults, 0 resets** in the queue's lines; no client
+  asked for mode 1 -- the processes ran the OLD PanVK, because sweet-boot installs the 18 MB drop only 100-120 s into
+  the boot (after backboardd and PosterBoard have loaded the library). So this boot = new kernel, old userland
+  (synchronous through the queue): it works. `256 chains in N ms`: after start-up 0.86-2.7 s wall for 256 chains,
+  GPU 0.48-0.88 s of it (slot 0 fragment 0.32-0.73 s, slot 1 0.10-0.18 s), longest chain 34-188 ms, both slots at
+  once 0 ms. The GPU is busy about half the time: the rest is the programs waiting in SUBMIT.
+- sweetroot (fixed): `patch: 0`, `verify: 0`: PosterBoard.inj now carries sweetposter.dylib. pbwrap's launches this
+  boot said "using orig" (they came before sweetroot ran). Next boot (same payload-q, no drop) = the new PanVK in
+  queued mode and the first injected PosterBoard.
+
+### New on 2026-11-23 (evening): the GPU job queue, kernel patch 0135 (built 2026-11-24, first boot above)
 
 Point 3 of the list above, the user's "punto 2". Until 0134 every SUBMIT ran its job chain to the end inside the call,
 one at a time for the whole GPU, so the program could not record the next frame while the GPU drew this one.
