@@ -589,7 +589,7 @@ drmSyncobjHandleToFD(int fd, uint32_t handle, int *obj_fd)
 static struct {
 	uint8_t imported;
 	void *cpu;
-	uint64_t size;
+	uint64_t size, gpu;             /* gpu, size: every buffer, for decoding a failed job chain */
 	IOSurfaceRef surface;
 	uint32_t surface_id, plane;
 } bos[BO_TABLE];
@@ -741,8 +741,8 @@ close_buffer(uint32_t handle)
 	drop_mappings(handle);
 	int error = call(NR_GEM_CLOSE, &c, sizeof(c));
 	pthread_mutex_lock(&bo_lock);
-	if (handle < BO_TABLE && bos[handle].imported) {
-		surface = bos[handle].surface;
+	if (handle < BO_TABLE) {
+		surface = bos[handle].imported ? bos[handle].surface : NULL;
 		memset(&bos[handle], 0, sizeof(bos[handle]));
 	}
 	pthread_mutex_unlock(&bo_lock);
@@ -754,7 +754,7 @@ close_buffer(uint32_t handle)
 
 /* IMPORT_HOST: whole pages of this process become a buffer. 0 or errno. */
 static int
-import_host(void *address, uint64_t size, uint32_t *handle)
+import_host(void *address, uint64_t size, uint32_t *handle, uint64_t *gpu)
 {
 	struct { uint64_t address, size; uint32_t handle, pad; uint64_t offset; } r = { (uint64_t)(uintptr_t)address, size, 0, 0, 0 };
 	int error = call(SWEET_IMPORT_HOST_NR, &r, sizeof(r));
@@ -762,8 +762,93 @@ import_host(void *address, uint64_t size, uint32_t *handle)
 	    (unsigned long long)r.offset);
 	if (error == 0) {
 		*handle = r.handle;
+		*gpu = r.offset;
 	}
 	return error;
+}
+
+/*
+ * A job chain the GPU did not finish (SweetMali answers SUBMIT with kIOReturnIOError; the kernel log has the
+ * exception code): Mesa's own decoder prints the chain and its descriptors, with the faulting job's status, into
+ * /var/tmp/sweetpandecode.<process>... (the outbox takes /var/tmp/sweet*). Every buffer of this process is shown to
+ * it at its GPU address; buffers not mapped yet are mapped for it (and kept, as drmMap keeps them). First 6 per process.
+ * Boot 2026-11-23: backboardd's fragment jobs ended with 0x5a (ADDR_RANGE_FAULT) and 0x5b (IMPRECISE_FAULT), MMU
+ * fault 0.
+ */
+struct pandecode_context;
+struct pandecode_context *pandecode_create_context(bool to_stderr);
+void pandecode_inject_mmap(struct pandecode_context *ctx, uint64_t gpu_va, void *cpu, unsigned sz, const char *name);
+void pandecode_jc(struct pandecode_context *ctx, uint64_t jc_gpu_va, unsigned gpu_id);
+void pandecode_destroy_context(struct pandecode_context *ctx);
+
+static void *
+cpu_of(uint32_t handle, uint64_t size)
+{
+	void *cpu = NULL;
+
+	pthread_mutex_lock(&bo_lock);
+	if (bos[handle].imported) {
+		cpu = bos[handle].cpu;
+	}
+	pthread_mutex_unlock(&bo_lock);
+	if (cpu != NULL) {
+		return cpu;
+	}
+	pthread_mutex_lock(&map_lock);
+	for (size_t i = 0; i < map_count && cpu == NULL; i++) {
+		if (maps[i].handle == handle && maps[i].size >= size) {
+			cpu = maps[i].addr;
+		}
+	}
+	pthread_mutex_unlock(&map_lock);
+	if (cpu == NULL) {
+		void *at = NULL;
+		if (drmMap(-1, (drm_handle_t)((uint64_t)handle << 12), size, &at) == 0) {
+			drmUnmap(at, size);     /* kept, idle, until the buffer is closed */
+			cpu = at;
+		}
+	}
+	return cpu;
+}
+
+static void
+decode_failed_chain(uint64_t jc, uint32_t requirements)
+{
+	static atomic_int decoded;
+	static unsigned gpu_id;
+
+	if (atomic_fetch_add(&decoded, 1) >= 6 || getenv("SWEET_NO_DECODE") != NULL) {
+		return;
+	}
+	if (gpu_id == 0) {
+		struct { uint32_t param, pad; uint64_t value; } p = { 0, 0, 0 };    /* PANFROST_PARAM_GPU_PROD_ID */
+		gpu_id = call(0x44, &p, sizeof(p)) == 0 && p.value ? (unsigned)(p.value << 16) : 0x74020000u;
+	}
+	char name[200];
+	snprintf(name, sizeof(name), "/var/tmp/sweetpandecode.%s", getprogname());
+	setenv("PANDECODE_DUMP_FILE", name, 1);
+	struct pandecode_context *ctx = pandecode_create_context(false);
+	if (ctx == NULL) {
+		return;
+	}
+	unsigned shown = 0;
+	for (uint32_t h = 1; h < BO_TABLE; h++) {
+		pthread_mutex_lock(&bo_lock);
+		uint64_t gpu = bos[h].gpu, size = bos[h].size;
+		pthread_mutex_unlock(&bo_lock);
+		if (gpu == 0 || size == 0) {
+			continue;
+		}
+		void *cpu = cpu_of(h, size);
+		if (cpu != NULL) {
+			pandecode_inject_mmap(ctx, gpu, cpu, (unsigned)size, NULL);
+			shown++;
+		}
+	}
+	trace("decoding failed chain %#llx (requirements %#x, gpu id %#x, %u buffers) into %s.*", (unsigned long long)jc,
+	    requirements, gpu_id, shown, name);
+	pandecode_jc(ctx, jc, gpu_id);
+	pandecode_destroy_context(ctx);
 }
 
 /* ---- requests ---- */
@@ -850,6 +935,19 @@ drmIoctl(int fd, unsigned long request, void *arg)
 		break;
 	}
 	error = call(number, arg, IOCPARM_LEN(request));
+	if (number == NR_CREATE_BO && error == 0) {
+		const struct drm_panfrost_create_bo *c = arg;
+		if (c->handle < BO_TABLE) {
+			pthread_mutex_lock(&bo_lock);
+			bos[c->handle].gpu = c->offset;
+			bos[c->handle].size = c->size;
+			pthread_mutex_unlock(&bo_lock);
+		}
+	}
+	if (number == NR_SUBMIT && error != 0) {
+		const struct drm_panfrost_submit *sub = arg;
+		decode_failed_chain(sub->jc, sub->requirements);
+	}
 	if (number == NR_CREATE_BO) {
 		const struct drm_panfrost_create_bo *c = arg;
 		if (error != 0 || atomic_load(&log_lines) < 200) {
@@ -1067,9 +1165,9 @@ import_surface(uint32_t surface_id, uint32_t plane, uint32_t *handle)
 		CFRelease(s);
 		return ENOTSUP;
 	}
-	uint64_t size = (bytes + page - 1) & ~(page - 1);
+	uint64_t size = (bytes + page - 1) & ~(page - 1), gpu = 0;
 	uint32_t h = 0;
-	int error = import_host(start, size, &h);
+	int error = import_host(start, size, &h, &gpu);
 	if (error != 0 || h >= BO_TABLE) {
 		if (error == 0) {
 			struct drm_gem_close c = { .handle = h };
@@ -1083,6 +1181,7 @@ import_surface(uint32_t surface_id, uint32_t plane, uint32_t *handle)
 	bos[h].imported = 1;
 	bos[h].cpu = start;
 	bos[h].size = size;
+	bos[h].gpu = gpu;
 	bos[h].surface = s;             /* our reference, dropped when the buffer is closed */
 	bos[h].surface_id = surface_id;
 	bos[h].plane = plane;
@@ -1095,7 +1194,8 @@ static int
 import_user(uint64_t addr, uint64_t size, uint32_t *handle)
 {
 	uint32_t h = 0;
-	int error = import_host((void *)(uintptr_t)addr, size, &h);
+	uint64_t gpu = 0;
+	int error = import_host((void *)(uintptr_t)addr, size, &h, &gpu);
 
 	if (error != 0) {
 		return error;
@@ -1109,6 +1209,7 @@ import_user(uint64_t addr, uint64_t size, uint32_t *handle)
 	bos[h].imported = 1;
 	bos[h].cpu = (void *)(uintptr_t)addr;
 	bos[h].size = size;
+	bos[h].gpu = gpu;
 	pthread_mutex_unlock(&bo_lock);
 	*handle = h;
 	return 0;
