@@ -3,6 +3,7 @@ name: mapple-sweet
 # with no kernel change: their libdrm-xnu and vgpu are replaced by tools/mapple/sweet-mapple-drm.c, and their device
 # class gets the name patch 0126 gives Metal (tools/mapple/SweetMapple.m). See tools/mapple/README.md.
 # Artifacts: mapple-sweet (the drop: bundle executable + Info.plist that selects it, vmprobe, sweetroot, the test lists),
+# mapple-sweet-home (the same driver with backboardd and PosterBoard allowed),
 # mapple-sweet-back (the drop that gives Metal back to metal2), mapple-sweet-logs.
 on:
   workflow_dispatch:
@@ -112,11 +113,22 @@ jobs:
           cp tools/mapple/back/metal.allow back/var/sweet/metal.allow
           cp tools/mapple/back/sweet-boot.list back/usr/local/etc/sweet-boot.list
           cp tools/mapple/back/root.cmd back/var/sweet/root.cmd
-          find drop back -type f -exec ls -l {} \;
+          # the home-screen boot: the same driver, with backboardd, backboardd.orig and PosterBoard allowed
+          mkdir -p home
+          cp -R drop/System drop/usr home/
+          mkdir -p home/var/sweet
+          cp tools/mapple/home/metal.allow tools/mapple/home/root.cmd home/var/sweet/
+          cp tools/mapple/home/sweet-boot.list home/usr/local/etc/sweet-boot.list
+          rm -f home/usr/local/bin/vmprobe
+          find drop back home -type f -exec ls -l {} \;
       - uses: actions/upload-artifact@v4
         with:
           name: mapple-sweet
           path: drop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mapple-sweet-home
+          path: home
       - uses: actions/upload-artifact@v4
         with:
           name: mapple-sweet-back
