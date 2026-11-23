@@ -12,9 +12,10 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/pbwrap/pbwrap.c -o pbwrap
           # _bs_set_crash_log_message lives in BoardServices, not in the SDK: the interposition table points at a
           # symbol the linker cannot see, so it is left to launch time (-undefined dynamic_lookup, as Mesa's macOS
-          # driver and the PanVK dylib in this repo are linked).
+          # driver and the PanVK dylib in this repo are linked). A dylib in /usr/lib counts as eligible for the shared
+          # cache, which refuses dynamic_lookup: -not_for_dyld_shared_cache opts it out (CI 2026-11-23).
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -dynamiclib \
-              -Wl,-undefined,dynamic_lookup -install_name /usr/lib/sweetposter.dylib \
+              -Wl,-undefined,dynamic_lookup -Wl,-not_for_dyld_shared_cache -install_name /usr/lib/sweetposter.dylib \
               tools/pbwrap/sweetposter.c -o sweetposter.dylib
           # the interposition table has to hold exactly two addresses per pair; the undefined list shows what is left
           # to launch time
