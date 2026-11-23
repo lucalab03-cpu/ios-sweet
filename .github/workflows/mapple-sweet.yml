@@ -1,0 +1,129 @@
+name: mapple-sweet
+# Open Mapple's Metal driver (mapple_gpu_mali: Gallium Panfrost + their Metal front end) on our kernel's SweetMali,
+# with no kernel change: their libdrm-xnu and vgpu are replaced by tools/mapple/sweet-mapple-drm.c, and their device
+# class gets the name patch 0126 gives Metal (tools/mapple/SweetMapple.m). See tools/mapple/README.md.
+# Artifacts: mapple-sweet (the drop: bundle executable + Info.plist that selects it, vmprobe, sweetroot, the test lists),
+# mapple-sweet-back (the drop that gives Metal back to metal2), mapple-sweet-logs.
+on:
+  workflow_dispatch:
+env:
+  MAPPLE_REF: f893fed9bd8ff26daf1a3303e42b96ac29335b8b   # open-mapple/mapple_gpu_mali, 2026-11-19 (built by mapple-gpu.yml)
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: open-mapple/mapple_gpu_mali
+          ref: ${{ env.MAPPLE_REF }}
+          path: gpu
+      - name: Xcode and tools
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          brew install llvm spirv-llvm-translator spirv-tools zstd pkgconf
+      # Mesa takes one to two hours; it does not depend on our files, so it is kept between runs.
+      - name: Mesa from the cache
+        id: mesa-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: mapple-mesa-${{ env.MAPPLE_REF }}-v1
+          path: |
+            gpu/.venv
+            gpu/mesa/src
+            gpu/mesa/build-macos
+            gpu/mesa/build-ios
+            gpu/mesa/out
+            gpu/libdrm-xnu/out
+            gpu/ios/out/lib
+            gpu/ios/out/ios-arm64.ini
+      - name: Mesa (macOS host tools, then iOS), with their own libdrm
+        run: |
+          set -o pipefail
+          cd gpu && JOBS=$(sysctl -n hw.ncpu) bash ios/build.sh mesa 2>&1 | tee ../mesa.log | tail -40
+      - name: Mesa into the cache
+        if: steps.mesa-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: mapple-mesa-${{ env.MAPPLE_REF }}-v1
+          path: |
+            gpu/.venv
+            gpu/mesa/src
+            gpu/mesa/build-macos
+            gpu/mesa/build-ios
+            gpu/mesa/out
+            gpu/libdrm-xnu/out
+            gpu/ios/out/lib
+            gpu/ios/out/ios-arm64.ini
+      - name: Our libdrm and device class in place of theirs
+        run: |
+          set -e
+          cp tools/mapple/sweet-mapple-drm.c gpu/libdrm-xnu/src/xf86drm_xnu.c
+          for f in vgpu vgpu_mock vgpu_iokit; do
+            printf '/* replaced by libdrm-xnu/src/xf86drm_xnu.c (ios-sweet tools/mapple) */\ntypedef int sweet_%s_unused;\n' $f > gpu/vgpu/$f.c
+          done
+          cp tools/mapple/SweetMapple.m gpu/driver/metal/
+          # the driver's settings file sits in the bundle Metal loads
+          sed -i '' 's#/System/Library/Extensions/MappleMTLDriver.bundle/vmg.env#/System/Library/Extensions/SweetMTLDriver.bundle/vmg.env#' gpu/driver/vmg_screen.c
+          grep -c 'SweetMTLDriver.bundle/vmg.env' gpu/driver/vmg_screen.c
+      - name: Driver bundle
+        run: |
+          set -o pipefail
+          cd gpu && bash ios/build.sh driver 2>&1 | tee ../driver.log | grep -E 'error|warning: .*(sweet|Sweet)|bundle:' || true
+          test -f ios/out/MappleMTLDriver.bundle/MappleMTLDriver
+      - name: Check the binary
+        run: |
+          set -e
+          B=gpu/ios/out/MappleMTLDriver.bundle/MappleMTLDriver
+          ls -l "$B"
+          echo "--- classes"; nm "$B" | grep -E 'OBJC_CLASS_\$_(SweetMTLDevice|VMDevice)$'
+          echo "--- our libdrm is in"; nm "$B" | grep -E ' T _(drmIoctl|drmMap|vgpu_open|vmg_drm_surface_fd)$' || echo "::warning::libdrm symbols not found by name"
+          if nm "$B" | grep -q 'MappleGPUAccelerator'; then echo "::warning::their service name is still referenced"; fi
+          strings "$B" | grep -E 'SweetMali|sweetmdrm|SweetMTLDriver.bundle/vmg.env' | sort -u
+          echo "--- undefined, not from system libraries"; nm -u "$B" | grep -v -E '^_(OBJC_|objc_|_|CF|NS|IO|MTL|dispatch|os_|pthread|mach|kCF|kIO)' | head -60 || true
+      - name: vmprobe and sweetroot
+        run: |
+          set -e
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
+          $C -fobjc-arc -O1 gpu/ios/vmprobe.m -framework Foundation -framework Metal -o vmprobe
+          $C -O1 tools/sweetroot/sweetroot.c -o sweetroot
+          codesign -s - --force vmprobe sweetroot
+      - name: Package
+        run: |
+          set -e
+          D=drop/System/Library/Extensions/SweetMTLDriver.bundle
+          mkdir -p "$D" drop/usr/local/bin drop/usr/local/etc drop/var/sweet drop/usr/local/share/sweet/mapple
+          # signed alone, outside any bundle (as metal2's binary): a bundle seal would name their Info.plist
+          cp gpu/ios/out/MappleMTLDriver.bundle/MappleMTLDriver SweetMapple
+          codesign -s - --force SweetMapple
+          cp SweetMapple "$D/SweetMapple"
+          cp tools/mapple/Info.plist "$D/Info.plist"
+          cp vmprobe sweetroot drop/usr/local/bin/
+          cp tools/mapple/root.cmd drop/var/sweet/root.cmd
+          cp tools/mapple/sweet-boot.list drop/usr/local/etc/sweet-boot.list
+          cp tools/mapple/metal.allow drop/var/sweet/metal.allow
+          # their licence asks for the attribution and NOTICE to travel with the driver
+          cp gpu/LICENSE gpu/NOTICE drop/usr/local/share/sweet/mapple/
+          # back to metal2: its Info.plist (executable SweetMTLDriver, still in the bundle), its allow list, no root.cmd work
+          B=back/System/Library/Extensions/SweetMTLDriver.bundle
+          mkdir -p "$B" back/usr/local/etc back/var/sweet
+          cp tools/metal/Info.plist "$B/Info.plist"
+          cp tools/mapple/back/metal.allow back/var/sweet/metal.allow
+          cp tools/mapple/back/sweet-boot.list back/usr/local/etc/sweet-boot.list
+          cp tools/mapple/back/root.cmd back/var/sweet/root.cmd
+          find drop back -type f -exec ls -l {} \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mapple-sweet
+          path: drop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mapple-sweet-back
+          path: back
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mapple-sweet-logs
+          path: '*.log'
+          if-no-files-found: ignore
