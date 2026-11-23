@@ -1,0 +1,33 @@
+name: mapple-gpu
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: open-mapple/mapple_gpu_mali
+          path: gpu
+      - name: Xcode and tools
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          brew install llvm spirv-llvm-translator spirv-tools zstd pkgconf
+      - name: Mesa (macOS host tools, then iOS)
+        run: |
+          set -o pipefail
+          cd gpu && JOBS=$(sysctl -n hw.ncpu) bash ios/build.sh mesa 2>&1 | tee ../mesa.log
+      - name: Driver bundle
+        run: |
+          set -o pipefail
+          cd gpu && bash ios/build.sh driver 2>&1 | tee ../driver.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mapple-gpu
+          path: |
+            gpu/ios/out/MappleMTLDriver.bundle
+            mesa.log
+            driver.log
+          if-no-files-found: ignore
