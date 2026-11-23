@@ -54,6 +54,26 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 00:45: patch 0136 (GPU clock from Android, chains-ahead limit) + pbwrap's own switch (written, NOT run)
+
+- **Boot 2026-11-24 00:20 (payload-q, second boot of drop-queue), observed:** `a client asks for mode 1: queued` (one
+  client, backboardd); 0 faults, 0 resets. Now GPU-bound: 256 chains in 610 ms with GPU 587 ms (96 %); queue wait
+  4.7-41 s per 256 chains (18-160 ms per chain): backboardd runs far ahead. User: "a bit more fluid in some
+  animations". PosterBoard still `using orig`: **pbwrap honoured `/var/sweet/noinject`**, which an old inject drop put
+  there for backboardd-wrap (removing it would turn backboardd's old injection back on).
+- **The GPU's OPP table (Android, /proc/gpufreqv2, 2026-11-24, `gpufreq.txt`):** segment 3, 25 working OPPs from
+  299 MHz (0.6125 V) to **823 MHz (0.7375 V)**, VSRAM 0.85 V; the signed table goes to 1000 MHz but this chip's working
+  table stops at 823. iOS ran at 364 MHz (syspll_d3). Boot log before 0136: `CLK_CFG_1 0x81810201` = mfg_sel 1
+  (mfgpll), ungated, as Android leaves it.
+- **0136 kernel:** (1) `sweetmaliclk` (default 1): mfg_sel stays on Android's mfgpll if it is there and ungated; after
+  the cores power up the clock is counted (GPU_CYCLE_COUNT over 20 ms) and logged `SWEET MALI: GPU clock N MHz
+  (Android's mfgpll, kept ...)`; outside 400-850 MHz it goes back to syspll_d3. The 256-chains line ends with `N MHz`.
+  Voltage and PLL are Android's: before go-ios.sh, `echo 7 > /proc/gpufreqv2/fix_target_opp_index` (637 MHz) or
+  `echo 0` (823 MHz), checked with `cat /proc/gpufreqv2/gpufreq_status`. Not known yet: whether lamu_gpu.ko or the
+  jump change the OPP afterwards (the count will say). (2) `sweetmaliahead` (default 8, 0 = off): a queued client's
+  SUBMIT waits while its chain from 8 SUBMITs ago is unfinished (log once: `a client is 8 chains ahead ...`).
+- **pbwrap:** kill switch is now `/var/sweet/noposter`. Build: pbwrap workflow (manual dispatch).
+
 ### Boot 2026-11-24 00:10: kernel 0135 (payload-q.bin) + drop-queue (observed)
 
 - CI: xnu run 45277485613, panvk-ios run 45277485638 (both from upload 4159784), pbwrap run 45271769401 (f524ceb).

@@ -4,7 +4,9 @@
  * assert text and the file operations of PosterBoard are invisible from outside, and this is the one way in
  * without a launchd plist change (the root image would have to be reflashed for that).
  *
- * Installed by /var/sweet/root.cmd (sweetroot) at boot; kill switch: a file /var/sweet/noinject.
+ * Installed by /var/sweet/root.cmd (sweetroot) at boot; kill switch: a file /var/sweet/noposter (its own: the
+ * /var/sweet/noinject an old drop left on the phone is backboardd-wrap's, and kept every launch on .orig, boot
+ * 2026-11-24).
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -108,7 +110,7 @@ main(int argc, char **argv)
 		fclose(s);
 	}
 	use_inj = count <= 2 && access(inj, X_OK) == 0 && access(orig, X_OK) == 0 &&
-	    access("/var/sweet/noinject", F_OK) != 0 && access(DYLIB, R_OK) == 0;
+	    access("/var/sweet/noposter", F_OK) != 0 && access(DYLIB, R_OK) == 0;
 	say("wrap: pid %d start, launch %d, using %s\n", (int)getpid(), count, use_inj ? "inj" : "orig");
 	if (use_inj) {
 		setenv("DYLD_INSERT_LIBRARIES", DYLIB, 1);

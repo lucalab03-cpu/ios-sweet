@@ -1,0 +1,209 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 2fde3cf..8ac3129 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -133,6 +133,7 @@ static const struct {
+ };
+ 
+ static vm_offset_t topckgen, infracfg, spm, mfgcfg, mali;
++static unsigned gpu_clock_mhz;          /* counted at bring-up (patch 0136) */
+ static uint32_t reached, gpu_id, shader_mask;
+ static uint64_t *pt_top;
+ static uint64_t pt_top_phys;
+@@ -758,10 +759,11 @@ finish_job(uint32_t s, uint32_t status, uint64_t now)
+ 	}
+ 	if (qstats.chains == 256) {
+ 		printf("SWEET MALI: 256 chains in %llu ms: GPU %llu ms (slot 0 %llu, slot 1 %llu), both slots at once %llu ms, "
+-		    "longest %llu ms, waiting in the queue %llu ms, %llu faults, %llu resets\n",
++		    "longest %llu ms, waiting in the queue %llu ms, %llu faults, %llu resets, %u MHz\n",
+ 		    abs_to_us(qstats.last - qstats.first) / 1000, abs_to_us(qstats.busy[0] + qstats.busy[1]) / 1000,
+ 		    abs_to_us(qstats.busy[0]) / 1000, abs_to_us(qstats.busy[1]) / 1000, abs_to_us(qstats.both) / 1000,
+-		    abs_to_us(qstats.longest) / 1000, abs_to_us(qstats.waitQueue) / 1000, qstats.faults, qstats.resets);
++		    abs_to_us(qstats.longest) / 1000, abs_to_us(qstats.waitQueue) / 1000, qstats.faults, qstats.resets,
++		    gpu_clock_mhz);
+ 		bzero(&qstats, sizeof(qstats));
+ 	}
+ 	thread_wakeup((event_t)&queue_done_chan);
+@@ -1074,10 +1076,61 @@ sweet_mali_finished(uint64_t out[2])
+ 	lck_mtx_unlock(&queue_lock);
+ }
+ 
++/*
++ * The GPU's clock (patch 0136), counted: its cycle counter (GPU_CYCLE_COUNT, started with GPU_COMMAND 5) over 20 ms
++ * of the system's clock. MHz, or 0 when the counter does not move.
++ */
++#define GPU_CYCLE_COUNT_LO  0x090u
++#define GPU_CYCLE_COUNT_HI  0x094u
++#define CLK_CFG_1           0x050u
++#define MFG_SEL_MFGPLL      1u
++#define MFG_SEL_SYSPLL_D3   2u
++#define MFG_SEL_GATE        (1u << 7)
++#define CLOCK_KEEP_MIN      400u            /* MHz: below this, syspll_d3's 364 is as good */
++#define CLOCK_KEEP_MAX      850u            /* MHz: this chip's working table ends at 823 (gpufreqv2, segment 3) */
++
++static uint64_t
++gpu_cycles(void)
++{
++	uint32_t hi, lo;
++
++	do {
++		hi = rd(mali, GPU_CYCLE_COUNT_HI);
++		lo = rd(mali, GPU_CYCLE_COUNT_LO);
++	} while (hi != rd(mali, GPU_CYCLE_COUNT_HI));
++	return ((uint64_t)hi << 32) | lo;
++}
++
++static unsigned
++gpu_mhz(void)
++{
++	uint64_t c0, c1, t0, t1, ns;
++
++	wr(mali, GPU_CMD, 5);                   /* CYCLE_COUNT_START */
++	mali_wait(1);
++	c0 = gpu_cycles();
++	t0 = mach_absolute_time();
++	mali_wait(20);
++	c1 = gpu_cycles();
++	t1 = mach_absolute_time();
++	wr(mali, GPU_CMD, 6);                   /* CYCLE_COUNT_STOP */
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	return ns != 0 && c1 > c0 ? (unsigned)((c1 - c0) * 1000 / ns) : 0;
++}
++
++static void
++mfg_sel_syspll_d3(void)
++{
++	wr(topckgen, CLK_CFG_1_CLR, 3u | MFG_SEL_GATE);  /* mfg_sel's source and its gate */
++	wr(topckgen, CLK_CFG_1_SET, MFG_SEL_SYSPLL_D3);
++}
++
+ static void
+ mali_up(int mode)
+ {
+-	uint32_t shaders, tiler, l2;
++	uint32_t shaders, tiler, l2, clk;
++	int keep_clock = 1;
++	bool kept = false;
+ 
+ 	topckgen = ml_io_map(TOPCKGEN_PA, 0x1000);
+ 	infracfg = ml_io_map(INFRACFG_PA, 0x1000);
+@@ -1089,9 +1142,20 @@ mali_up(int mode)
+ 	printf("SWEET MALI: before: PWR_STATUS %#x 2ND %#x, CLK_CFG_1 %#x, bus protection STA1 %#x\n",
+ 	    rd(spm, PWR_STATUS), rd(spm, PWR_STATUS_2ND), rd(topckgen, 0x50), rd(infracfg, TOPAXI_PROT_STA1));
+ 
+-	/* 1: the clock; 2: power */
+-	wr(topckgen, CLK_CFG_1_CLR, 3u | (1u << 7));    /* mfg_sel's source and its gate */
+-	wr(topckgen, CLK_CFG_1_SET, 2u);                /* syspll_d3 */
++	/*
++	 * 1: the clock. Until 0136 always syspll_d3 (364 MHz), whatever Android had set. Now (boot-arg sweetmaliclk,
++	 * default 1) mfg_sel stays on mfgpll when Android left it there and ungated: Android's gpufreq sets mfgpll and the
++	 * VGPU voltage together, so a fixed OPP before the jump (echo N > /proc/gpufreqv2/fix_target_opp_index) gives the
++	 * GPU that OPP's clock with its voltage. After step 4 the clock is counted; outside 400-850 MHz, syspll_d3 again.
++	 * sweetmaliclk=0: syspll_d3 as before.
++	 */
++	(void)PE_parse_boot_argn("sweetmaliclk", &keep_clock, sizeof(keep_clock));
++	clk = rd(topckgen, CLK_CFG_1);
++	if (keep_clock && (clk & 3u) == MFG_SEL_MFGPLL && !(clk & MFG_SEL_GATE)) {
++		kept = true;
++	} else {
++		mfg_sel_syspll_d3();
++	}
+ 	reached = 1;
+ 	for (unsigned i = 0; i < 4; i++) {
+ 		if (!domain_on(i)) {
+@@ -1143,6 +1207,19 @@ mali_up(int mode)
+ 	reached = 4;
+ 	printf("SWEET MALI: GPU_ID %#x (Mali-G52 r%up%u), shader cores %#x, tiler %#x, L2 %#x: all powered\n", gpu_id,
+ 	    (gpu_id >> 12) & 0xf, (gpu_id >> 4) & 0xff, shaders, tiler, l2);
++	gpu_clock_mhz = gpu_mhz();
++	if (kept && (gpu_clock_mhz < CLOCK_KEEP_MIN || gpu_clock_mhz > CLOCK_KEEP_MAX)) {
++		unsigned was = gpu_clock_mhz;
++
++		mfg_sel_syspll_d3();
++		mali_wait(1);
++		gpu_clock_mhz = gpu_mhz();
++		printf("SWEET MALI: GPU clock %u MHz from Android's mfgpll (outside %u-%u): syspll_d3, now %u MHz\n", was,
++		    CLOCK_KEEP_MIN, CLOCK_KEEP_MAX, gpu_clock_mhz);
++	} else {
++		printf("SWEET MALI: GPU clock %u MHz (%s; CLK_CFG_1 was %#x)\n", gpu_clock_mhz,
++		    kept ? "Android's mfgpll, kept" : "syspll_d3", clk);
++	}
+ 	if (mode < 2) {
+ 		return;
+ 	}
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index 9bc4a81..acf1259 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -142,6 +142,7 @@ struct sweet_mode {
+ 	uint32_t result;                        /* out: 1 when the client got them */
+ };
+ #define SWEET_SYNC_HANDLES_MAX  64
++#define SWEET_AHEAD_MAX         32
+ #define SWEET_WAIT_MAX_NS       (10ull * NSEC_PER_SEC)
+ 
+ /* A syncobj of a client in queued mode: signalled by hand, or by the chain whose fence it holds. */
+@@ -238,6 +239,8 @@ class SweetMaliUserClient : public IOUserClient
+ 	bool                       fUnnamed;    /* a SUBMIT named no buffers: any chain may use any buffer */
+ 	uint64_t                   fLast[2];    /* the fence of this client's newest chain on each slot */
+ 	uint64_t                   fInvalidated[2];     /* what had finished when its imported pages were last invalidated */
++	uint64_t                   fAhead[SWEET_AHEAD_MAX];     /* its newest chains' fences, a ring (patch 0136) */
++	uint32_t                   fAheadAt, fAheadWaits;
+ 
+ 	struct sweet_mali_buffer * buffer(uint32_t handle);
+ 	void freeBuffer(struct sweet_mali_buffer * b);
+@@ -622,6 +625,18 @@ SweetMaliUserClient::invalidateImported(void)
+ 	fInvalidated[1] = now[1];
+ }
+ 
++/* How many chains a queued client may have in front of the GPU (patch 0136): boot-arg sweetmaliahead, default 8. */
++static uint32_t
++sweet_mali_ahead(void)
++{
++	static int ahead = -1;
++
++	if (ahead < 0 && !PE_parse_boot_argn("sweetmaliahead", &ahead, sizeof(ahead))) {
++		ahead = 8;
++	}
++	return ahead > 0 ? (uint32_t) ahead : 0;
++}
++
+ /* An absolute deadline from a time to wait (<= 0: none, look once; at most SWEET_WAIT_MAX_NS). */
+ static uint64_t
+ deadline_in(int64_t ns)
+@@ -662,6 +677,25 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 	if (request->jc == 0 || count > SWEET_MALI_BUFFERS || nin > SWEET_SYNC_HANDLES_MAX) {
+ 		return kIOReturnBadArgument;
+ 	}
++	/*
++	 * Patch 0136: a client in queued mode may be at most `ahead` chains in front of the GPU (boot-arg sweetmaliahead,
++	 * default 8, 0 = no limit). Boot 2026-11-24 00:20: backboardd queued far ahead (chains waited 18-160 ms each in
++	 * the queue), so what reached the screen was that much older than the touch that asked for it.
++	 */
++	const uint32_t ahead = MIN(sweet_mali_ahead(), (uint32_t) SWEET_AHEAD_MAX);
++	if (fAsync && ahead != 0) {
++		uint64_t oldest = fAhead[fAheadAt % ahead], deadline;
++
++		if (oldest != 0 && !sweet_mali_fence_done(oldest)) {
++			if (fAheadWaits++ == 0) {
++				IOLog("SweetMali: a client is %u chains ahead of the GPU: its SUBMITs now wait for the oldest\n", ahead);
++			}
++			clock_interval_to_deadline(2000, kMillisecondScale, &deadline);
++			IOLockUnlock(gSweetMaliLock);
++			(void)sweet_mali_fences_wait(&oldest, 1, true, deadline, NULL);
++			IOLockLock(gSweetMaliLock);
++		}
++	}
+ 	for (uint32_t s = 0; s < 2; s++) {
+ 		if (fLast[s] != 0 && !sweet_mali_fence_done(fLast[s])) {
+ 			deps[ndeps++] = fLast[s];
+@@ -712,6 +746,9 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 		return kIOReturnNoResources;
+ 	}
+ 	fLast[fragment ? 0 : 1] = fence;
++	if (ahead != 0) {
++		fAhead[fAheadAt++ % ahead] = fence;
++	}
+ 	/* what the chain may use: the buffers it names, and every imported one (they are not always named) */
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		struct sweet_mali_buffer * b = buffer(handles[i]);
