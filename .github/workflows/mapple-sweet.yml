@@ -65,6 +65,8 @@ jobs:
             printf '/* replaced by libdrm-xnu/src/xf86drm_xnu.c (ios-sweet tools/mapple) */\ntypedef int sweet_%s_unused;\n' $f > gpu/vgpu/$f.c
           done
           cp tools/mapple/SweetMapple.m gpu/driver/metal/
+          # fixes to their driver for our GPU (Bifrost)
+          for p in tools/mapple/0*.patch; do (cd gpu && git apply -p1 --verbose "../$p"); done
           # the driver's settings file sits in the bundle Metal loads
           sed -i '' 's#/System/Library/Extensions/MappleMTLDriver.bundle/vmg.env#/System/Library/Extensions/SweetMTLDriver.bundle/vmg.env#' gpu/driver/vmg_screen.c
           grep -c 'SweetMTLDriver.bundle/vmg.env' gpu/driver/vmg_screen.c
