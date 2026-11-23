@@ -1,0 +1,36 @@
+--- a/driver/vmg_exec.c	2026-11-23 13:57:01.441376986 +0100
++++ b/driver/vmg_exec.c	2026-11-23 13:57:01.487407571 +0100
+@@ -1134,6 +1134,33 @@
+         info.restart_index = d->index_size == 2 ? 0xffff : 0xffffffff;
+         draw.start = (unsigned)(d->index_offset / d->index_size);
+         draw.index_bias = d->base_vertex;
++        // ios-sweet (Mali-G52, Bifrost): job-manager GPUs before Valhall need each indexed draw's index bounds, and
++        // Panfrost finds them by mapping the index buffer inside draw_vbo. When the batch draw_vbo is filling writes
++        // that buffer, the map flushes the batch and draw_vbo goes on with the batch it has just freed (boot
++        // 2026-11-23: SIGSEGV at batch->ctx + 0xcca8 in panfrost_batch_read_rsrc, from
++        // panfrost_get_index_buffer_bounded, in every backboardd). The bounds are found here, before draw_vbo takes
++        // its batch, and handed over: Panfrost then reads nothing. Valhall ignores them. VMG_NO_INDEX_BOUNDS=1: off.
++        static int no_bounds = -1;
++        if (no_bounds < 0) no_bounds = getenv("VMG_NO_INDEX_BOUNDS") != NULL;
++        if (dev->panfrost && !d->indirect && !no_bounds && d->count && (d->index_size == 2 || d->index_size == 4)) {
++            struct pipe_transfer *t = NULL;
++            const void *map = pipe_buffer_map_range(pipe, d->index_buffer->res, (unsigned)d->index_offset,
++                                                    d->count * d->index_size, PIPE_MAP_READ, &t);
++            if (map) {
++                uint32_t lo = UINT32_MAX, hi = 0, restart = info.restart_index;
++                for (uint32_t i = 0; i < d->count; i++) {
++                    uint32_t v = d->index_size == 2 ? ((const uint16_t *)map)[i] : ((const uint32_t *)map)[i];
++                    if (v == restart) continue;
++                    if (v < lo) lo = v;
++                    if (v > hi) hi = v;
++                }
++                pipe_buffer_unmap(pipe, t);
++                if (lo > hi) return;   // only restart indices: nothing is drawn
++                info.index_bounds_valid = true;
++                info.min_index = lo;
++                info.max_index = hi;
++            }
++        }
+     }
+     struct pipe_draw_indirect_info ind = {0};
+     if (d->indirect) {
