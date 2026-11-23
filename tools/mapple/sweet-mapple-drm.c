@@ -771,7 +771,7 @@ import_host(void *address, uint64_t size, uint32_t *handle, uint64_t *gpu)
  * A job chain the GPU did not finish (SweetMali answers SUBMIT with kIOReturnIOError; the kernel log has the
  * exception code): Mesa's own decoder prints the chain and its descriptors, with the faulting job's status, into
  * /var/tmp/sweetpandecode.<process>... (the outbox takes /var/tmp/sweet*). Every buffer of this process is shown to
- * it at its GPU address; buffers not mapped yet are mapped for it (and kept, as drmMap keeps them). First 6 per process.
+ * it at its GPU address; buffers not mapped yet are mapped for it (and kept, as drmMap keeps them). First 3 per process.
  * Boot 2026-11-23: backboardd's fragment jobs ended with 0x5a (ADDR_RANGE_FAULT) and 0x5b (IMPRECISE_FAULT), MMU
  * fault 0.
  */
@@ -811,13 +811,16 @@ cpu_of(uint32_t handle, uint64_t size)
 	return cpu;
 }
 
+/* The last vertex/tiler chain submitted (requirements without JD_REQ_FS): a fragment job's draws are its tiler jobs. */
+static _Atomic uint64_t last_vertex_jc;
+
 static void
 decode_failed_chain(uint64_t jc, uint32_t requirements)
 {
 	static atomic_int decoded;
 	static unsigned gpu_id;
 
-	if (atomic_fetch_add(&decoded, 1) >= 6 || getenv("SWEET_NO_DECODE") != NULL) {
+	if (atomic_fetch_add(&decoded, 1) >= 3 || getenv("SWEET_NO_DECODE") != NULL) {
 		return;
 	}
 	if (gpu_id == 0) {
@@ -847,6 +850,16 @@ decode_failed_chain(uint64_t jc, uint32_t requirements)
 	}
 	trace("decoding failed chain %#llx (requirements %#x, gpu id %#x, %u buffers) into %s.*", (unsigned long long)jc,
 	    requirements, gpu_id, shown, name);
+	/*
+	 * Boot 2026-11-23 (fetch6): the faulting fragment jobs' fault pointers (0x...520, 0x...540, 0x...160) are in the
+	 * batch's descriptor buffer but in none of the fragment chain's descriptors: they are draws, i.e. tiler jobs of the
+	 * vertex/tiler chain submitted just before. That chain is decoded first, then the fragment chain.
+	 */
+	uint64_t vjc = atomic_load(&last_vertex_jc);
+	if ((requirements & 1) && vjc != 0) {
+		trace("decoding the vertex/tiler chain %#llx before it", (unsigned long long)vjc);
+		pandecode_jc(ctx, vjc, gpu_id);
+	}
 	pandecode_jc(ctx, jc, gpu_id);
 	pandecode_destroy_context(ctx);
 }
@@ -961,6 +974,9 @@ drmIoctl(int fd, unsigned long request, void *arg)
 		return fail(error);
 	}
 	/* The job chain has run to its end: its out_sync is signalled. */
+	if (number == NR_SUBMIT && !(((const struct drm_panfrost_submit *)arg)->requirements & 1)) {
+		atomic_store(&last_vertex_jc, ((const struct drm_panfrost_submit *)arg)->jc);
+	}
 	if (number == NR_SUBMIT) {
 		uint32_t out = ((const struct drm_panfrost_submit *)arg)->out_sync;
 		atomic_fetch_add_explicit(&jobs_made, 1, memory_order_relaxed);
