@@ -1,0 +1,207 @@
+=== /proc/gpufreqv2
+fix_target_opp_index
+gpu_signed_opp_table
+gpu_working_opp_table
+gpufreq_status
+limit_table
+opp_stress_test
+=== /sys/kernel/ged/hal
+apo_autosuspend_delay_ms
+apo_autosuspend_delay_target_ref_count
+apo_force_hint
+apo_legacy
+apo_lp_thr_us
+apo_status
+apo_thr_us
+apo_wakeup_us
+autosuspend_stress
+current_freqency
+custom_boost_gpu_freq
+custom_upbound_gpu_freq
+dcs_adjust_fr_cnt
+dcs_adjust_support
+dcs_mode
+dcs_stress
+default_fps_margin_support
+dvfs_async_ratio
+dvfs_loading_mode
+dvfs_margin_value
+dvfs_workload_mode
+early_force_fallback_policy
+eb_dvfs_policy
+fallback_frequency_adjust
+fallback_interval
+fallback_timing
+fallback_window_size
+force_loading_base
+frame_base_optimize
+fw_idle
+ged_fallback_tuning
+ged_kpi
+ged_log_level
+gpu_boost_level
+gpu_fps
+gpu_power_on_off_test
+gpu_power_state
+gpu_slc_policy
+gpu_sum_loading
+gpu_utilization
+loading_base_dvfs_step
+loading_stride_size
+loading_window_size
+opp_logs
+pre_fence_chk
+previous_freqency
+target_fps_vsync
+timer_base_dvfs_margin
+total_gpu_freq_level_count
+whitebox_power_force_state
+whitebox_power_support
+=== /sys/class/devfreq/13040000.mali
+available_frequencies
+available_governors
+cur_freq
+device
+governor
+max_freq
+min_freq
+name
+power
+subsystem
+target_freq
+trans_stat
+uevent
+=== /sys/class/misc/mali0/device
+core_mask
+devfreq
+driver
+driver_override
+dvfs_period
+gpuinfo
+js_ctx_scheduling_mode
+js_scheduling_period
+js_timeouts
+lp_mem_pool_max_size
+lp_mem_pool_size
+mem_pool_max_size
+mem_pool_size
+mempool
+misc
+modalias
+of_node
+pm_poweroff
+power
+power_policy
+reset_timeout
+scheduling
+soft_job_timeout
+subsystem
+supplier:platform:ged
+uevent
+=== /proc/gpufreqv2/gpu_working_opp_table
+[00] freq: 823000, volt: 73750, vsram: 85000, posdiv: 1, margin: 1875, power: 838
+[01] freq: 796000, volt: 73125, vsram: 85000, posdiv: 1, margin: 1875, power: 812
+[02] freq: 769000, volt: 72500, vsram: 85000, posdiv: 1, margin: 1875, power: 770
+[03] freq: 743000, volt: 71875, vsram: 85000, posdiv: 1, margin: 1250, power: 728
+[04] freq: 716000, volt: 71250, vsram: 85000, posdiv: 1, margin: 1250, power: 704
+[05] freq: 690000, volt: 70625, vsram: 85000, posdiv: 2, margin: 1250, power: 665
+[06] freq: 663000, volt: 70000, vsram: 85000, posdiv: 2, margin: 1250, power: 627
+[07] freq: 637000, volt: 69375, vsram: 85000, posdiv: 2, margin: 1250, power: 604
+[08] freq: 611000, volt: 68750, vsram: 85000, posdiv: 2, margin: 1250, power: 568
+[09] freq: 586000, volt: 67500, vsram: 85000, posdiv: 2, margin: 1250, power: 540
+[10] freq: 560000, volt: 66875, vsram: 85000, posdiv: 2, margin: 625, power: 507
+[11] freq: 535000, volt: 65625, vsram: 85000, posdiv: 2, margin: 625, power: 464
+[12] freq: 509000, volt: 65000, vsram: 85000, posdiv: 2, margin: 625, power: 444
+[13] freq: 484000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 414
+[14] freq: 467000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 401
+[15] freq: 450000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 394
+[16] freq: 434000, volt: 63750, vsram: 85000, posdiv: 2, margin: 625, power: 373
+[17] freq: 417000, volt: 63125, vsram: 85000, posdiv: 2, margin: 625, power: 360
+[18] freq: 400000, volt: 62500, vsram: 85000, posdiv: 2, margin: 625, power: 340
+[19] freq: 383000, volt: 62500, vsram: 85000, posdiv: 2, margin: 625, power: 327
+[20] freq: 366000, volt: 61875, vsram: 85000, posdiv: 2, margin: 625, power: 308
+[21] freq: 349000, volt: 61875, vsram: 85000, posdiv: 2, margin: 625, power: 296
+[22] freq: 332000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 284
+[23] freq: 315000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 278
+[24] freq: 299000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 267
+=== /proc/gpufreqv2/gpu_signed_opp_table
+[00*] freq: 1000000, volt: 78125, vsram: 88125, posdiv: 1, margin: 1875, power: 0
+[01*] freq: 975000, volt: 77500, vsram: 87500, posdiv: 1, margin: 1875, power: 0
+[02*] freq: 950000, volt: 76875, vsram: 86875, posdiv: 1, margin: 1875, power: 0
+[03*] freq: 925000, volt: 76250, vsram: 86250, posdiv: 1, margin: 1875, power: 0
+[04*] freq: 900000, volt: 75625, vsram: 85625, posdiv: 1, margin: 1875, power: 0
+[05*] freq: 875000, volt: 75000, vsram: 85000, posdiv: 1, margin: 1875, power: 0
+[06*] freq: 850000, volt: 74375, vsram: 85000, posdiv: 1, margin: 1875, power: 0
+[07*] freq: 823000, volt: 73750, vsram: 85000, posdiv: 1, margin: 1875, power: 0
+[08*] freq: 796000, volt: 73125, vsram: 85000, posdiv: 1, margin: 1875, power: 0
+[09*] freq: 769000, volt: 72500, vsram: 85000, posdiv: 1, margin: 1875, power: 0
+[10*] freq: 743000, volt: 71875, vsram: 85000, posdiv: 1, margin: 1250, power: 0
+[11*] freq: 716000, volt: 71250, vsram: 85000, posdiv: 1, margin: 1250, power: 0
+[12*] freq: 690000, volt: 70625, vsram: 85000, posdiv: 2, margin: 1250, power: 0
+[13*] freq: 663000, volt: 70000, vsram: 85000, posdiv: 2, margin: 1250, power: 0
+[14*] freq: 637000, volt: 69375, vsram: 85000, posdiv: 2, margin: 1250, power: 0
+[15*] freq: 611000, volt: 68750, vsram: 85000, posdiv: 2, margin: 1250, power: 0
+[16*] freq: 586000, volt: 67500, vsram: 85000, posdiv: 2, margin: 1250, power: 0
+[17*] freq: 560000, volt: 66875, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[18*] freq: 535000, volt: 65625, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[19*] freq: 509000, volt: 65000, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[20*] freq: 484000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[21*] freq: 467000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[22*] freq: 450000, volt: 64375, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[23*] freq: 434000, volt: 63750, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[24*] freq: 417000, volt: 63125, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[25*] freq: 400000, volt: 62500, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[26*] freq: 383000, volt: 62500, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[27*] freq: 366000, volt: 61875, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[28*] freq: 349000, volt: 61875, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[29*] freq: 332000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[30*] freq: 315000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 0
+[31*] freq: 299000, volt: 61250, vsram: 85000, posdiv: 2, margin: 625, power: 0
+=== /proc/gpufreqv2/gpufreq_status
+[GPUFREQ-DEBUG] Current Status of GPUFREQ
+[GPU-OPP]       Index: 24, Freq: 299000, Volt: 61250, Vsram: 85000
+[GPU-REALOPP]   FmeterFreq: 0, Con1Freq: 0, ReguVolt: 0, ReguVsram: 0
+[GPU-Power]     PowerCount: 0, CG: 0, MTCMOS: 0, BUCK: 0
+[GPU-Segment]   SegmentID: 3, WorkingOPPNum: 25, SignedOPPNum: 32
+[GPU-LimitC]    CeilingIndex: 0, Limiter: 0, Priority: 9
+[GPU-LimitF]    FloorIndex: 24, Limiter: 0, Priority: 9
+[Common-Status] Dual Buck: False, GPUEB Support: Off
+[Common-Status] DVFSState: 0x0002, ShaderPresent: 0x00000003
+[Common-Status] Aging: Disable, AVS: Disable, StressTest: Disable, GPM1.0: Disable
+[Common-Status] GPU_SB_Ver: 0x0000, GPU_PTP_Ver: 0x0000, Temp_Compensate: Disable
+=== /sys/kernel/ged/hal/opp_logs
+Last TS: 0
+GPU Freq(MHz)  Time(ms)
+  823    0
+  796    0
+  769    0
+  743    0
+  716    0
+  690    0
+  663    0
+  637    0
+  611    0
+  586    0
+  560    0
+  535    0
+  509    0
+  484    0
+  467    0
+  450    0
+  434    0
+  417    0
+  400    0
+  383    0
+  366    0
+  349    0
+  332    0
+  315    0
+* 299    0
+=== /sys/kernel/ged/hal/current_freqency
+24 299000
+=== /sys/class/devfreq/13040000.mali/available_frequencies
+1000000000 975000000 950000000 925000000 900000000 875000000 850000000 823000000 796000000 769000000 743000000 716000000 690000000 663000000 637000000 611000000 586000000 560000000 535000000 509000000 484000000 467000000 450000000 434000000 417000000 400000000 383000000 366000000 349000000 332000000 315000000
+=== /sys/class/devfreq/13040000.mali/cur_freq
+535000000
+=== /sys/class/devfreq/13040000.mali/max_freq
+1000000000
