@@ -21,9 +21,8 @@ cp /usr/local/libexec/pbwrap /Applications/PosterBoard.app/PosterBoard
 chmod 755 /Applications/PosterBoard.app/PosterBoard
 ls /Applications/PosterBoard.app
 
-# one relaunch now, through the wrapper, instead of after this launch's crash
-run /usr/bin/killall PosterBoard
+# no relaunch here: there is no killall on the phone (boot 2026-11-23). PosterBoard dies 30-70 s after each launch
+# anyway, and launchd starts it again through the wrapper.
 
 # To go back (a later root.cmd, or the same file with these two lines uncommented):
 # cp /Applications/PosterBoard.app/PosterBoard.orig /Applications/PosterBoard.app/PosterBoard
-# run /usr/bin/killall PosterBoard
