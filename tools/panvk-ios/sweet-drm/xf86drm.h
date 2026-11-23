@@ -1,7 +1,8 @@
 /*
  * libdrm's xf86drm.h for PanVK on iOS (Mesa 26.2): what Mesa's Vulkan runtime, its WSI and PanVK take from
  * libdrm, on a system without Linux's DRM. The functions are in sweet.drm.c. Requests for the GPU go to the
- * kernel's SweetMali service; DRM's synchronisation objects live in this process (see sweet.drm.c).
+ * kernel's SweetMali service; DRM's synchronisation objects are the kernel's when SweetMali queues job chains
+ * (patch 0135), otherwise they live in this process (see sweet.drm.c).
  * A fork of tools/mesa-ios/sweet-drm (Gallium on Mesa 25.0.7), which stays as it is.
  * The request numbers and structures are Linux's (Mesa's include/drm-uapi).
  */
@@ -127,7 +128,7 @@ int drmGetNodeTypeFromFd(int fd);
 int drmPrimeHandleToFD(int fd, uint32_t handle, uint32_t flags, int *prime_fd);
 int drmPrimeFDToHandle(int fd, int prime_fd, uint32_t *handle);
 
-/* Synchronisation objects, binary, kept in this process (sweet.drm.c says why that is right). */
+/* Synchronisation objects, binary: the kernel's, or kept in this process (sweet.drm.c says when and why). */
 int drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle);
 int drmSyncobjDestroy(int fd, uint32_t handle);
 int drmSyncobjReset(int fd, const uint32_t *handles, uint32_t count);

@@ -5,11 +5,19 @@
  * the request's number being the selector, its structure going in and coming back. Mesa knows the device by a
  * descriptor of /dev/null; there is one GPU and one connection to it in a process.
  *
- * Synchronisation objects live here, not in the kernel. That is exact for us: SweetMali runs every job chain to
- * its end before SUBMIT returns. So a syncobj is either signalled or has no fence at all, a SUBMIT signals its
- * out_sync when it returns, and an unsignalled one can only become signalled by another thread of this process
- * (a SUBMIT or a CPU signal), which a waiter with WAIT_FOR_SUBMIT waits for. Sync files (PanVK moves fences
- * between syncobjs through them) are descriptors of /dev/null with the state they carried.
+ * Synchronisation objects, two ways:
+ * - In the kernel (patch 0135, the job queue): the connection asks SweetMali for queued mode (request 0x4f). Then a
+ *   SUBMIT only queues its chain and returns, the chain's out_sync is signalled by the kernel when the chain ends,
+ *   and the syncobj requests go to SweetMali, waits included (they sleep there, with the service free for the
+ *   process's other threads). Linux's waits take an absolute CLOCK_MONOTONIC time; the kernel takes a time from now,
+ *   at most 10 s a call, so the waits here convert and go round again until the time is up.
+ * - Here, in this process, when the kernel has no queue (an older kernel, boot-arg sweetmaliasync=0) or refuses, or
+ *   with /var/sweet/mali-sync-off present or SWEET_MALI_SYNC=0: exact as long as SweetMali runs every job chain to
+ *   its end before SUBMIT returns. So a syncobj is either signalled or has no fence at all, a SUBMIT signals its
+ *   out_sync when it returns, and an unsignalled one can only become signalled by another thread of this process
+ *   (a SUBMIT or a CPU signal), which a waiter with WAIT_FOR_SUBMIT waits for.
+ * Sync files (PanVK moves fences between syncobjs through them) are descriptors of /dev/null standing for what they
+ * carried: a state here, a kernel syncobj of their own there.
  * Not supported: opaque syncobj descriptors, dma-bufs, timelines (DRM_CAP_SYNCOBJ_TIMELINE is 0: Mesa's
  * vk_sync_timeline emulates them on binary syncobjs, as it does for PanVK on Bifrost anyway).
  *
@@ -55,6 +63,17 @@ extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t 
 #define SWEET_RETURN_UNSUPPORTED 0xe00002c7u
 
 #define PANFROST_SUBMIT_NR      0x40
+#define PANFROST_WAIT_BO_NR     0x41
+#define SWEET_MODE_NR           0x4f    /* ours (0135): queued SUBMITs and the kernel's syncobjs */
+#define SYNCOBJ_CREATE_NR       0xbf
+#define SYNCOBJ_DESTROY_NR      0xc0
+#define SYNCOBJ_WAIT_NR         0xc3
+#define SYNCOBJ_RESET_NR        0xc4
+#define SYNCOBJ_SIGNAL_NR       0xc5
+#define SYNCOBJ_TRANSFER_NR     0xcc
+
+/* 1 once SweetMali took this process into queued mode: the syncobjs are the kernel's. */
+static int kernel_sync;
 
 /* A short trace of what Mesa asks of the GPU: lines on stderr and in /var/tmp/sweetdrm.log. */
 static atomic_int trace_lines;
@@ -97,6 +116,30 @@ fail(int error)
 
 static io_connect_t connection;
 static pthread_mutex_t open_lock = PTHREAD_MUTEX_INITIALIZER;
+static int call(unsigned number, void *data, size_t size);
+
+/* Right after the connection opens, before any SUBMIT: queued mode, unless switched off. */
+static void
+choose_sync(void)
+{
+	struct { uint32_t mode, result; } m = { 1, 0 };
+	const char *env = getenv("SWEET_MALI_SYNC");
+	struct stat st;
+	int error;
+
+	if (env != NULL && strcmp(env, "0") == 0) {
+		trace("sweetdrm: syncobjs in this process (SWEET_MALI_SYNC=0)");
+		return;
+	}
+	if (stat("/var/sweet/mali-sync-off", &st) == 0) {
+		trace("sweetdrm: syncobjs in this process (/var/sweet/mali-sync-off)");
+		return;
+	}
+	error = call(SWEET_MODE_NR, &m, sizeof(m));
+	kernel_sync = error == 0 && m.result == 1;
+	trace("sweetdrm: %s (mode request -> err %d, result %u)", kernel_sync ? "queued SUBMITs, the kernel's syncobjs" :
+	    "every chain run to its end in SUBMIT, syncobjs in this process", error, m.result);
+}
 
 static int
 connect_service(void)
@@ -111,6 +154,9 @@ connect_service(void)
 			}
 			trace("sweetdrm: open %s -> %#x", SWEET_SERVICE, kr);
 			IOObjectRelease(service);
+			if (connection != 0) {
+				choose_sync();
+			}
 		} else {
 			trace("sweetdrm: no %s service", SWEET_SERVICE);
 		}
@@ -160,6 +206,15 @@ call(unsigned number, void *data, size_t size)
 	}
 }
 
+/* connect_service() once, for the syncobj calls, which may come before any request: then kernel_sync is known. */
+static void
+connected(void)
+{
+	if (connection == 0) {
+		(void)connect_service();
+	}
+}
+
 /* ---- synchronisation objects ---- */
 
 #define SYNCOBJ_MAX 4096
@@ -168,7 +223,95 @@ static pthread_mutex_t sync_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sync_changed = PTHREAD_COND_INITIALIZER;
 
 #define SYNC_FILES 256
-static struct { int fd; unsigned char signalled; } sync_files[SYNC_FILES];
+static struct { int fd; unsigned char signalled; uint32_t kernel; } sync_files[SYNC_FILES];
+
+/* ---- the kernel's syncobjs (queued mode) ---- */
+
+struct k_wait {                         /* SweetMali's SYNCOBJ_WAIT: Linux's, with a time to wait from now */
+	uint64_t handles;
+	int64_t timeout_nsec;
+	uint32_t count_handles, flags, first_signaled, pad;
+	uint64_t deadline_nsec;
+};
+
+static int
+k_create(uint32_t flags, uint32_t *handle)
+{
+	struct { uint32_t handle, flags; } c = { 0, flags };
+	int error = call(SYNCOBJ_CREATE_NR, &c, sizeof(c));
+
+	if (error != 0) {
+		trace("sweetdrm: kernel SYNCOBJ_CREATE -> err %d", error);
+		return fail(error);
+	}
+	*handle = c.handle;
+	return 0;
+}
+
+static int
+k_destroy(uint32_t handle)
+{
+	struct { uint32_t handle, pad; } d = { handle, 0 };
+	int error = call(SYNCOBJ_DESTROY_NR, &d, sizeof(d));
+	return error == 0 ? 0 : fail(error);
+}
+
+static int
+k_set(const uint32_t *handles, uint32_t count, int signal)
+{
+	struct { uint64_t handles; uint32_t count, pad; } a = { (uint64_t)(uintptr_t)handles, count, 0 };
+	int error = call(signal ? SYNCOBJ_SIGNAL_NR : SYNCOBJ_RESET_NR, &a, sizeof(a));
+	return error == 0 ? 0 : fail(error);
+}
+
+static int
+k_transfer(uint32_t dst, uint32_t src)
+{
+	struct { uint32_t src, dst; uint64_t src_point, dst_point; uint32_t flags, pad; } t = { src, dst, 0, 0, 0, 0 };
+	int error = call(SYNCOBJ_TRANSFER_NR, &t, sizeof(t));
+	return error == 0 ? 0 : fail(error);
+}
+
+static uint64_t now_ns(void);
+
+/* A Linux deadline (absolute CLOCK_MONOTONIC ns; INT64_MAX: none) as a time from now, for SweetMali. */
+static int64_t
+time_left(int64_t deadline)
+{
+	uint64_t t = now_ns();
+
+	if (deadline == INT64_MAX) {
+		return INT64_MAX;
+	}
+	return deadline > 0 && (uint64_t)deadline > t ? (int64_t)((uint64_t)deadline - t) : 0;
+}
+
+/* libdrm's convention: 0, or -errno (ETIME when the time ran out). */
+static int
+k_wait(const uint32_t *handles, unsigned count, int64_t timeout_nsec, unsigned flags, uint32_t *first)
+{
+	for (;;) {
+		struct k_wait w = { (uint64_t)(uintptr_t)handles, time_left(timeout_nsec), count, flags, 0, 0, 0 };
+		int error = call(SYNCOBJ_WAIT_NR, &w, sizeof(w));
+
+		if (error == 0) {
+			if (first != NULL) {
+				*first = w.first_signaled;
+			}
+			return 0;
+		}
+		if (error == ETIMEDOUT) {
+			/* SweetMali waits at most 10 s a call: again, until the caller's time is up */
+			if (timeout_nsec != INT64_MAX && now_ns() >= (uint64_t)(timeout_nsec > 0 ? timeout_nsec : 0)) {
+				errno = ETIME;
+				return -ETIME;
+			}
+			continue;
+		}
+		errno = error;
+		return -error;
+	}
+}
 
 static int
 valid(uint32_t h)
@@ -180,6 +323,10 @@ int
 drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
 {
 	(void)fd;
+	connected();
+	if (kernel_sync) {
+		return k_create(flags, handle);
+	}
 	pthread_mutex_lock(&sync_lock);
 	for (uint32_t h = 1; h <= SYNCOBJ_MAX; h++) {
 		if (!sync_used[h]) {
@@ -201,6 +348,9 @@ drmSyncobjDestroy(int fd, uint32_t handle)
 	int ok;
 
 	(void)fd;
+	if (kernel_sync) {
+		return k_destroy(handle);
+	}
 	pthread_mutex_lock(&sync_lock);
 	ok = valid(handle);
 	if (ok) {
@@ -214,6 +364,9 @@ drmSyncobjDestroy(int fd, uint32_t handle)
 static int
 set_state(const uint32_t *handles, uint32_t count, unsigned char state)
 {
+	if (kernel_sync) {
+		return count == 0 ? 0 : k_set(handles, count, state);
+	}
 	pthread_mutex_lock(&sync_lock);
 	for (uint32_t i = 0; i < count; i++) {
 		if (!valid(handles[i])) {
@@ -273,6 +426,9 @@ wait_syncobjs(const uint32_t *handles, unsigned count, int64_t timeout_nsec, uns
 	if (count == 0) {
 		errno = EINVAL;
 		return -EINVAL;
+	}
+	if (kernel_sync) {
+		return k_wait(handles, count, timeout_nsec, flags, first);
 	}
 	pthread_mutex_lock(&sync_lock);
 	for (;;) {
@@ -349,6 +505,19 @@ drmSyncobjQuery2(int fd, uint32_t *handles, uint64_t *points, uint32_t handle_co
 {
 	(void)fd;
 	(void)flags;
+	if (kernel_sync) {
+		/* 1 for a signalled one: a wait that does not wait (WAIT_FOR_SUBMIT: one without a chain is not an error) */
+		for (uint32_t i = 0; i < handle_count; i++) {
+			struct k_wait w = { (uint64_t)(uintptr_t)&handles[i], 0, 1, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, 0, 0, 0 };
+			int error = call(SYNCOBJ_WAIT_NR, &w, sizeof(w));
+
+			if (error != 0 && error != ETIMEDOUT) {
+				return fail(error);
+			}
+			points[i] = error == 0;
+		}
+		return 0;
+	}
 	pthread_mutex_lock(&sync_lock);
 	for (uint32_t i = 0; i < handle_count; i++) {
 		if (!valid(handles[i])) {
@@ -376,6 +545,9 @@ drmSyncobjTransfer(int fd, uint32_t dst_handle, uint64_t dst_point, uint32_t src
 	if (dst_point != 0 || src_point != 0) {
 		return fail(EINVAL);
 	}
+	if (kernel_sync) {
+		return k_transfer(dst_handle, src_handle);
+	}
 	pthread_mutex_lock(&sync_lock);
 	if (!valid(dst_handle) || !valid(src_handle)) {
 		pthread_mutex_unlock(&sync_lock);
@@ -390,21 +562,41 @@ drmSyncobjTransfer(int fd, uint32_t dst_handle, uint64_t dst_point, uint32_t src
 int
 drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 {
+	uint32_t carried = 0;
+
 	(void)fd;
+	if (kernel_sync) {
+		/* the sync file's own kernel syncobj, holding what `handle` holds now */
+		if (k_create(0, &carried) != 0) {
+			return -1;
+		}
+		if (k_transfer(carried, handle) != 0) {
+			int error = errno;
+			(void)k_destroy(carried);
+			return fail(error);
+		}
+	}
 	pthread_mutex_lock(&sync_lock);
-	if (!valid(handle)) {
+	if (!kernel_sync && !valid(handle)) {
 		pthread_mutex_unlock(&sync_lock);
 		return fail(EINVAL);
 	}
 	int f = open("/dev/null", O_RDONLY | O_CLOEXEC), slot = -1;
 	if (f < 0) {
 		pthread_mutex_unlock(&sync_lock);
+		if (carried != 0) {
+			(void)k_destroy(carried);
+		}
 		return -1;
 	}
 	/* an entry with this number is stale (its descriptor was closed without an import): replace it */
 	for (int i = 0; i < SYNC_FILES && slot < 0; i++) {
 		if (sync_files[i].fd == f) {
 			slot = i;
+			if (sync_files[i].kernel != 0) {
+				(void)k_destroy(sync_files[i].kernel);
+				sync_files[i].kernel = 0;
+			}
 		}
 	}
 	for (int i = 0; i < SYNC_FILES && slot < 0; i++) {
@@ -415,11 +607,15 @@ drmSyncobjExportSyncFile(int fd, uint32_t handle, int *sync_file_fd)
 	if (slot < 0) {
 		pthread_mutex_unlock(&sync_lock);
 		close(f);
+		if (carried != 0) {
+			(void)k_destroy(carried);
+		}
 		trace("sweetdrm: out of sync files");
 		return fail(ENOMEM);
 	}
 	sync_files[slot].fd = f;
-	sync_files[slot].signalled = sync_signalled[handle];
+	sync_files[slot].signalled = kernel_sync ? 0 : sync_signalled[handle];
+	sync_files[slot].kernel = carried;
 	pthread_mutex_unlock(&sync_lock);
 	*sync_file_fd = f;
 	return 0;
@@ -429,10 +625,11 @@ int
 drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
 {
 	unsigned char state = 1;        /* -1: "already signalled" */
+	uint32_t carried = 0;
 
 	(void)fd;
 	pthread_mutex_lock(&sync_lock);
-	if (!valid(handle)) {
+	if (!kernel_sync && !valid(handle)) {
 		pthread_mutex_unlock(&sync_lock);
 		return fail(EINVAL);
 	}
@@ -442,7 +639,9 @@ drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
 			if (sync_files[i].fd == sync_file_fd) {
 				/* one import per export (PanVK closes the descriptor right after) */
 				state = sync_files[i].signalled;
+				carried = sync_files[i].kernel;
 				sync_files[i].fd = 0;
+				sync_files[i].kernel = 0;
 				found = 1;
 				break;
 			}
@@ -451,6 +650,18 @@ drmSyncobjImportSyncFile(int fd, uint32_t handle, int sync_file_fd)
 			pthread_mutex_unlock(&sync_lock);
 			return fail(EINVAL);
 		}
+	}
+	if (kernel_sync) {
+		int r;
+
+		pthread_mutex_unlock(&sync_lock);
+		if (carried == 0) {
+			return k_set(&handle, 1, 1);    /* -1, or a sync file from before queued mode: signalled */
+		}
+		r = k_transfer(handle, carried);
+		int error = errno;
+		(void)k_destroy(carried);
+		return r == 0 ? 0 : fail(error);
 	}
 	sync_signalled[handle] = state;
 	pthread_cond_broadcast(&sync_changed);
@@ -556,6 +767,24 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (number == 0x42) {
 		memcpy(before, arg, IOCPARM_LEN(request) < sizeof(before) ? IOCPARM_LEN(request) : sizeof(before));
 	}
+	if (number == PANFROST_WAIT_BO_NR && kernel_sync) {
+		/* struct drm_panfrost_wait_bo: u32 handle, pad; s64 timeout_ns, absolute -- SweetMali takes a time from now */
+		struct { uint32_t handle, pad; int64_t timeout_ns; } *w = arg, k;
+		int64_t deadline = w->timeout_ns;
+
+		for (;;) {
+			k = *w;
+			k.timeout_ns = time_left(deadline);
+			error = call(number, &k, sizeof(k));
+			if (error != ETIMEDOUT || deadline == INT64_MAX || now_ns() >= (uint64_t)(deadline > 0 ? deadline : 0)) {
+				break;
+			}
+		}
+		if (error == ETIMEDOUT && k.timeout_ns == 0) {
+			error = EBUSY;                  /* Linux: EBUSY for a look that does not wait */
+		}
+		return error == 0 ? 0 : fail(error);
+	}
 	error = call(number, arg, IOCPARM_LEN(request));
 	if (number == 0x42) {
 		const uint32_t *r = arg;
@@ -567,8 +796,11 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (error != 0) {
 		return fail(error);
 	}
-	/* The job chain has run to its end: its out_sync is signalled (struct drm_panfrost_submit: u32 at 20). */
-	if (number == PANFROST_SUBMIT_NR) {
+	/*
+	 * Without queued mode the job chain has run to its end: its out_sync is signalled here (struct
+	 * drm_panfrost_submit: u32 at 20). In queued mode the kernel signals it when the chain ends.
+	 */
+	if (number == PANFROST_SUBMIT_NR && !kernel_sync) {
 		uint32_t out = ((const uint32_t *)arg)[5];
 		if (out != 0) {
 			(void)set_state(&out, 1, 1);

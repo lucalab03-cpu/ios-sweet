@@ -1,0 +1,1166 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 94a5bfb..2fde3cf 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -449,10 +449,25 @@ sweet_mali_map(uint64_t gpu, uint64_t phys)
+ 	return done;
+ }
+ 
+-/* After entries were added: the MMU forgets what it remembered. The address space is set up again from the top. */
++static bool queue_on(void);
++static void queue_hold_idle(void);
++static void queue_release(void);
++
++/*
++ * After entries were added: the MMU forgets what it remembered. The address space is set up again from the top, with
++ * no job running (with the job queue: new jobs wait meanwhile, the running ones are let finish).
++ */
+ void
+ sweet_mali_mapped(void)
+ {
++	if (queue_on()) {
++		queue_hold_idle();
++		lck_mtx_lock(&mali_lock);
++		as0_update(pt_top_phys, TRANSCFG_AARCH64_4K);
++		lck_mtx_unlock(&mali_lock);
++		queue_release();
++		return;
++	}
+ 	lck_mtx_lock(&mali_job_lock);
+ 	lck_mtx_lock(&mali_lock);
+ 	as0_update(pt_top_phys, TRANSCFG_AARCH64_4K);
+@@ -517,13 +532,55 @@ wait_job(uint32_t mask, uint32_t want, uint32_t ms)
+ 	return (rd(mali, JOB_INT_RAWSTAT) & mask) == want;
+ }
+ 
++/* The soft reset after a hang or a bus fault, and everything a reset loses: power, address space, interrupts. */
++static void
++gpu_reset_and_restore(void)
++{
++	wr(mali, GPU_INT_CLEAR, 0xffffffffu);
++	wr(mali, GPU_CMD, CMD_SOFT_RESET);
++	(void)wait_for(mali, GPU_INT_RAWSTAT, IRQ_RESET_COMPLETED, IRQ_RESET_COMPLETED, 100);
++	wr(mali, L2_PWRON, rd(mali, L2_PRESENT));
++	wr(mali, TILER_PWRON, rd(mali, TILER_PRESENT));
++	wr(mali, SHADER_PWRON, shader_mask);
++	(void)wait_for(mali, SHADER_READY, shader_mask, shader_mask, 50);
++	lck_mtx_lock(&mali_lock);
++	as0_update(pt_top_phys, TRANSCFG_AARCH64_4K);
++	lck_mtx_unlock(&mali_lock);
++	wr(mali, MMU_INT_CLEAR, 0xffffffffu);
++}
++
++static uint64_t queue_submit(uint64_t chain, bool fragment, const uint64_t *deps, uint32_t ndeps);
++static bool queue_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first);
++static uint32_t queue_status(uint64_t fence);
++
+ /*
+  * One job chain, from GPU address `chain`, run to its end before this returns: fragment jobs on slot 0,
+  * the rest on slot 1. 0 when it finished; otherwise the slot's status (a fault) or 0xff for no answer
+  * within a second -- and then the GPU is reset and brought back, so that the next job finds it working.
++ * With the job queue (patch 0135) the chain goes through it, and this waits for it.
+  */
++static uint32_t submit_direct(uint64_t chain, bool fragment);
++
+ uint32_t
+ sweet_mali_submit(uint64_t chain, bool fragment)
++{
++	if (queue_on()) {
++		uint64_t fence = queue_submit(chain, fragment, NULL, 0), deadline;
++
++		if (fence == 0) {
++			return 0xfe;
++		}
++		clock_interval_to_deadline(4000, NSEC_PER_MSEC, &deadline);
++		if (!queue_wait(&fence, 1, true, deadline, NULL)) {
++			return 0xff;
++		}
++		return queue_status(fence);
++	}
++	return submit_direct(chain, fragment);
++}
++
++static uint32_t
++submit_direct(uint64_t chain, bool fragment)
+ {
+ 	uint32_t slot = fragment ? 0 : 1, js = fragment ? JS0 : JS1, status = 0;
+ 	uint32_t done_bits = (1u << slot) | (1u << (slot + 16));
+@@ -543,23 +600,480 @@ sweet_mali_submit(uint64_t chain, bool fragment)
+ 		status = (raw & (1u << (slot + 16))) ? rd(mali, js + JS_STATUS) : 0xff;
+ 		printf("SWEET MALI: a job on slot %u did not finish: job irq %#x, status %#x, MMU irq %#x, fault %#x at %#llx\n",
+ 		    slot, raw, rd(mali, js + JS_STATUS), rd(mali, MMU_INT_RAWSTAT), rd(mali, AS0 + AS_FAULTSTATUS), (unsigned long long)fault);
+-		wr(mali, GPU_INT_CLEAR, 0xffffffffu);
+-		wr(mali, GPU_CMD, CMD_SOFT_RESET);
+-		(void)wait_for(mali, GPU_INT_RAWSTAT, IRQ_RESET_COMPLETED, IRQ_RESET_COMPLETED, 100);
+-		wr(mali, L2_PWRON, rd(mali, L2_PRESENT));
+-		wr(mali, TILER_PWRON, rd(mali, TILER_PRESENT));
+-		wr(mali, SHADER_PWRON, shader_mask);
+-		(void)wait_for(mali, SHADER_READY, shader_mask, shader_mask, 50);
+-		lck_mtx_lock(&mali_lock);
+-		as0_update(pt_top_phys, TRANSCFG_AARCH64_4K);
+-		lck_mtx_unlock(&mali_lock);
+-		wr(mali, MMU_INT_CLEAR, 0xffffffffu);
++		gpu_reset_and_restore();
+ 	}
+ 	wr(mali, JOB_INT_CLEAR, done_bits);
+ 	lck_mtx_unlock(&mali_job_lock);
+ 	return status;
+ }
+ 
++/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
++ * The job queue (patch 0135; boot-arg sweetmaliasync, default 1, 0 = every job run to its end in its caller)
++ *
++ * Until now every job chain ran to its end inside the SUBMIT call, one at a time for the whole GPU: the program
++ * waited for each pass before it could send the next, and the two job slots never worked together (boot 2026-11-14:
++ * 105-124 ms from a frame's commit to its completion). Here a SUBMIT only queues the chain and returns: a kernel
++ * thread starts it when its slot is free and every chain it depends on has finished, so the GPU runs the vertex and
++ * tiler jobs of one pass (slot 1) while the fragment jobs of the previous one run (slot 0), and the program goes on
++ * recording while the GPU works.
++ *
++ * A chain is known by its fence: the slot in bit 62, its place in that slot's order below (1, 2, ...). Chains of
++ * one slot start and end in order, so "finished" is a comparison with the slot's count of finished chains. The GPU's
++ * interrupt is not wired on this board: the thread looks at JOB_INT_RAWSTAT, 200 us apart, while a chain runs, and
++ * sleeps when nothing does. A chain that ends with a fault is stopped (JS_COMMAND_NEXT NOP, as Open Mapple's MappleGPU
++ * does on the job-manager Mali-G57) and the GPU is reset once the other slot has finished, as the synchronous path
++ * always did after a fault (Mapple resets only after bus faults; here a fault often leaves the MMU stalled). A chain
++ * that does not end in 2 s hangs: whatever runs is ended and the GPU reset at once.
++ *
++ * Which chains wait for which is the service's business (SweetMali.cpp): each program's in their order, as Linux
++ * orders them through the buffers they share.
++ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++
++#define QUEUE_JOBS          512             /* per slot; a SUBMIT waits for room past this */
++#define QUEUE_DEPS          8
++#define FENCE_SLOT_SHIFT    62
++#define FENCE_SEQ_MASK      ((1ull << FENCE_SLOT_SHIFT) - 1)
++#define JS_COMMAND_NOP      0u
++#define JOB_TIMEOUT_MS      2000u
++#define POLL_US             200u
++
++struct queued_job {
++	uint64_t chain, seq, queued, started;
++	uint64_t deps[QUEUE_DEPS];
++	uint32_t ndeps;
++};
++
++static struct queue_slot {
++	struct queued_job jobs[QUEUE_JOBS];
++	uint8_t status[QUEUE_JOBS];            /* by seq % QUEUE_JOBS: how each recent chain ended (0 = done) */
++	uint32_t head, count;                  /* jobs[head] is the oldest not finished (running when `running`) */
++	uint64_t submitted, finished;          /* seqs */
++	bool running;
++	uint32_t js;
++} slots[2];
++
++static LCK_MTX_DECLARE(queue_lock, &mali_lock_group);
++static int queue_mode = -1;                 /* -1: not decided; 0: off; 1: on and the thread runs */
++static int queue_thread_chan, queue_done_chan;
++static uint32_t queue_holds;                /* sweet_mali_mapped() is waiting for the GPU to be idle, or using it */
++static bool queue_reset_wanted;
++static uint64_t queue_timeout;              /* JOB_TIMEOUT_MS in mach_absolute_time units */
++
++/* what the queue did, logged every 256 chains (with the GPU time of each slot, and how long the two overlapped) */
++static struct {
++	uint64_t chains, busy[2], both, waitQueue, longest, faults, resets, first, last, bothSince;
++} qstats;
++
++static bool
++queue_on(void)
++{
++	return queue_mode == 1;
++}
++
++static inline uint64_t
++fence_of(uint32_t slot, uint64_t seq)
++{
++	return ((uint64_t)slot << FENCE_SLOT_SHIFT) | seq;
++}
++
++/* With queue_lock held. A fence of 0 is "nothing to wait for". */
++static bool
++fence_finished(uint64_t fence)
++{
++	uint32_t slot = (uint32_t)(fence >> FENCE_SLOT_SHIFT) & 1;
++	uint64_t seq = fence & FENCE_SEQ_MASK;
++
++	return fence == 0 || slots[slot].finished >= seq;
++}
++
++static bool
++deps_finished(const struct queued_job *job)
++{
++	for (uint32_t i = 0; i < job->ndeps; i++) {
++		if (!fence_finished(job->deps[i])) {
++			return false;
++		}
++	}
++	return true;
++}
++
++static uint64_t
++abs_to_us(uint64_t abs)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(abs, &ns);
++	return ns / 1000;
++}
++
++/* With queue_lock held: the oldest chain of `slot` is started. */
++static void
++start_job(uint32_t s)
++{
++	struct queue_slot *q = &slots[s];
++	struct queued_job *job = &q->jobs[q->head];
++	uint32_t js = q->js, bits = (1u << s) | (1u << (s + 16));
++	uint64_t now = mach_absolute_time();
++
++	wr(mali, JOB_INT_CLEAR, bits);
++	wr(mali, js + JS_HEAD_NEXT_LO, (uint32_t)job->chain);
++	wr(mali, js + JS_HEAD_NEXT_HI, (uint32_t)(job->chain >> 32));
++	wr(mali, js + JS_AFFINITY_NEXT_LO, shader_mask);
++	wr(mali, js + JS_AFFINITY_NEXT_HI, 0);
++	wr(mali, js + JS_CONFIG_NEXT, JS_CONFIG);
++	wr(mali, js + JS_COMMAND_NEXT, 1);
++	q->running = true;
++	job->started = now;
++	qstats.waitQueue += now - job->queued;
++	if (slots[s ^ 1].running) {
++		qstats.bothSince = now;
++	}
++	if (qstats.first == 0) {
++		qstats.first = now;
++	}
++}
++
++/* With queue_lock held: the running chain of `slot` ended with `status` (0 = done). */
++static void
++finish_job(uint32_t s, uint32_t status, uint64_t now)
++{
++	struct queue_slot *q = &slots[s];
++	struct queued_job *job = &q->jobs[q->head];
++	uint64_t took = now - job->started;
++
++	if (slots[s ^ 1].running && qstats.bothSince != 0) {
++		qstats.both += now - MAX(qstats.bothSince, job->started);
++		qstats.bothSince = 0;
++	}
++	q->status[job->seq % QUEUE_JOBS] = (uint8_t)(status > 0xff ? 0xff : status);
++	q->finished = job->seq;
++	q->head = (q->head + 1) % QUEUE_JOBS;
++	q->count--;
++	q->running = false;
++	qstats.chains++;
++	qstats.busy[s] += took;
++	qstats.longest = MAX(qstats.longest, took);
++	qstats.last = now;
++	if (status != 0) {
++		qstats.faults++;
++	}
++	if (qstats.chains == 256) {
++		printf("SWEET MALI: 256 chains in %llu ms: GPU %llu ms (slot 0 %llu, slot 1 %llu), both slots at once %llu ms, "
++		    "longest %llu ms, waiting in the queue %llu ms, %llu faults, %llu resets\n",
++		    abs_to_us(qstats.last - qstats.first) / 1000, abs_to_us(qstats.busy[0] + qstats.busy[1]) / 1000,
++		    abs_to_us(qstats.busy[0]) / 1000, abs_to_us(qstats.busy[1]) / 1000, abs_to_us(qstats.both) / 1000,
++		    abs_to_us(qstats.longest) / 1000, abs_to_us(qstats.waitQueue) / 1000, qstats.faults, qstats.resets);
++		bzero(&qstats, sizeof(qstats));
++	}
++	thread_wakeup((event_t)&queue_done_chan);
++}
++
++/* With queue_lock held, nothing running: reset, and every chain that was running is already finished. */
++static void
++queue_reset(const char *why)
++{
++	printf("SWEET MALI: GPU reset (%s)\n", why);
++	qstats.resets++;
++	gpu_reset_and_restore();
++	queue_reset_wanted = false;
++}
++
++/* With queue_lock held: what the running chains did since the last look. True while one still runs. */
++static bool
++poll_running(void)
++{
++	uint32_t raw = rd(mali, JOB_INT_RAWSTAT);
++	uint64_t now = mach_absolute_time();
++	bool busy = false;
++
++	for (uint32_t s = 0; s < 2; s++) {
++		struct queue_slot *q = &slots[s];
++		uint32_t done = 1u << s, failed = 1u << (s + 16);
++
++		if (!q->running) {
++			continue;
++		}
++		if (raw & failed) {
++			uint32_t status = rd(mali, q->js + JS_STATUS);
++			uint64_t fault = rd(mali, AS0 + 0x20) | ((uint64_t)rd(mali, AS0 + 0x24) << 32);
++
++			printf("SWEET MALI: chain %#llx on slot %u ended with status %#x (MMU irq %#x, fault %#x at %#llx)\n",
++			    q->jobs[q->head].chain, s, status, rd(mali, MMU_INT_RAWSTAT), rd(mali, AS0 + AS_FAULTSTATUS),
++			    (unsigned long long)fault);
++			wr(mali, q->js + JS_COMMAND_NEXT, JS_COMMAND_NOP);
++			wr(mali, JOB_INT_CLEAR, done | failed);
++			finish_job(s, status ? status : 0xfd, now);
++			if (rd(mali, MMU_INT_RAWSTAT) != 0) {
++				/* an MMU fault stalls the one address space every chain uses: the other slot's chain cannot end */
++				if (slots[s ^ 1].running) {
++					finish_job(s ^ 1, 0xfc, now);
++				}
++				queue_reset("an MMU fault");
++				return false;
++			}
++			/* the GPU is reset once the other slot is idle, as the synchronous path always did after a fault */
++			queue_reset_wanted = true;
++		} else if (raw & done) {
++			wr(mali, JOB_INT_CLEAR, done);
++			finish_job(s, 0, now);
++		} else if (now - q->jobs[q->head].started > queue_timeout) {
++			/* a chain that has not ended in 2 s hangs */
++			printf("SWEET MALI: chain %#llx on slot %u did not end in %u ms (status %#x)\n", q->jobs[q->head].chain, s,
++			    JOB_TIMEOUT_MS, rd(mali, q->js + JS_STATUS));
++			for (uint32_t o = 0; o < 2; o++) {
++				if (slots[o].running) {
++					finish_job(o, 0xff, now);       /* the reset ends whatever runs */
++				}
++			}
++			queue_reset("a chain hung");
++			return false;
++		} else {
++			busy = true;
++		}
++	}
++	return busy;
++}
++
++/* With queue_lock held: start what may start. */
++static void
++start_ready(void)
++{
++	if (queue_holds != 0) {
++		return;
++	}
++	if (queue_reset_wanted) {
++		if (slots[0].running || slots[1].running) {
++			return;
++		}
++		queue_reset("a chain ended with a fault");
++	}
++	for (uint32_t s = 0; s < 2; s++) {
++		struct queue_slot *q = &slots[s];
++
++		if (!q->running && q->count != 0 && deps_finished(&q->jobs[q->head])) {
++			start_job(s);
++		}
++	}
++}
++
++static void
++queue_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	lck_mtx_lock(&queue_lock);
++	for (;;) {
++		if (slots[0].running || slots[1].running) {
++			(void)poll_running();
++		}
++		start_ready();
++		if (slots[0].running || slots[1].running) {
++			uint64_t deadline;
++
++			clock_interval_to_deadline(POLL_US, NSEC_PER_USEC, &deadline);
++			(void)lck_mtx_sleep_deadline(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_thread_chan, THREAD_UNINT,
++			    deadline);
++		} else {
++			/* nothing runs: woken by a SUBMIT or the end of a hold; a chain whose dependency never finishes is
++			 * looked at again every 10 ms */
++			uint64_t deadline;
++
++			clock_interval_to_deadline(10, NSEC_PER_MSEC, &deadline);
++			(void)lck_mtx_sleep_deadline(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_thread_chan, THREAD_UNINT,
++			    (slots[0].count || slots[1].count) ? deadline : 0);
++		}
++	}
++}
++
++/* The chain into its slot's queue: its fence, or 0 (no queue). Waits for room when the slot has QUEUE_JOBS waiting. */
++static uint64_t
++queue_submit(uint64_t chain, bool fragment, const uint64_t *deps, uint32_t ndeps)
++{
++	uint32_t s = fragment ? 0 : 1;
++	struct queue_slot *q = &slots[s];
++	struct queued_job *job;
++	uint64_t fence;
++
++	lck_mtx_lock(&queue_lock);
++	while (q->count == QUEUE_JOBS) {
++		(void)lck_mtx_sleep(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_done_chan, THREAD_UNINT);
++	}
++	job = &q->jobs[(q->head + q->count) % QUEUE_JOBS];
++	bzero(job, sizeof(*job));
++	job->chain = chain;
++	job->seq = ++q->submitted;
++	job->queued = mach_absolute_time();
++	for (uint32_t i = 0; i < ndeps; i++) {
++		if (!fence_finished(deps[i])) {
++			if (job->ndeps == QUEUE_DEPS) {
++				/* more than this: the newest of each slot stands for the others (chains end in order) */
++				uint32_t ds = (uint32_t)(deps[i] >> FENCE_SLOT_SHIFT) & 1;
++				for (uint32_t k = 0; k < job->ndeps; k++) {
++					if (((job->deps[k] >> FENCE_SLOT_SHIFT) & 1) == ds && job->deps[k] < deps[i]) {
++						job->deps[k] = deps[i];
++					}
++				}
++				continue;
++			}
++			job->deps[job->ndeps++] = deps[i];
++		}
++	}
++	q->count++;
++	q->status[job->seq % QUEUE_JOBS] = 0;
++	fence = fence_of(s, job->seq);
++	start_ready();
++	thread_wakeup((event_t)&queue_thread_chan);
++	lck_mtx_unlock(&queue_lock);
++	return fence;
++}
++
++/* Until every fence (or, !all, one of them) has finished, or the absolute deadline: true if they did. */
++static bool
++queue_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first)
++{
++	bool ok = false;
++
++	lck_mtx_lock(&queue_lock);
++	for (;;) {
++		uint32_t done = 0, firstDone = count;
++
++		for (uint32_t i = 0; i < count; i++) {
++			if (fence_finished(fences[i])) {
++				done++;
++				if (firstDone == count) {
++					firstDone = i;
++				}
++			}
++		}
++		if (count == 0 || (all ? done == count : done != 0)) {
++			if (first != NULL) {
++				*first = firstDone == count ? 0 : firstDone;
++			}
++			ok = true;
++			break;
++		}
++		if (deadline != 0 && mach_absolute_time() >= deadline) {
++			break;
++		}
++		(void)lck_mtx_sleep_deadline(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_done_chan, THREAD_UNINT, deadline);
++	}
++	lck_mtx_unlock(&queue_lock);
++	return ok;
++}
++
++/* How a finished chain ended: 0 done, otherwise the slot's status (0xff: it hung). Recent chains only. */
++static uint32_t
++queue_status(uint64_t fence)
++{
++	uint32_t s = (uint32_t)(fence >> FENCE_SLOT_SHIFT) & 1, status;
++
++	lck_mtx_lock(&queue_lock);
++	status = slots[s].status[(fence & FENCE_SEQ_MASK) % QUEUE_JOBS];
++	lck_mtx_unlock(&queue_lock);
++	return status;
++}
++
++/* No new chain starts and none runs when this returns: the address space may be rewritten. */
++static void
++queue_hold_idle(void)
++{
++	lck_mtx_lock(&queue_lock);
++	queue_holds++;
++	while (slots[0].running || slots[1].running) {
++		(void)lck_mtx_sleep(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_done_chan, THREAD_UNINT);
++	}
++	lck_mtx_unlock(&queue_lock);
++}
++
++static void
++queue_release(void)
++{
++	lck_mtx_lock(&queue_lock);
++	queue_holds--;
++	start_ready();
++	thread_wakeup((event_t)&queue_thread_chan);
++	lck_mtx_unlock(&queue_lock);
++}
++
++static void
++queue_start(void)
++{
++	int on = 1;
++	thread_t thread;
++
++	(void)PE_parse_boot_argn("sweetmaliasync", &on, sizeof(on));
++	nanoseconds_to_absolutetime((uint64_t)JOB_TIMEOUT_MS * NSEC_PER_MSEC, &queue_timeout);
++	slots[0].js = JS0;
++	slots[1].js = JS1;
++	if (on && kernel_thread_start(queue_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++		queue_mode = 1;
++		printf("SWEET MALI: job queue on: chains run while their programs go on, both slots at once\n");
++	} else {
++		queue_mode = 0;
++		printf("SWEET MALI: job queue off (sweetmaliasync=0): every chain runs to its end in its caller\n");
++	}
++}
++
++/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
++ * For the SweetMali service: the queue, fences and waits (patch 0135)
++ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
++
++bool
++sweet_mali_async(void)
++{
++	return queue_on();
++}
++
++/* The chain queued after the fences in `deps`: its fence, 0 if there is no queue. */
++uint64_t
++sweet_mali_queue(uint64_t chain, bool fragment, const uint64_t *deps, uint32_t ndeps)
++{
++	return queue_on() ? queue_submit(chain, fragment, deps, ndeps) : 0;
++}
++
++bool
++sweet_mali_fence_done(uint64_t fence)
++{
++	bool done;
++
++	if (!queue_on()) {
++		return true;
++	}
++	lck_mtx_lock(&queue_lock);
++	done = fence_finished(fence);
++	lck_mtx_unlock(&queue_lock);
++	return done;
++}
++
++uint32_t
++sweet_mali_fence_status(uint64_t fence)
++{
++	return queue_on() && fence != 0 ? queue_status(fence) : 0;
++}
++
++/* Until the fences finished (all, or one), or the absolute deadline (0: none); true if they did. */
++bool
++sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first)
++{
++	if (!queue_on()) {
++		if (first != NULL) {
++			*first = 0;
++		}
++		return true;
++	}
++	return queue_wait(fences, count, all, deadline, first);
++}
++
++/* What every finished chain has reached, per slot: a program's "has anything finished since" is a comparison. */
++void
++sweet_mali_finished(uint64_t out[2])
++{
++	lck_mtx_lock(&queue_lock);
++	out[0] = fence_of(0, slots[0].finished);
++	out[1] = fence_of(1, slots[1].finished);
++	lck_mtx_unlock(&queue_lock);
++}
++
+ static void
+ mali_up(int mode)
+ {
+@@ -646,6 +1160,7 @@ mali_up(int mode)
+ 	}
+ 	printf("SWEET MALI: came up to step %u of 6\n", reached);
+ 	if (mode >= 3 && reached == 6) {
++		queue_start();
+ 		SweetMaliStart();
+ 	}
+ }
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index a30592a..9bc4a81 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -43,6 +43,13 @@ void sweet_mali_mapped(void);
+ void sweet_mali_unmap(uint64_t gpu, uint64_t size);
+ void sweet_mali_to_memory(const void * start, uint64_t size);
+ uint32_t sweet_mali_submit(uint64_t chain, bool fragment);
++/* the job queue (patch 0135) */
++bool sweet_mali_async(void);
++uint64_t sweet_mali_queue(uint64_t chain, bool fragment, const uint64_t * deps, uint32_t ndeps);
++bool sweet_mali_fence_done(uint64_t fence);
++uint32_t sweet_mali_fence_status(uint64_t fence);
++bool sweet_mali_fences_wait(const uint64_t * fences, uint32_t count, bool all, uint64_t deadline, uint32_t * first);
++void sweet_mali_finished(uint64_t out[2]);
+ void SweetMaliStart(void);
+ void SweetAccelStart(void);
+ }
+@@ -59,11 +66,13 @@ enum {
+ 	kPanfrostMadvise        = 0x48,
+ 	kPanfrostSetLabelBO     = 0x49,
+ 	kSweetImportHost        = 0x4e,         /* ours: a program's own pages as a buffer (VK_EXT_external_memory_host) */
++	kSweetMode              = 0x4f,         /* ours (0135): a client asks for queued SUBMITs and real syncobjs */
+ 	kDrmSyncobjCreate       = 0xbf,         /* Linux's drm_syncobj.h: what Mesa's panfrost waits with */
+ 	kDrmSyncobjDestroy      = 0xc0,
+ 	kDrmSyncobjWait         = 0xc3,
+ 	kDrmSyncobjReset        = 0xc4,
+ 	kDrmSyncobjSignal       = 0xc5,
++	kDrmSyncobjTransfer     = 0xcc,
+ };
+ 
+ struct sweet_drm_gem_close {
+@@ -106,6 +115,41 @@ struct sweet_panfrost_madvise {
+ struct sweet_syncobj_create {
+ 	uint32_t handle, flags;
+ };
++/*
++ * Linux's drm_syncobj_wait, except timeout_nsec: here a time to wait from now (INT64_MAX: as long as it takes, at most
++ * 10 s a call), not an absolute CLOCK_MONOTONIC time: Darwin's clocks are not Linux's, the library converts.
++ */
++struct sweet_syncobj_wait {
++	uint64_t handles;
++	int64_t timeout_nsec;
++	uint32_t count_handles, flags, first_signaled, pad;
++	uint64_t deadline_nsec;
++};
++#define SWEET_SYNCOBJ_WAIT_ALL          (1u << 0)
++#define SWEET_SYNCOBJ_WAIT_FOR_SUBMIT   (1u << 1)
++#define SWEET_SYNCOBJ_WAIT_AVAILABLE    (1u << 2)
++struct sweet_syncobj_array {
++	uint64_t handles;
++	uint32_t count_handles, pad;
++};
++struct sweet_syncobj_transfer {
++	uint32_t src_handle, dst_handle;
++	uint64_t src_point, dst_point;
++	uint32_t flags, pad;
++};
++struct sweet_mode {
++	uint32_t mode;                          /* in: 1 = queued SUBMITs, real syncobjs */
++	uint32_t result;                        /* out: 1 when the client got them */
++};
++#define SWEET_SYNC_HANDLES_MAX  64
++#define SWEET_WAIT_MAX_NS       (10ull * NSEC_PER_SEC)
++
++/* A syncobj of a client in queued mode: signalled by hand, or by the chain whose fence it holds. */
++struct sweet_syncobj {
++	uint8_t used, signalled;
++	uint64_t fence;
++};
++
+ struct sweet_import_host {
+ 	uint64_t address, size;                 /* in: the caller's pages, page aligned */
+ 	uint32_t handle, pad;                   /* out */
+@@ -114,7 +158,7 @@ struct sweet_import_host {
+ 
+ #define SWEET_MALI_BUFFERS      4096
+ #define SWEET_MALI_BUFFER_MAX   (256ull << 20)
+-#define SWEET_MALI_SYNCOBJS     1024
++#define SWEET_MALI_SYNCOBJS     4096
+ #define SWEET_MALI_FLUSH_MAX    (8ull << 20)    /* buffers up to this size are cleaned and invalidated around each job */
+ 
+ struct sweet_mali_buffer {
+@@ -122,6 +166,8 @@ struct sweet_mali_buffer {
+ 	IOMemoryDescriptor * imported;          /* the caller's pages, wired while the buffer lives */
+ 	uint64_t address, size;
+ 	bool readOnly;                          /* imported pages the caller may only read */
++	bool freeing;                           /* GEM_CLOSE waits for the chains that may use it (job queue) */
++	uint64_t used[2];                       /* the newest chain on each slot that named it, or 0 */
+ };
+ 
+ static IOLock * gSweetMaliLock;
+@@ -185,9 +231,13 @@ class SweetMaliUserClient : public IOUserClient
+ 	OSDeclareDefaultStructors(SweetMaliUserClient);
+ 
+ 	struct sweet_mali_buffer * fBuffers;    /* handle n is fBuffers[n - 1] */
+-	uint8_t *                  fSyncobjs;   /* syncobj n is in use when fSyncobjs[n - 1] is */
++	struct sweet_syncobj *     fSyncobjs;   /* syncobj n is fSyncobjs[n - 1] */
+ 	uint32_t                   fNextBuffer;
+ 	uint32_t                   fSubmits, fFailed, fRequests;
++	bool                       fAsync;      /* SUBMIT only queues; syncobjs are real (kSweetMode) */
++	bool                       fUnnamed;    /* a SUBMIT named no buffers: any chain may use any buffer */
++	uint64_t                   fLast[2];    /* the fence of this client's newest chain on each slot */
++	uint64_t                   fInvalidated[2];     /* what had finished when its imported pages were last invalidated */
+ 
+ 	struct sweet_mali_buffer * buffer(uint32_t handle);
+ 	void freeBuffer(struct sweet_mali_buffer * b);
+@@ -195,6 +245,12 @@ class SweetMaliUserClient : public IOUserClient
+ 	IOReturn importHost(struct sweet_import_host * request);
+ 	struct sweet_mali_buffer * freeSlot(uint32_t * handle);
+ 	IOReturn submit(struct sweet_panfrost_submit * request);
++	IOReturn submitDirect(struct sweet_panfrost_submit * request);
++	struct sweet_syncobj * syncobj(uint32_t handle);
++	void invalidateImported(void);
++	IOReturn syncobjWait(struct sweet_syncobj_wait * request);
++	IOReturn syncobjSet(struct sweet_syncobj_array * request, bool signal);
++	IOReturn waitBO(struct sweet_panfrost_wait_bo * request);
+ 
+ public:
+ 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+@@ -217,7 +273,7 @@ SweetMaliUserClient::start(IOService * provider)
+ 	}
+ 	IOLog("SweetMali: a client opened the GPU\n");
+ 	fBuffers = IONewZeroData(struct sweet_mali_buffer, SWEET_MALI_BUFFERS);
+-	fSyncobjs = IONewZeroData(uint8_t, SWEET_MALI_SYNCOBJS);
++	fSyncobjs = IONewZeroData(struct sweet_syncobj, SWEET_MALI_SYNCOBJS);
+ 	return fBuffers != NULL && fSyncobjs != NULL;
+ }
+ 
+@@ -225,16 +281,40 @@ struct sweet_mali_buffer *
+ SweetMaliUserClient::buffer(uint32_t handle)
+ {
+ 	if (handle == 0 || handle > SWEET_MALI_BUFFERS || fBuffers == NULL ||
+-	    (fBuffers[handle - 1].memory == NULL && fBuffers[handle - 1].imported == NULL)) {
++	    (fBuffers[handle - 1].memory == NULL && fBuffers[handle - 1].imported == NULL) || fBuffers[handle - 1].freeing) {
+ 		return NULL;
+ 	}
+ 	return &fBuffers[handle - 1];
+ }
+ 
+-/* With the lock held. Every job has finished before its call returned, so none can still be using it. */
++/*
++ * With the lock held. Without the queue every job had finished before its call returned. With it, the chains that
++ * named the buffer (all of the client's, if it ever sent a SUBMIT naming none) are let finish first, the lock let
++ * go meanwhile: its pages must not go back to the system while the GPU may still read or write them.
++ */
+ void
+ SweetMaliUserClient::freeBuffer(struct sweet_mali_buffer * b)
+ {
++	uint64_t fences[2];
++
++	if (b->freeing) {
++		return;                         /* another thread of the client is freeing it */
++	}
++	fences[0] = fUnnamed ? fLast[0] : b->used[0];
++	fences[1] = fUnnamed ? fLast[1] : b->used[1];
++	if (sweet_mali_async() && (!sweet_mali_fence_done(fences[0]) || !sweet_mali_fence_done(fences[1]))) {
++		uint64_t deadline;
++		bool done;
++
++		b->freeing = true;
++		clock_interval_to_deadline(2000, kMillisecondScale, &deadline);
++		IOLockUnlock(gSweetMaliLock);
++		done = sweet_mali_fences_wait(fences, 2, true, deadline, NULL);
++		IOLockLock(gSweetMaliLock);
++		if (!done) {
++			IOLog("SweetMali: the chains using a buffer did not finish in 2 s; it goes anyway\n");
++		}
++	}
+ 	sweet_mali_unmap(b->address, b->size);
+ 	if (b->imported != NULL) {
+ 		b->imported->complete();
+@@ -403,7 +483,7 @@ SweetMaliUserClient::createBO(struct sweet_panfrost_create_bo * request)
+  * on the GPU's side), then the chain is run to its end.
+  */
+ IOReturn
+-SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
++SweetMaliUserClient::submitDirect(struct sweet_panfrost_submit * request)
+ {
+ 	uint32_t * handles = NULL;
+ 	uint32_t count = request->bo_handle_count;
+@@ -504,6 +584,304 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 	return ret;
+ }
+ 
++static int gSyncChanged;                    /* event: a syncobj got a fence or was signalled by hand */
++
++/* With the lock held. */
++struct sweet_syncobj *
++SweetMaliUserClient::syncobj(uint32_t handle)
++{
++	if (handle == 0 || handle > SWEET_MALI_SYNCOBJS || fSyncobjs == NULL || !fSyncobjs[handle - 1].used) {
++		return NULL;
++	}
++	return &fSyncobjs[handle - 1];
++}
++
++/*
++ * With the lock held. Queued mode: what the GPU wrote into imported pages (the caller's own, cached for the processor;
++ * the Mali does not snoop) is invalidated from the caches when the program has waited for its chains and some
++ * finished since the last time -- the processor reads them only after such a wait.
++ */
++void
++SweetMaliUserClient::invalidateImported(void)
++{
++	uint64_t now[2];
++
++	if (!fAsync) {
++		return;
++	}
++	sweet_mali_finished(now);
++	if (now[0] == fInvalidated[0] && now[1] == fInvalidated[1]) {
++		return;
++	}
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL && !fBuffers[i].readOnly) {
++			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
++		}
++	}
++	fInvalidated[0] = now[0];
++	fInvalidated[1] = now[1];
++}
++
++/* An absolute deadline from a time to wait (<= 0: none, look once; at most SWEET_WAIT_MAX_NS). */
++static uint64_t
++deadline_in(int64_t ns)
++{
++	uint64_t deadline, now = mach_absolute_time(), span;
++
++	if (ns <= 0) {
++		return now;
++	}
++	nanoseconds_to_absolutetime((uint64_t)ns > SWEET_WAIT_MAX_NS ? SWEET_WAIT_MAX_NS : (uint64_t)ns, &span);
++	deadline = now + span;
++	return deadline;
++}
++
++/*
++ * SUBMIT. Without the queue (sweetmaliasync=0) the chain runs to its end here (submitDirect). With it, the chain is
++ * queued after the chains its in_syncs wait for and after the client's own previous chains: Linux's panfrost orders
++ * two jobs that name a buffer in common (it takes every buffer as written), and PanVK names its tiler heap in every
++ * job, so a program's chains never overlapped there either -- the next pass's tiler would overwrite the polygon lists
++ * the previous pass's fragment jobs still read. What runs at the same time is the GPU and the program (it records the
++ * next frame while the GPU draws this one), and the chains of different programs. A client in queued mode
++ * (kSweetMode) gets the call back at once and its out_sync signals when the chain ends; any other client still waits
++ * here for its chain, as before.
++ */
++IOReturn
++SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
++{
++	uint32_t * handles = NULL, inSyncs[SWEET_SYNC_HANDLES_MAX];
++	uint32_t count = request->bo_handle_count, nin = request->in_sync_count;
++	uint64_t deps[SWEET_SYNC_HANDLES_MAX], fence;
++	uint32_t ndeps = 0;
++	bool fragment = (request->requirements & SWEET_PANFROST_JD_REQ_FS) != 0;
++	IOReturn ret = kIOReturnSuccess;
++
++	if (!sweet_mali_async()) {
++		return submitDirect(request);
++	}
++	if (request->jc == 0 || count > SWEET_MALI_BUFFERS || nin > SWEET_SYNC_HANDLES_MAX) {
++		return kIOReturnBadArgument;
++	}
++	for (uint32_t s = 0; s < 2; s++) {
++		if (fLast[s] != 0 && !sweet_mali_fence_done(fLast[s])) {
++			deps[ndeps++] = fLast[s];
++		}
++	}
++	if (fAsync && nin != 0) {
++		if (copyin((user_addr_t) request->in_syncs, inSyncs, nin * sizeof(uint32_t)) != 0) {
++			return kIOReturnVMError;
++		}
++		for (uint32_t i = 0; i < nin && ndeps < SWEET_SYNC_HANDLES_MAX; i++) {
++			struct sweet_syncobj * so = syncobj(inSyncs[i]);
++
++			if (so != NULL && !so->signalled && so->fence != 0) {
++				deps[ndeps++] = so->fence;
++			}
++		}
++	}
++	if (count != 0) {
++		handles = IONewData(uint32_t, count);
++		if (handles == NULL) {
++			return kIOReturnNoMemory;
++		}
++		if (copyin((user_addr_t) request->bo_handles, handles, count * sizeof(uint32_t)) != 0) {
++			IOFreeData(handles, count * sizeof(uint32_t));
++			return kIOReturnVMError;
++		}
++	}
++	fSubmits++;
++	/* the processor's writes to imported pages, and (sweetmaliwc=0) to the small buffers the chain names, to memory */
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL) {
++			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOStore, 0, fBuffers[i].size);
++		}
++	}
++	const bool cleanNamed = !sweet_mali_write_combined();
++	for (uint32_t i = 0; cleanNamed && i < count; i++) {
++		struct sweet_mali_buffer * b = buffer(handles[i]);
++
++		if (b != NULL && b->memory != NULL && b->memory->getBytesNoCopy() != NULL && b->size <= SWEET_MALI_FLUSH_MAX) {
++			sweet_mali_to_memory(b->memory->getBytesNoCopy(), b->size);
++		}
++	}
++	fence = sweet_mali_queue(request->jc, fragment, deps, ndeps);
++	if (fence == 0) {
++		if (handles != NULL) {
++			IOFreeData(handles, count * sizeof(uint32_t));
++		}
++		return kIOReturnNoResources;
++	}
++	fLast[fragment ? 0 : 1] = fence;
++	/* what the chain may use: the buffers it names, and every imported one (they are not always named) */
++	for (uint32_t i = 0; i < count; i++) {
++		struct sweet_mali_buffer * b = buffer(handles[i]);
++
++		if (b != NULL) {
++			b->used[fragment ? 0 : 1] = fence;
++		}
++	}
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL) {
++			fBuffers[i].used[fragment ? 0 : 1] = fence;
++		}
++	}
++	if (count == 0) {
++		fUnnamed = true;
++	}
++	if (handles != NULL) {
++		IOFreeData(handles, count * sizeof(uint32_t));
++	}
++	if (fAsync) {
++		struct sweet_syncobj * out = syncobj(request->out_sync);
++
++		if (out != NULL) {
++			out->fence = fence;
++			out->signalled = 0;
++			IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
++		}
++		return kIOReturnSuccess;
++	}
++	/* a client that did not ask for queued mode: its chain ends before the call returns, as it always did */
++	uint64_t deadline;
++	uint32_t status;
++
++	clock_interval_to_deadline(4000, kMillisecondScale, &deadline);
++	status = sweet_mali_fences_wait(&fence, 1, true, deadline, NULL) ? sweet_mali_fence_status(fence) : 0xff;
++	if (status != 0) {
++		fFailed++;
++		IOLog("SweetMali: job chain %#llx did not finish (status %#x)\n", request->jc, status);
++		ret = kIOReturnIOError;
++	}
++	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++		if (fBuffers[i].imported != NULL && !fBuffers[i].readOnly) {
++			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
++		}
++	}
++	return ret;
++}
++
++/*
++ * Queued mode, SYNCOBJ_WAIT: until the syncobjs (all, or one) are signalled. A syncobj without a chain is waited
++ * for only with WAIT_FOR_SUBMIT (until a SUBMIT gives it one), otherwise EINVAL as on Linux. Called with the lock,
++ * which is let go while sleeping.
++ */
++IOReturn
++SweetMaliUserClient::syncobjWait(struct sweet_syncobj_wait * request)
++{
++	uint32_t handles[SWEET_SYNC_HANDLES_MAX], n = request->count_handles;
++	bool all = (request->flags & SWEET_SYNCOBJ_WAIT_ALL) != 0;
++	bool forSubmit = (request->flags & (SWEET_SYNCOBJ_WAIT_FOR_SUBMIT | SWEET_SYNCOBJ_WAIT_AVAILABLE)) != 0;
++	uint64_t deadline = deadline_in(request->timeout_nsec);
++
++	if (n == 0 || n > SWEET_SYNC_HANDLES_MAX ||
++	    copyin((user_addr_t) request->handles, handles, n * sizeof(uint32_t)) != 0) {
++		return kIOReturnBadArgument;
++	}
++	for (;;) {
++		uint64_t fences[SWEET_SYNC_HANDLES_MAX];
++		uint32_t done = 0, first = n, pending = 0, unsubmitted = 0;
++
++		for (uint32_t i = 0; i < n; i++) {
++			struct sweet_syncobj * so = syncobj(handles[i]);
++
++			if (so == NULL) {
++				return kIOReturnBadArgument;
++			}
++			if (so->signalled || (so->fence != 0 && sweet_mali_fence_done(so->fence))) {
++				done++;
++				if (first == n) {
++					first = i;
++				}
++			} else if (so->fence != 0) {
++				fences[pending++] = so->fence;
++			} else {
++				unsubmitted++;
++			}
++		}
++		if (all ? done == n : done != 0) {
++			request->first_signaled = first == n ? 0 : first;
++			invalidateImported();
++			return kIOReturnSuccess;
++		}
++		if (unsubmitted != 0 && !forSubmit) {
++			return kIOReturnBadArgument;
++		}
++		uint64_t now = mach_absolute_time(), slice;
++		if (now >= deadline) {
++			return kIOReturnTimeout;
++		}
++		clock_interval_to_deadline(10, kMillisecondScale, &slice);
++		slice = slice < deadline ? slice : deadline;
++		if (unsubmitted == 0) {
++			/* only chains to wait for: the queue's own wait, without the lock */
++			IOLockUnlock(gSweetMaliLock);
++			(void)sweet_mali_fences_wait(fences, pending, all, slice, NULL);
++			IOLockLock(gSweetMaliLock);
++		} else {
++			/* a syncobj still to get its chain (or to be signalled by hand): woken by those, 10 ms at most */
++			(void)IOLockSleepDeadline(gSweetMaliLock, &gSyncChanged, slice, THREAD_UNINT);
++		}
++	}
++}
++
++/* Queued mode, SYNCOBJ_RESET / SYNCOBJ_SIGNAL. With the lock held. */
++IOReturn
++SweetMaliUserClient::syncobjSet(struct sweet_syncobj_array * request, bool signal)
++{
++	uint32_t handles[SWEET_SYNC_HANDLES_MAX], n = request->count_handles;
++
++	if (n == 0 || n > SWEET_SYNC_HANDLES_MAX ||
++	    copyin((user_addr_t) request->handles, handles, n * sizeof(uint32_t)) != 0) {
++		return kIOReturnBadArgument;
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		if (syncobj(handles[i]) == NULL) {
++			return kIOReturnBadArgument;
++		}
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		struct sweet_syncobj * so = syncobj(handles[i]);
++
++		so->signalled = signal;
++		so->fence = 0;
++	}
++	if (signal) {
++		IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
++	}
++	return kIOReturnSuccess;
++}
++
++/*
++ * WAIT_BO. Without the queue, or for a client not in queued mode, every chain has ended when its call returned. Queued
++ * mode: until the client's chains have finished (any of them may use the buffer). timeout_ns is a time to wait, as
++ * for syncobjs. Called with the lock, which is let go while sleeping.
++ */
++IOReturn
++SweetMaliUserClient::waitBO(struct sweet_panfrost_wait_bo * request)
++{
++	uint64_t fences[2], deadline;
++
++	if (buffer(request->handle) == NULL) {
++		return kIOReturnNotFound;
++	}
++	if (!fAsync) {
++		return kIOReturnSuccess;
++	}
++	fences[0] = fLast[0];
++	fences[1] = fLast[1];
++	if (!sweet_mali_fence_done(fences[0]) || !sweet_mali_fence_done(fences[1])) {
++		deadline = deadline_in(request->timeout_ns);
++		IOLockUnlock(gSweetMaliLock);
++		bool done = sweet_mali_fences_wait(fences, 2, true, deadline, NULL);
++		IOLockLock(gSweetMaliLock);
++		if (!done) {
++			return kIOReturnTimeout;
++		}
++	}
++	invalidateImported();
++	return kIOReturnSuccess;
++}
++
+ IOReturn
+ SweetMaliUserClient::clientClose(void)
+ {
+@@ -529,7 +907,7 @@ SweetMaliUserClient::free(void)
+ 		fBuffers = NULL;
+ 	}
+ 	if (fSyncobjs != NULL) {
+-		IOFreeData(fSyncobjs, SWEET_MALI_SYNCOBJS);
++		IOFreeData(fSyncobjs, SWEET_MALI_SYNCOBJS * sizeof(struct sweet_syncobj));
+ 		fSyncobjs = NULL;
+ 	}
+ 	IOUserClient::free();
+@@ -593,6 +971,10 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		struct sweet_panfrost_madvise madvise;
+ 		struct sweet_syncobj_create syncCreate;
+ 		struct sweet_import_host import;
++		struct sweet_syncobj_wait syncWait;
++		struct sweet_syncobj_array syncArray;
++		struct sweet_syncobj_transfer syncTransfer;
++		struct sweet_mode mode;
+ 		uint8_t raw[64];
+ 	} r;
+ 	size_t size = args->structureInputSize;
+@@ -636,8 +1018,14 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 	case kPanfrostSubmit:
+ 		ret = submit(&r.submit);
+ 		break;
+-	case kPanfrostWaitBO:                   /* every job is finished when its call returns */
+-		ret = buffer(r.wait.handle) != NULL ? kIOReturnSuccess : kIOReturnNotFound;
++	case kPanfrostWaitBO:                   /* without queued mode every job is finished when its call returns */
++		ret = waitBO(&r.wait);
++		break;
++	case kSweetMode:
++		/* queued SUBMITs and real syncobjs, asked for before the first SUBMIT; refused without the queue */
++		fAsync = r.mode.mode == 1 && sweet_mali_async() && fSubmits == 0;
++		r.mode.result = fAsync ? 1 : 0;
++		IOLog("SweetMali: a client asks for mode %u: %s\n", r.mode.mode, fAsync ? "queued" : "every chain run to its end");
+ 		break;
+ 	case kPanfrostSetLabelBO:               /* a label is for the driver's debug output: kept nowhere */
+ 		break;
+@@ -652,31 +1040,45 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 			ret = kIOReturnNotFound;
+ 		}
+ 		break;
+-	case kDrmSyncobjCreate:
++	case kDrmSyncobjCreate:                 /* flags & 1 (DRM_SYNCOBJ_CREATE_SIGNALED): made signalled */
+ 		ret = kIOReturnNoResources;
+ 		for (uint32_t i = 0; i < SWEET_MALI_SYNCOBJS; i++) {
+-			if (!fSyncobjs[i]) {
+-				fSyncobjs[i] = 1;
++			if (!fSyncobjs[i].used) {
++				fSyncobjs[i].used = 1;
++				fSyncobjs[i].signalled = (r.syncCreate.flags & 1) != 0;
++				fSyncobjs[i].fence = 0;
+ 				r.syncCreate.handle = i + 1;
+ 				ret = kIOReturnSuccess;
+ 				break;
+ 			}
+ 		}
+ 		break;
+-	case kDrmSyncobjDestroy: {
+-		uint32_t handle = r.syncCreate.handle;
+-
+-		if (handle != 0 && handle <= SWEET_MALI_SYNCOBJS) {
+-			fSyncobjs[handle - 1] = 0;
++	case kDrmSyncobjDestroy:
++		if (syncobj(r.syncCreate.handle) != NULL) {
++			bzero(syncobj(r.syncCreate.handle), sizeof(struct sweet_syncobj));
+ 		} else {
+ 			ret = kIOReturnBadArgument;
+ 		}
+ 		break;
+-	}
+-	case kDrmSyncobjWait:                   /* nothing is ever pending */
++	case kDrmSyncobjWait:                   /* without queued mode nothing is ever pending */
++		ret = fAsync ? syncobjWait(&r.syncWait) : kIOReturnSuccess;
++		break;
+ 	case kDrmSyncobjReset:
+ 	case kDrmSyncobjSignal:
++		ret = fAsync ? syncobjSet(&r.syncArray, selector == kDrmSyncobjSignal) : kIOReturnSuccess;
+ 		break;
++	case kDrmSyncobjTransfer: {             /* binary syncobjs only: the source's state, chain and all */
++		struct sweet_syncobj * from = syncobj(r.syncTransfer.src_handle), * to = syncobj(r.syncTransfer.dst_handle);
++
++		if (!fAsync || from == NULL || to == NULL || r.syncTransfer.src_point != 0 || r.syncTransfer.dst_point != 0) {
++			ret = from == NULL || to == NULL ? kIOReturnBadArgument : kIOReturnUnsupported;
++			break;
++		}
++		to->signalled = from->signalled;
++		to->fence = from->fence;
++		IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
++		break;
++	}
+ 	default:
+ 		IOLog("SweetMali: request %#x (%zu bytes) is not known here\n", selector, size);
+ 		ret = kIOReturnUnsupported;

@@ -1,5 +1,26 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## The goal (user, 2026-11-23): a phone for every day, on iOS 27
+
+The user's words, to keep in front of every decision: the lamu is to become a phone used every day, and the work
+does not stop until it is one. That means, in the end: a fast GPU for the whole system, the screen recognised (status
+bar, lock screen clock), wallpaper, Wi-Fi, Bluetooth, audio (speaker, earpiece, microphone), cellular calls, SMS and
+data, camera, battery and charging, sleep, sensors, and stability over days. Plan agreed on 2026-11-23: finish on
+iOS 16 the pieces that carry over (GPU speed, display, hardware drivers), try iOS 27 in parallel as a low-cost
+experiment, then move to iOS 27 with the drivers. Every round should bring the phone closer to daily use;
+measure against that list.
+
+### Reaching iOS 27
+
+The present work (iOS 16.7.16, xnu-8796, iPhone X files) is the base. Prior art for the jump: HakiOS
+(github.com/oosexgang/hakios-xnu-kernel, read 2026-11-23) runs xnu-12377.121.6 (Darwin 26/27) and shows the home
+screen of Darwin 26.6.2 / 27.2 (iPhone12,1 files) on a Snapdragon 780G **without PAC**, drawn in software: its
+`arch/arm64/tools/pacstrip.c` rewrites the arm64e shared cache's PAC instructions and re-signs the pages
+(Documentation/darwin26-boot.md). The MT6768's Cortex-A75/A55 have no PAC either, so that is the way for us too.
+Their components/ (wallpaper: PosterBoard poster choice; statusbar: visual providers by screen width) and
+Documentation/metal-glass.md (Liquid Glass needs the GPU) are the references. Keep new drivers portable between
+xnu-8796 and xnu-12377.
+
 ## Agent handoff / active work (2026-11-16, latest)
 
 **Read `docs/METAL-PANVK.md` first: it is the up-to-date log.** Everything from "UPDATE 2026-10-18" down
@@ -32,6 +53,49 @@ Open, in order:
    (`mfg_sel = syspll_d3`); raising it needs the PMIC's VGPU buck as well.
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
+
+### New on 2026-11-23 (evening): the GPU job queue, kernel patch 0135 (written, NOT built, NOT run)
+
+Point 3 of the list above, the user's "punto 2". Until 0134 every SUBMIT ran its job chain to the end inside the call,
+one at a time for the whole GPU, so the program could not record the next frame while the GPU drew this one.
+
+- **Kernel (`bsd/dev/sweet_mali.c`).** A queue per job slot (512 chains each) and a kernel thread that starts a chain
+  when its slot is free and every chain it depends on has finished. A chain is known by its fence: slot in bit 62, its
+  place in the slot's order below; chains of a slot end in order, so "finished" is a comparison. No GPU interrupt on
+  this board: the thread reads JOB_INT_RAWSTAT every 200 us while something runs and sleeps otherwise. On a fault the
+  slot gets JS_COMMAND_NEXT NOP (as Open Mapple's MappleGPU) and the GPU is reset once the other slot is idle; an MMU
+  fault, or a chain still running after 2 s, resets at once and ends whatever runs. Address-space changes
+  (`sweet_mali_mapped`, after every map and unmap) hold the queue: no new chain starts, the running ones finish, then
+  AS0 is updated. Every 256 chains: `SWEET MALI: 256 chains in N ms: GPU N ms (slot 0 N, slot 1 N), both slots at
+  once N ms, longest N ms, waiting in the queue N ms, N faults, N resets`. Boot-arg `sweetmaliasync=0` = the old
+  synchronous path (log: `job queue off`); default on (`job queue on: ...`).
+- **Service (`SweetMali.cpp`).** Request 0x4f (`kSweetMode`, {u32 mode = 1, u32 result}) before the first SUBMIT puts
+  a client in queued mode: SUBMIT returns at once, out_sync is signalled when the chain ends, and the syncobjs are
+  real (4096 per client: CREATE incl. CREATE_SIGNALED, DESTROY, RESET, SIGNAL, WAIT 0xc3, TRANSFER 0xcc). WAIT takes
+  **a time from now** (Linux: absolute CLOCK_MONOTONIC), at most 10 s a call; WAIT_FOR_SUBMIT/AVAILABLE wait for a
+  SUBMIT to give the syncobj a chain; without them a syncobj with no chain is EINVAL, as on Linux. WAIT_BO also waits
+  (time from now). Waits sleep with the service lock let go. Each chain waits for the client's previous chains: Linux's
+  panfrost orders jobs that share a buffer and PanVK names its tiler heap in every job, so one program's chains never
+  overlapped there either; what overlaps now is the program and the GPU, and different programs. A buffer is freed
+  only after the chains that named it (all of the client's, if it ever sent a SUBMIT naming none). Imported pages:
+  cleaned before every SUBMIT as before, invalidated after a successful wait when chains finished since the last
+  time. A client that does not ask (the PanVK on the phone today) still waits in SUBMIT for its chain, so the new
+  kernel works with the old userland.
+- **Userland (`tools/panvk-ios/sweet-drm/sweet.drm.c`).** Asks for queued mode right after opening the service; if
+  granted, every syncobj call goes to the kernel (absolute times converted, ETIMEDOUT -> ETIME, waits repeated past
+  the 10 s cap); sync files carry a kernel syncobj of their own (TRANSFER in, TRANSFER out). Not granted (old kernel,
+  `sweetmaliasync=0`), `/var/sweet/mali-sync-off` present, or `SWEET_MALI_SYNC=0`: the in-process syncobjs as before.
+  `/var/tmp/sweetdrm.log` says which: `queued SUBMITs, the kernel's syncobjs` or `every chain run to its end ...`.
+- **Point 3 off for now:** `tools/metal-allow/apps` (metal.allow + SpringBoard, Preferences, MobileSafari, WebKit) and
+  `tools/metal-allow/base` (today's list), one-file drops for later.
+- **Payload:** `tools/repayload.py payload-60b.bin KERNEL payload-q.bin --expect "SWEET MALI: job queue"` puts the new
+  kernel into the payload that boots, ADT and boot-args unchanged (checked byte for byte). Checked here: syntax and
+  types of both kernel files against stand-in headers, the shim with Linux's DRM headers, repayload on a synthetic
+  kernel. Not checked: the build, the phone.
+- **What to look for after the boot:** log-area `job queue on`, `a client asks for mode 1: queued` (backboardd,
+  PosterBoard), the `256 chains` lines (GPU time against wall time; "both slots at once" is overlap between programs),
+  no `GPU reset`; sweetdrm.log per process. If the screen stays black or freezes: boot payload-60b again (same
+  userland, old kernel), or drop an empty `/var/sweet/mali-sync-off`.
 
 ### New on 2026-11-23: Open Mapple's Metal driver on SweetMali (written, NOT built, NOT run)
 
@@ -97,6 +161,29 @@ Open, in order:
   the other textures of those draws are null slots (Constant 0000, 1x1, no surface) or linear. Fix in this round:
   `tools/mapple/home/vmg.env` with `PAN_MESA_DEBUG=noafbc` (read by the driver from the bundle; one dropbox file to
   undo). The backboardd crash/PosterBoard: SweetMapple also copies the newest PosterBoard*.ips now.
+- **Ninth/tenth boots (noafbc active, fetch99):** AFBC gone from the failing draws (textures Linear/Tiled, aligned),
+  but the same full-screen passes still fail (0xa005a, fault 0x...520/0x...540; 0x5b): AFBC was not the cause.
+  Every failing pass has an IDVS ("Indexed Vertex") draw whose fragment half has no varying descriptors while two
+  vertex varyings are "Constant" (unused), UBO 0 and 2 null (pushed), three null texture slots (Constant 0000) plus
+  one real texture. Next: `BIFROST_MESA_DEBUG=noidvs` in vmg.env (dropbox only; the driver restarts backboardd when
+  vmg.env changes). PosterBoard: its newest report is the known SIGTRAP (EXC_BREAKPOINT) from an earlier boot; it does
+  not load Metal now, so the black wallpaper is still the PosterBoard store problem above, not the GPU. User: the lock
+  screen shows the Apple logo, the home bar, the camera circle without its glyph and an rdar code (not red).
+- **Back to metal2 (2026-11-23, drop pbwrap-metal2, payload-el):** the user: "much more responsive" than Mapple, icons
+  all there, wallpaper and widgets black, status bar red with rdar:45025538 (UIKit has no status bar visual provider
+  for a 720-pixel-wide screen; the providers are for 828/1080/1125/1170/1242/1284, see HakiOS components/statusbar).
+  **Mapple is parked**: on the G52 its fragment jobs fault (0x5a/0x5b) with AFBC off and IDVS off alike, and it is
+  slower. PosterBoard got the metal2 device (8.2 s) and was started through pbwrap ("using orig": not injected)
+  because every sweetroot `run` failed with EFAULT: tok[] was not NULL-terminated, so posix_spawn got garbage after
+  argv. Fixed; sweetroot also has `newest DIR PREFIX DST` (copy the newest crash report). Next round: sweetroot +
+  root.cmd only, so install-wrap --patch/--verify run and PosterBoard.inj gets sweetposter.dylib.
+- **Payloads on the phone (checked 2026-11-23 with strings):** `payload-el.bin` = kernel up to 0133, `sweetfb_hz=30`;
+  `payload-60.bin` = the same kernel, `sweetfb_hz=60`; `payload-60b.bin` (2026-11-15 10:49) = kernel **with 0134**
+  ("256 jobs: GPU ... ms" log string present), `sweetfb_hz=60`. Boot-args otherwise identical: `cpus=8 sweettouch=1
+  sweetkeys=1 debug=0xc serial=3 keepsyms=1 -v rd=ufsroot0 ufsroot=ios unentitled_ios_sim_launch=1 ignition_level=1
+  wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1 sweetfb_noconsole=1 sweetfb_hz=.. sweettouchdelay=30
+  sweetkeydelay=30 sweetconndelay=30 ufsrw=1 rootrw=1 sweetlog=1 ufslogsecs=5 sweetmali=3 sweetaccel=1`. From the
+  pbwrap round on, boot payload-60b and read the "256 jobs" lines in log-area (GPU time vs commit-to-completion).
 - metal2 + PanVK stays the working path; this is a comparison. Open Mapple's GPU page: imports refuse ranges not on a
   page (as ours), GPU job timeout 3 s, CA "detached layers" off.
 
