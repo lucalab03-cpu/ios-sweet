@@ -33,6 +33,65 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### New on 2026-11-23: Open Mapple's Metal driver on SweetMali (written, NOT built, NOT run)
+
+- The user asked to try [Open Mapple](https://github.com/open-mapple)'s `mapple_gpu_mali` (Metal on Gallium Panfrost,
+  their own AIR -> NIR). Their build of 2026-11-23 (`mapple-gpu.yml`, commit f893fed) compiles for iOS 16 and holds
+  Panfrost's Bifrost v7 back end and "Mali-G52 r1"; their AIR -> Valhall compiler is opt-in and G57-only. Their bundle
+  needs their kernel's MappleGPU service, so **`tools/mapple/`** gives it ours instead, with no kernel change:
+  `sweet-mapple-drm.c` replaces their libdrm-xnu + vgpu (SweetMali selectors, in-process syncobjs, drmMap with kept
+  mappings, IOSurface/user-memory imports through IMPORT_HOST 0x4e), `SweetMapple.m` is `SweetMTLDevice : VMDevice`
+  with the metal.allow gate. The bundle's executable `SweetMapple` sits next to metal2's `SweetMTLDriver` in
+  `SweetMTLDriver.bundle`; Info.plist's CFBundleExecutable chooses (back: `tools/metal/Info.plist`).
+- Test boot: allow list vmprobe/mtltest/metaltest only (backboardd on the CPU), sweetroot runs vmprobe, then mtltest.
+  Workflow `mapple-sweet.yml` (Mesa cached). Local check only: `clang -fsyntax-only -Wall -Wextra` of
+  sweet-mapple-drm.c against their headers with stub Apple headers is clean; SweetMapple.m not compiled. See
+  `tools/mapple/README.md` for what to read in the outbox.
+- **Result, first boot (payload-el, 2026-11-23):** CI green at the first try (mapple-sweet), 9 files installed. mtltest
+  gets `Mali-G52 r1 MC2 (Panfrost)` (class SweetMTLDevice, device in 204 ms) and passes everything: compute, render,
+  import, iosurface, fetch; 100 renders at 4.03 ms each (metal2: 8.71 ms first run, 2.1 ms with its cache); cold compute
+  pipeline 3470 ms (AIR -> NIR, libLLVM load), render pipeline 35 ms. Metal.framework logs "texture is not a
+  MTLTextureImplementation" about once per render (not from Mapple's code; results correct). vmprobe did not start
+  under sweetroot (posix_spawn failed, sweetroot printed errno 0); not needed, mtltest went through
+  MTLCreateSystemDefaultDevice. Next: `tools/mapple/home/` (backboardd, backboardd.orig, PosterBoard on Mapple; takes
+  effect the boot after the install).
+- **Second boot (home drop, payload-el):** the small drop was installed before backboardd loaded Metal, so backboardd
+  got Mapple in the install boot already. Each backboardd.orig makes its device (`Mali-G52 r1 MC2 (Panfrost)`),
+  imports the framebuffer IOSurface (IMPORT_HOST 0x4b4000 ok) and a 16 KB surface, creates its buffers, then is gone
+  5-10 s later, about 100 launches in a row (sweetwrap), no Home. Nothing on stderr: no exception text, no signal
+  line. Driver changes (SweetMapple.m): VMTexture adopts MTLTextureImplementation (as metal2's NBTexture), and a
+  watch: fatal signals with pc/lr/backtrace, uncaught exceptions, exit(), a 1 s heartbeat with the GPU job count,
+  and the newest backboardd*/JetsamEvent* crash report copied to /var/tmp/sweetcrash.*.log. Artifact
+  mapple-sweet-home = this driver with the home allow list.
+- **Third boot (watch build):** the cause is a crash, not a kill: every backboardd dies with SIGSEGV at
+  0xcca8 in `panfrost_batch_read_rsrc` <- `panfrost_get_index_buffer_bounded` <- `panfrost_draw_vbo` <-
+  `vmg_cmd_draw` (CA's first indexed draws). Disassembly: 0xcca8 is batch->ctx + offset, and batch->ctx is NULL
+  after `u_vbuf_get_minmax_index`: mapping the index buffer for reading flushed the batch draw_vbo was filling
+  (panfrost_batch_cleanup zeroes it), and draw_vbo went on with it. That path runs only before Valhall (index
+  bounds for the job-manager vertex jobs), which is why Open Mapple never meets it on the G57.
+  `tools/mapple/0001-bifrost-index-bounds.patch` (applied by the workflow to their vmg_exec.c): the bounds are
+  found in vmg_cmd_draw before draw_vbo takes its batch, and passed as index_bounds_valid.
+- **Fourth boot (0001 patch):** backboardd on Mapple survives and the home screen icons render through the GPU (red
+  rdar bar at the top gone), wallpaper still black, no animations (frames jump). 279 GPU jobs in 120 s, 22 SUBMITs
+  failed (EIO): kernel log (log-area, ring decoded) `SWEET MALI: a job on slot 0 did not finish: job irq 0x10000,
+  status 0x5a|0x5b, MMU irq 0, fault 0` = fragment jobs ending in ADDR_RANGE_FAULT / IMPRECISE_FAULT, no page fault.
+  PosterBoard never loaded Metal in that boot. sweet-mapple-drm.c now decodes a failed chain with Mesa's pandecode
+  (linked in the bundle; every buffer injected at its GPU address) into /var/tmp/sweetpandecode.<process>.*, first 6
+  per process. Log-area read from Android: last 1025 blocks of dropbox.map.json's device, header SWEETLOG.
+- **Sixth boot (decoder active; the fifth ran the old binary: a 15 MB drop lands after backboardd has loaded the
+  driver, so a new SweetMapple takes effect the boot after its install).** Six fragment chains decoded
+  (sweetpandecode.backboardd.orig.*): all full-screen 720x1604 passes into the framebuffer import (RT0 linear RGBA8
+  at 0x92d0000, row stride 3072, plus an unused RT1, Color Buffer Allocation 2048, tile 256), with or without a
+  preload; status 0xa005a (ADDR_RANGE_FAULT) with fault pointers 0x...520/0x...540/0x...160 inside the batch's
+  descriptor buffer, or 0x5b (IMPRECISE) with no pointer. Those addresses are none of the fragment chain's
+  descriptors, so they are draws: the decoder now decodes the vertex/tiler chain submitted just before the failed
+  fragment chain as well (first 3 failures per process). User: everything very slow, scattered icons, lock screen
+  black with no clock, backboardd restarts now and then.
+- The user asked for fewer, fuller rounds: home/root.cmd now restarts backboardd (`killall backboardd.orig`) after the
+  dropbox is applied, so a new driver binary is used in the install boot itself.
+- metal2 + PanVK stays the working path; this is a comparison. Open Mapple's GPU page: imports refuse ranges not on a
+  page (as ours), GPU job timeout 3 s, CA "detached layers" off.
+
 ### New on 2026-11-16: sweetroot and the PosterBoard trace (written, NOT built, NOT run)
 
 - **`tools/sweetroot/sweetroot.c`** applies `/var/sweet/root.cmd` at boot: `cp [-n]`, `mv`, `rm [-r]`, `mkdir`,
