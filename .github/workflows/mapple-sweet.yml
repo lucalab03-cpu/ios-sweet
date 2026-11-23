@@ -121,6 +121,7 @@ jobs:
           mkdir -p home/var/sweet
           cp tools/mapple/home/metal.allow tools/mapple/home/root.cmd home/var/sweet/
           cp tools/mapple/home/sweet-boot.list home/usr/local/etc/sweet-boot.list
+          cp tools/mapple/home/vmg.env home/System/Library/Extensions/SweetMTLDriver.bundle/vmg.env
           rm -f home/usr/local/bin/vmprobe
           find drop back home -type f -exec ls -l {} \;
       - uses: actions/upload-artifact@v4
