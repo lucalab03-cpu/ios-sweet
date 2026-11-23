@@ -87,8 +87,16 @@ Open, in order:
   descriptors, so they are draws: the decoder now decodes the vertex/tiler chain submitted just before the failed
   fragment chain as well (first 3 failures per process). User: everything very slow, scattered icons, lock screen
   black with no clock, backboardd restarts now and then.
-- The user asked for fewer, fuller rounds: home/root.cmd now restarts backboardd (`killall backboardd.orig`) after the
-  dropbox is applied, so a new driver binary is used in the install boot itself.
+- The user asked for fewer, fuller rounds. `killall` via sweetroot did not start (sweetroot's `run` failed for every
+  program: the pipe could land on fds 0-2 since sweet-boot gives it no stdio; fixed, and the spawn error is printed).
+  Instead SweetMapple watches its own files (executable, Info.plist, vmg.env, metal.allow) for 10 minutes in
+  backboardd/PosterBoard and ends the process when one is replaced, so launchd restarts it on the new driver: one
+  boot per round.
+- **Seventh/eighth boots (vertex/tiler chain decoded):** every failing fragment pass samples an **AFBC** texture
+  whose surface pointer is not 64-byte aligned: R8 128x1 AFBC at 0x9d20030 (twice), RGBA8 32x32 AFBC at 0xa560031;
+  the other textures of those draws are null slots (Constant 0000, 1x1, no surface) or linear. Fix in this round:
+  `tools/mapple/home/vmg.env` with `PAN_MESA_DEBUG=noafbc` (read by the driver from the bundle; one dropbox file to
+  undo). The backboardd crash/PosterBoard: SweetMapple also copies the newest PosterBoard*.ips now.
 - metal2 + PanVK stays the working path; this is a comparison. Open Mapple's GPU page: imports refuse ranges not on a
   page (as ours), GPU job timeout 3 s, CA "detached layers" off.
 

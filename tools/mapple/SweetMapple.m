@@ -200,6 +200,51 @@ static void sm_copy_report(const char *prefix)
 		close(out);
 }
 
+/*
+ * A drop that replaces the driver (or its Info.plist, vmg.env, metal.allow) lands after backboardd has loaded the
+ * driver: sweet-boot installs it a minute or two into the boot. sweet-boot writes each file through a temporary
+ * and a rename, so a new inode means a complete new file. When one changes during the first 10 minutes, this
+ * process ends itself and launchd starts it again on the new files: one boot per round instead of two.
+ * (sweetroot's "run /usr/bin/killall" did not start, boot 2026-11-23.)
+ */
+static void sm_restart_on_new_files(void)
+{
+	Dl_info di;
+	if (!dladdr((void *)sm_restart_on_new_files, &di) || !di.dli_fname)
+		return;
+	static char paths[4][512];
+	strlcpy(paths[0], di.dli_fname, sizeof(paths[0]));
+	char dir[512];
+	strlcpy(dir, di.dli_fname, sizeof(dir));
+	char *slash = strrchr(dir, '/');
+	if (slash)
+		*slash = 0;
+	snprintf(paths[1], sizeof(paths[1]), "%s/Info.plist", dir);
+	snprintf(paths[2], sizeof(paths[2]), "%s/vmg.env", dir);
+	strlcpy(paths[3], "/var/sweet/metal.allow", sizeof(paths[3]));
+	static struct { ino_t ino; int exists; } seen[4];
+	for (int i = 0; i < 4; i++) {
+		struct stat st;
+		seen[i].exists = stat(paths[i], &st) == 0;
+		seen[i].ino = seen[i].exists ? st.st_ino : 0;
+	}
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+		for (int t = 0; t < 300; t++) {
+			sleep(2);
+			for (int i = 0; i < 4; i++) {
+				struct stat st;
+				int exists = stat(paths[i], &st) == 0;
+				if (exists != seen[i].exists || (exists && st.st_ino != seen[i].ino)) {
+					sm_log("%s changed after +%d s: ending this process so that it starts again on the new files",
+					    paths[i], 2 * (t + 1));
+					sleep(1);   /* the rest of the drop's files, which come right after */
+					kill(getpid(), SIGKILL);
+				}
+			}
+		}
+	});
+}
+
 static void sm_watch(void)
 {
 	struct sigaction sa;
@@ -214,7 +259,10 @@ static void sm_watch(void)
 	if (!strncmp(getprogname(), "backboardd", 10)) {
 		sm_copy_report("backboardd");
 		sm_copy_report("JetsamEvent");
+		sm_copy_report("PosterBoard");   /* PosterBoard draws the wallpaper; it never loaded Metal in these boots */
 	}
+	if (!strncmp(getprogname(), "backboardd", 10) || !strcmp(getprogname(), "PosterBoard"))
+		sm_restart_on_new_files();
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
 		for (int s = 1; s <= 120; s++) {
 			sleep(1);

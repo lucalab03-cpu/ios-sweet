@@ -356,13 +356,29 @@ run_prog(char **argv)
 		say("run: pipe: %s\n", strerror(errno));
 		return -1;
 	}
+	/*
+	 * sweet-boot starts this program without stdin/stdout/stderr, so the pipe could be descriptors 0-2, and the
+	 * dup2/close actions below then undo each other (boot 2026-11-23: every "run" failed, "Undefined error: 0").
+	 * The pipe's ends are moved above 2 first.
+	 */
+	for (int i = 0; i < 2; i++) {
+		if (p[i] <= STDERR_FILENO) {
+			int moved = fcntl(p[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+			if (moved >= 0) {
+				close(p[i]);
+				p[i] = moved;
+			}
+		}
+	}
 	posix_spawn_file_actions_init(&fa);
 	posix_spawn_file_actions_adddup2(&fa, p[1], STDOUT_FILENO);
 	posix_spawn_file_actions_adddup2(&fa, p[1], STDERR_FILENO);
 	posix_spawn_file_actions_addclose(&fa, p[0]);
 	posix_spawn_file_actions_addclose(&fa, p[1]);
-	if (posix_spawn(&pid, argv[0], &fa, NULL, argv, environ) != 0) {
-		say("run: cannot start %s: %s\n", argv[0], strerror(errno));
+	int spawn_error = posix_spawn(&pid, argv[0], &fa, NULL, argv, environ);
+	if (spawn_error != 0) {
+		/* posix_spawn returns its error, it does not set errno */
+		say("run: cannot start %s: %s (%d)\n", argv[0], strerror(spawn_error), spawn_error);
 		posix_spawn_file_actions_destroy(&fa);
 		close(p[0]);
 		close(p[1]);
