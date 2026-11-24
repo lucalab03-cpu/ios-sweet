@@ -96,6 +96,33 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 22:45: payload-k second boot (observed) and round m (CI running)
+
+Log-area + fetch144 of the 22:22 boot (payload-k; fetch is fresh again, md5 82780282...):
+- HFS journal replayed after the l/l2 failures (`jnl: ... journal replay done`, `hfs: mounted iOSRoot`).
+- **Shader cache works:** `/var/sweet/m2v-cache/backboardd.orig/mesa/mesa_shader_cache` full of entries; PanVK share of
+  backboardd's user samples 73% -> 12.5% (bi_allocate_registers 184 samples left), the rest QuartzCore & co. (82.6%).
+- **eMMC PIO still 77% of one CPU averaged over the boot** (emmc_read_sectors 57128 samples / 74108 rounds).
+- `pipelines.log` 7.2 MB in one boot (METAL2VULKAN_LOG_PIPELINES): now opt-in (`/var/sweet/m2v-pipelog`), round m deletes it.
+- **Entitlements (sweetents):** PosterBoard.orig/.inj carry com.apple.runningboard.posterkit.host; the pbwrap wrapper
+  and the `PosterBoard` it replaced carry none. With the original binary back (this boot) PosterBoard still dies:
+  `Invalid condition not satisfying: !_stateLock_switcherConfiguration`, sig 5, from a prewarm session over XPC.
+  So the entitlement was not the only cause; the data-store first-run state remains (see 2026-11-16 item 1).
+- **About (sweetsym of the b13 sample):** main thread `_SCNetworkInterfaceCopyAllWithPreferences` (SystemConfiguration)
+  <- GeneralSettingsUI, blocked on a dispatch_sync; another thread inside `_SCNetworkInterfaceCopyAllWithPreferences`
+  sits in `SCDynamicStoreNotifyWait`: waiting for configd (InterfaceNamer), which waits for IOKit to go quiet.
+  Guess: one of our IOKit services never leaves its busy state. `tools/sweetbusy` lists busy services.
+
+Round m (pushed c8300d4; CI xnu 45491811308, metal2 45491815780, pbwrap 45491821501, all Intel):
+- **0145** (sweet_ufs.c): set MSDC_PATCH_BIT2 bit 1 (SUPPORT_64G, as mtk-sd.c msdc_init_hw for 36-bit DMA) before the
+  self-test, logging old/new; after a DMA error: reset, back to PIO, **CMD12 (R1b) + CMD13 until "tran"**
+  (`SWEET EMMC: recovery: ...`), register dump in the failure line; DMA off at the first error.
+- `tools/sweetbusy`: forks, after 120 s and 180 s appends busy services, network-looking ones, root busy state and
+  IOKitWaitQuiet(1 s) to /var/tmp/sweetbusy.txt.
+- metal2: pipeline log opt-in. Bundle takes a pbwrap run (its usr/local/bin tools).
+- `out/drop-m` root.cmd (repo tools/pbwrap/root.cmd): rm pipelines.log, run sweetbusy, crash logs, cache listing.
+- Payload-m plan: payload-k + `ufsdma=1 sweetsample=-`.
+
 ### 2026-11-24 22:10: payload-k first boot -- the profiler's first answers (observed), payload-l (ufsdma=1, NOT run)
 
 Log-area of the 21:51 boot (payload-k, drop-k applied during it; first boot of the new PanVK/driver, caches empty).
