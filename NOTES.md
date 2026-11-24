@@ -96,6 +96,23 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 23:05: payload-m first boot (observed): DMA fails again but recovers; touch dead; payload-m2
+
+Log-area of the 22:51 boot (payload-m, drop-m applied during it; fetch1544 = fetch144, md5 82780282: the outbox is
+written only after a drop is applied, which takes minutes on PIO, so fetches in a drop's boot are stale):
+- `PATCH_BIT2 0x2489180f -> 0x2489180f`: SUPPORT_64G was already set. Self-test OK again (14502 us PIO vs 1006 us DMA).
+- First real read: `DMA read of 40 sectors at 0x1a1ddee0 failed (60, int 0x100, sts 0x3, dma_ctrl 0x6108,
+  dma_cfg 0x6, h4 0x1, pb2 0x2489180f)`, then `recovery: CMD12 0, card ready 0`, `DMA disabled after an error, back
+  to PIO`: **0145's recovery works, the boot went on.** dma_cfg bit 2 set (meaning unknown; possibly a descriptor
+  checksum error flag in the vendor driver: to check). Why 1-BD reads fail after a 4-BD self-test passes: open.
+- **Touch dead this boot:** `SWEET TOUCH: SPI transfer timeout` from the first poll on (3 lines = 400+ timeouts),
+  0 gestures; earlier boots had 1 timeout then reports. Suspects: the failed DMA writing to a wrong address
+  (stray DMA), or 0146 (presenter bound to CPU 7). **Stop ufsdma until understood.**
+- Presenter on CPU 7: copy 11.5 ms (12.4 before): the A75 is barely faster -> the big cluster probably runs at a
+  low clock (CPU DVFS is whatever Android left; nobody drives it under XNU). Best window **324 swaps in 10 s (32 fps)**.
+- **payload-m2** = payload-m with `ufsdma=0` (0146 kept): tells DMA vs 0146 for the touch. Proposed with it: CPU
+  governor to performance on Android before go-ios.sh (as the GPU OPP), to test the clock theory.
+
 ### 2026-11-24 22:45: payload-k second boot (observed) and round m (CI running)
 
 Log-area + fetch144 of the 22:22 boot (payload-k; fetch is fresh again, md5 82780282...):
