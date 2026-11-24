@@ -58,6 +58,19 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 17:40: why PosterBoard dies (payload-h: sweetscan heap text, observed)
+
+- PosterBoard.inj SIGTRAP; its heap (`STR` lines): **`Invalid condition not satisfying: !_stateLock_switcherConfiguration`**
+  after **`'prewarm 's runtime assertion was invalidated w/ Error Domain=RBSServiceErrorDomain Code=1 "originator
+  doesn't have entitlement com.apple.runningboard.posterkit.host"`**, `Prewarm session '<UUID>/prewarm' initiated from
+  XPC`. RunningBoard refuses the prewarm's assertion for lack of that entitlement; the store's first-run path is then
+  entered twice. No `SWEET AMFI` entitlement warnings (signatures parse). Suspects: the program RunningBoard checks is
+  the pbwrap **wrapper** (ad-hoc signed by CI without entitlements; launchd starts it, it execs .inj), or PosterBoard
+  (or SpringBoard) never had it here. **tools/sweetents** (pbwrap build): XML entitlements of PosterBoard.orig/.inj, the
+  wrapper and SpringBoard, and every Mach-O holding `com.apple.runningboard.posterkit.host`. If the wrapper is the
+  cause: sign it with PosterBoard's entitlements.
+- Settings > About: one sample, main thread waiting in libdispatch (a dispatch wait) -- named next round (sym13.in).
+
 ### 2026-11-24 17:20: payload-g fixes the status bar; patch 0140 for the black flashes (written, NOT built)
 
 - **payload-g** (0139 kernel, `sweetfb_w=828 sweetfb_h=1792`, ADT disp0 canvas 828x1792 and
