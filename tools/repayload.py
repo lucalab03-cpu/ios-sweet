@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """A new kernel into a payload that already boots: its device tree (ADT) and boot-args stay as they are.
 
-  repayload.py OLD_PAYLOAD KERNEL OUT [--set NAME=VALUE ...] [--expect TEXT ...]
+  repayload.py OLD_PAYLOAD KERNEL OUT [--set NAME=VALUE ...] [--expect TEXT ...] [--adt-u32 /node/path:prop=N ...]
 
 KERNEL is the Mach-O from the xnu workflow's xnu-kernel artifact. --set adds a boot-arg or changes its value
 (e.g. --set sweetmaliasync=0); --expect TEXT checks that the kernel contains TEXT (a log line of the patch it
-must have), so a kernel from the wrong build is noticed before the phone boots it. Needs mkpayload.py and adt.py
+must have), so a kernel from the wrong build is noticed before the phone boots it. --adt-u32 sets a 32-bit property of
+an existing ADT node (path from the root, e.g. /arm-io/disp0:canvas-width=828); everything else in the ADT stays. Needs mkpayload.py and adt.py
 next to this file (tools/ in the repo).
 """
 import argparse, hashlib, os, struct, sys, tempfile
@@ -40,6 +41,7 @@ def main():
     ap.add_argument('out')
     ap.add_argument('--set', action='append', default=[], metavar='NAME=VALUE')
     ap.add_argument('--expect', action='append', default=[], metavar='TEXT')
+    ap.add_argument('--adt-u32', action='append', default=[], metavar='/PATH:PROP=N')
     a = ap.parse_args()
 
     _, adt_blob, cmdline = read_payload(a.old)
@@ -50,6 +52,9 @@ def main():
         if text.encode() not in kernel:
             sys.exit(f'{a.kernel}: does not contain "{text}" -- not the kernel with that patch')
     cmdline = set_args(cmdline, a.set)
+    changed_adt = bool(a.adt_u32)
+    if changed_adt:
+        adt_blob = set_adt_u32(adt_blob, a.adt_u32)
 
     with tempfile.NamedTemporaryFile(suffix='.adt', delete=False) as f:
         f.write(adt_blob)
@@ -66,8 +71,30 @@ def main():
     open(a.out, 'wb').write(blob)
     print(f'{a.out}: {len(blob)} bytes, sha256 {hashlib.sha256(blob).hexdigest()}')
     print(f'  kernel {a.kernel} (sha256 {hashlib.sha256(kernel).hexdigest()[:16]}...), entry {info["entry"]}')
-    print(f'  ADT from {a.old}: {len(adt_blob)} bytes, unchanged')
+    print(f'  ADT from {a.old}: {len(adt_blob)} bytes, ' + (', '.join(a.adt_u32) if changed_adt else 'unchanged'))
     print(f'  boot-args: {cmdline}')
+
+
+def set_adt_u32(blob, settings):
+    import adt
+    root, _ = adt.parse(blob)
+    for item in settings:
+        path, rest = item.split(':', 1)
+        prop, value = rest.split('=', 1)
+        node = root
+        for part in [p for p in path.split('/') if p]:
+            node = next((c for c in node.children if c.name == part), None)
+            if node is None:
+                sys.exit(f'ADT: no node {path}')
+        for i, (n, flags, v) in enumerate(node.props):
+            if n == prop:
+                if len(v) != 4:
+                    sys.exit(f'ADT: {path}:{prop} is {len(v)} bytes, not a u32')
+                node.props[i] = (n, flags, struct.pack('<I', int(value, 0)))
+                break
+        else:
+            sys.exit(f'ADT: {path} has no property {prop}')
+    return adt.serialize(root)
 
 
 def read_payload_bytes(blob):

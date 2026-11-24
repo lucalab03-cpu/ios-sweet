@@ -58,6 +58,23 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 11:10: Messages/Settings crash in CoreImage; patch 0138 (iPhone 11 screen, vsync) (written, NOT built)
+
+- Boot 10:55 (payload-e, drop-sym4), user: **the app switcher now works** (moved through it and closed apps).
+- sweetsym: **MobileSMS and Preferences (sig 11) crash at the same place**: a call through NULL in **CoreImage**
+  (unslid 0x194b3858c, +0xcc of a redacted function), called from **MobileIcons** on a dispatch queue: icon rendering
+  through CoreImage, in processes the metal.allow gate gives no Metal device. vmd's sig 10 is in objc_release under
+  an autorelease pool pop. PosterBoard: EXC_BREAKPOINT (assert), as known. Crash counts on the phone: OTAUpdate 160,
+  PosterBoard 26, backboardd.orig 25, SiriSearchFeedback 25, ScreenTimeAgent 15, Preferences 11, SpringBoard 4,
+  MobileSMS 3, mediaserverd 2, locationd 2.
+- Next drop: `tools/metal-allow/apps` (every app but SpringBoard gets the Metal device).
+- **0138** (SweetFramebuffer): `sweetfb_w`/`sweetfb_h` present any size, scaled to the panel (nearest neighbour, the
+  0103 path); dot pitch 326 for an 828-wide display (`sweetfb_ppi`); vsync notification now **time, time, counter**
+  (HakiOS layout; `sweetfb_vsyncold=1` = old). Payload for the user's "make it an iPhone 11": `sweetfb_w=828
+  sweetfb_h=1792` + ADT `/arm-io/disp0` canvas 828x1792 (`repayload.py --adt-u32`); `/chosen/display-scale` is already
+  2, `/product/artwork-scale-factor` stays 3 (the image's assets are the iPhone X's @3x). Identity stays iPhone X
+  (iPhone10,3): the image's shared cache is A11 arm64; an iPhone 11 identity would ask for arm64e.
+
 ### 2026-11-24 11:00: what github.com/popovluka/ios-lemonadep (branch lemonadep) has for us (read, not run)
 
 A sibling port: ios-sweet's tree carried to the OnePlus 9 Pro (SM8350), then moved to furangelz's HackiOS

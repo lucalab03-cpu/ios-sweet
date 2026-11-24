@@ -1,0 +1,87 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1058ae0..4cf0a29 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -188,6 +188,8 @@ public:
+ 	uint64_t      fPhys;
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
++	uint32_t      fDotPitch;                /* ppi reported to userland (0138) */
++	bool          fVsyncOld;                /* the pre-0138 vsync notification layout */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	bool          fScale;                   /* scale logical -> panel (default) */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+@@ -266,6 +268,28 @@ AppleCLCD::start(IOService *provider)
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
++	/*
++	 * Patch 0138: any presented size, scaled to the panel: sweetfb_w/sweetfb_h. The lamu's 720x1604 is no iPhone's
++	 * (UIKit's red rdar://45025538 status bar: no visual provider for a 720-wide screen); 828x1792 is the iPhone 11/XR
++	 * (414x896 points @2x; ADT /chosen/display-scale 2), a width UIKit has a status bar for, at 1.3x the panel's
++	 * pixels. The sibling OnePlus 9 Pro port presents 1242x2688 the same way. sweetfb_ppi: the dot pitch reported
++	 * (default 326 for an 828-wide display, as the iPhone 11, otherwise 458).
++	 */
++	uint32_t pw = 0, ph = 0, ppi = 0;
++	PE_parse_boot_argn("sweetfb_w", &pw, sizeof(pw));
++	PE_parse_boot_argn("sweetfb_h", &ph, sizeof(ph));
++	if (pw >= 320 && ph >= 480 && pw <= 2048 && ph <= 4096) {
++		native = 0;
++		fLogicalW = pw;
++		fLogicalH = ph;
++	}
++	fDotPitch = fLogicalW == 828 ? 326 : SWEET_FB_DOT_PITCH;
++	if (PE_parse_boot_argn("sweetfb_ppi", &ppi, sizeof(ppi)) && ppi >= 100 && ppi <= 1000) {
++		fDotPitch = ppi;
++	}
++	int vsyncOld = 0;
++	PE_parse_boot_argn("sweetfb_vsyncold", &vsyncOld, sizeof(vsyncOld));
++	fVsyncOld = vsyncOld != 0;
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+ 	/* Default: scale the presented iPhone-sized surface down to the panel.
+@@ -301,8 +325,9 @@ AppleCLCD::start(IOService *provider)
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+ 	registerService();
+-	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+-	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u (%s, %u ppi), "
++	    "vsync %s\n", fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH,
++	    fScale ? "scaled" : "unscaled", fDotPitch, fVsyncOld ? "old layout" : "time, time, count");
+ 	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight);
+ 	return true;
+ }
+@@ -313,11 +338,21 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++	/*
++	 * Patch 0138: the time of this refresh, the time it was presented (the same) and the counter, as HakiOS's
++	 * MiniIOMobileFramebuffer sends them; before, the counter came first and CoreAnimation read it as the refresh's
++	 * time (the OnePlus 9 Pro port found its deadlines off the same way). sweetfb_vsyncold=1: the old layout.
++	 */
+ 	uint64_t values[6] = {
+-		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+-		0, 0,
++		(uint32_t)now, (uint32_t)(now >> 32),
++		(uint32_t)count, (uint32_t)(count >> 32),
+ 	};
++	if (fb->fVsyncOld) {
++		values[0] = (uint32_t)count;
++		values[1] = (uint32_t)(count >> 32);
++		values[4] = values[5] = 0;
++	}
+ 
+ 	IOLockLock(fb->fLock);
+ 	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
+@@ -679,7 +714,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBGetDotPitch:
+-		out[0] = SWEET_FB_DOT_PITCH;
++		out[0] = fFB->fDotPitch;
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBNotifications:
