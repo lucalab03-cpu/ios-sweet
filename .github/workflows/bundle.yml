@@ -1,0 +1,84 @@
+name: bundle
+# One zip for the user to download: the artifacts of an xnu run, a panvk-ios run and a metal2 run, with the
+# unstripped copies for naming the profiler's addresses (kernel 0144). Runs on Linux, which has no queue.
+# The files for the phone are only the kernel, PanVK and the Metal driver; the drop around them is made from
+# this zip, so the metal2 artifact's metal.allow and sweet-boot.list (old defaults) are left out.
+on:
+  workflow_dispatch:
+    inputs:
+      xnu_run:
+        description: xnu run id (artifact xnu-kernel); empty = none
+        required: false
+      panvk_run:
+        description: panvk-ios run id (panvk-ios, panvk-ios-symbols); empty = none
+        required: false
+      metal2_run:
+        description: metal2 run id (metal2, metal2-symbols); empty = none
+        required: false
+      name:
+        description: name of the zip
+        required: false
+        default: sweet-bundle
+permissions:
+  actions: read
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        if: inputs.xnu_run != ''
+        with:
+          name: xnu-kernel
+          path: in/xnu-kernel
+          run-id: ${{ inputs.xnu_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.panvk_run != ''
+        with:
+          name: panvk-ios
+          path: in/panvk-ios
+          run-id: ${{ inputs.panvk_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.panvk_run != ''
+        with:
+          name: panvk-ios-symbols
+          path: in/symbols
+          run-id: ${{ inputs.panvk_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.metal2_run != ''
+        with:
+          name: metal2
+          path: in/metal2
+          run-id: ${{ inputs.metal2_run }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.metal2_run != ''
+        with:
+          name: metal2-symbols
+          path: in/symbols
+          run-id: ${{ inputs.metal2_run }}
+          github-token: ${{ github.token }}
+      - name: Pick the files
+        run: |
+          set -e
+          mkdir -p out
+          if [ -d in/xnu-kernel ]; then mkdir -p out/kernel && cp -R in/xnu-kernel/. out/kernel/; fi
+          if [ -d in/panvk-ios ]; then
+            mkdir -p out/drop/usr/local/lib
+            cp in/panvk-ios/usr/local/lib/libvulkan_panfrost.dylib out/drop/usr/local/lib/
+          fi
+          if [ -d in/metal2 ]; then
+            mkdir -p out/drop/System/Library/Extensions/SweetMTLDriver.bundle
+            cp in/metal2/System/Library/Extensions/SweetMTLDriver.bundle/* out/drop/System/Library/Extensions/SweetMTLDriver.bundle/
+          fi
+          if [ -d in/symbols ]; then mkdir -p out/symbols && cp -R in/symbols/. out/symbols/; fi
+          printf 'xnu %s\npanvk-ios %s\nmetal2 %s\n' "${{ inputs.xnu_run }}" "${{ inputs.panvk_run }}" "${{ inputs.metal2_run }}" > out/RUNS.txt
+          find out -type f -exec ls -l {} \;
+          (cd out && find . -type f ! -name SHA256SUMS -exec sha256sum {} \; > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.name }}
+          path: out
