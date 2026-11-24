@@ -90,6 +90,16 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 18:25: patch 0143 (date and time from the MT6358 RTC) and the wallpaper try (written, NOT run)
+
+- **0143**: `sweet_mali_init` (called from sweet_ufs_init, before the keys driver polls the PMIC wrapper) reads the
+  MT6358 RTC through WACS2 (base 0x0588: TC_SEC 0x0a, MIN 0x0c, HOU 0x0e, DOM 0x10, MTH 0x14, YEA 0x16; year + 1968;
+  UTC, as Android's rtc-mt6397 keeps it) and calls `clock_set_calendar_microtime`. Log `SWEET RTC: YYYY-MM-DD hh:mm:ss
+  UTC from the MT6358, calendar set (N)`; `sweetrtc=0` = off. The time zone is iOS's own (Settings > General > Date
+  & Time; the crash reports show -0800, Pacific).
+- Wallpaper try in drop-i: **PosterBoard back to its own binary** (no pbwrap wrapper): if RunningBoard was checking
+  the wrapper, which carries no entitlements, the prewarm assertion passes. sweetents still reads the entitlements.
+
 ### 2026-11-24 18:15: payload-i (0141) still laggy; why: chain-end latency (patch 0142, written, NOT built)
 
 - Video IMG 18:08 (user): lock screen complete (Wednesday December 31, 4:29, 100% Charged, camera button) -- **date and
