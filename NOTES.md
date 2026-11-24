@@ -96,6 +96,21 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 23:10: DMA breaks the touch (observed); CPU clocks were already at max
+
+- payload-m second boot (log-area 152a55ad, fetch157 fresh): DMA again fails at the first real read (16 sectors),
+  recovery OK, **touch dead again** (SPI timeouts from the first poll). Best window 393 swaps / 10 s (~39 fps);
+  mesa_shader_cache dir 2176 -> 5576 bytes. `/Applications/PaperBoard.app/PlugIns` holds only LegacyPoster.appex,
+  PosterBoard.app none: the poster extensions are missing from the image. sweetbusy ran (`exec sweetbusy`) but no
+  /var/tmp/sweetbusy.txt reached the outbox (the forked child probably did not survive): make it write at start.
+- **payload-m2 (ufsdma=0, 0146 kept): touch works (user 23:10).** So the failed DMA transfer is what kills the
+  touch's SPI (stray DMA write somewhere): **never boot with ufsdma=1 again until the DMA is understood** (it may
+  corrupt memory, and through it the filesystem).
+- go-ios.sh already sets cpufreq governor performance: policy0 (A55) 1.7 GHz, policy6 (A75) 2.0 GHz. The presenter on
+  CPU 7 (A75) copies in 11.5 ms vs 12.4 on the A55s: the copy is memory-bound. Next big step: display-block scanout of
+  the surface (no copy).
+- **Current base: payload-m2** (kernel 45492740119 with 0144-0146, boot-args without ufsdma, sweetsample=-).
+
 ### 2026-11-24 23:05: payload-m first boot (observed): DMA fails again but recovers; touch dead; payload-m2
 
 Log-area of the 22:51 boot (payload-m, drop-m applied during it; fetch1544 = fetch144, md5 82780282: the outbox is
