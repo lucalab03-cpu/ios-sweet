@@ -54,6 +54,25 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 01:30: boots with 0136 at 823 MHz (observed) and patch 0137 (written, NOT run)
+
+- **0136 boots (payload-c.bin, `echo 0 > /proc/gpufreqv2/fix_target_opp_index` before go-ios.sh):** `GPU clock 823 MHz
+  (Android's mfgpll, kept; CLK_CFG_1 was 0x81810201)`; longest chain 12-25 ms (was 55-188 at 364), GPU 30-40 % busy,
+  0 faults, 0 resets; `a client is 8 chains ahead` seen. Phone not hot. User: more reactive.
+- **Freeze, twice, entering the app switcher** (swipe up; also once after opening Settings > About): backboardd makes
+  two 720x1604 surfaces, SpringBoard a 180x401 snapshot in w30r (BGR10_XR), then no more chains while the kernel
+  still logs touches and keys. No chain running or failing. metal2 telemetry: backboardd pipelines `failed=0` (the
+  `Compile(InvalidDescriptor(...))` lines are m2vtest's own QuartzCore pairs, not backboardd's); commit-to-callback
+  still 100-270 ms per command buffer although the GPU now takes a few ms: the completion path is slow.
+- PosterBoard now starts injected (`using inj`, `poster: loaded`) and still dies with SIGTRAP; its report is copied by
+  sweetroot at the next boot. Settings (Preferences) also died with SIGTRAP once.
+- **0137:** logs any GPU wait of a second: `SweetMali: <proc> waits N ms in SYNCOBJ_WAIT/SUBMIT (chains ahead)/WAIT_BO`,
+  a syncobj waited on (polls included) for a second without signalling (`waits on syncobj H (never given a chain |
+  its chain unfinished)`), and a queued chain that has not started for a second (`SWEET MALI: chain ... waits N ms to
+  start: holds, reset wanted, dependencies ...`).
+- Next test (user, 2 boots): empty `/var/sweet/mali-sync-off` by dropbox: backboardd back to synchronous submits with
+  the same kernel. App switcher OK then -> the queued mode is at fault; still frozen -> elsewhere.
+
 ### 2026-11-24 00:45: patch 0136 (GPU clock from Android, chains-ahead limit) + pbwrap's own switch (written, NOT run)
 
 - **Boot 2026-11-24 00:20 (payload-q, second boot of drop-queue), observed:** `a client asks for mode 1: queued` (one

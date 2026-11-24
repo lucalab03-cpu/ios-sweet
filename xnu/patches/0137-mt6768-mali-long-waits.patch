@@ -1,0 +1,212 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 8ac3129..16200d8 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -648,6 +648,7 @@ static struct queue_slot {
+ 	struct queued_job jobs[QUEUE_JOBS];
+ 	uint8_t status[QUEUE_JOBS];            /* by seq % QUEUE_JOBS: how each recent chain ended (0 = done) */
+ 	uint32_t head, count;                  /* jobs[head] is the oldest not finished (running when `running`) */
++	uint64_t stuckReported;                 /* seq of the head chain last reported as not starting (0137) */
+ 	uint64_t submitted, finished;          /* seqs */
+ 	bool running;
+ 	uint32_t js;
+@@ -835,6 +836,32 @@ poll_running(void)
+ 	return busy;
+ }
+ 
++/*
++ * Patch 0137: with queue_lock held, a chain at the head of its slot that has waited a second to start is logged once:
++ * what it waits for (boot 2026-11-24 01:20, the app switcher froze backboardd's drawing).
++ */
++static void
++report_stuck(void)
++{
++	uint64_t now = mach_absolute_time(), second;
++
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	for (uint32_t s = 0; s < 2; s++) {
++		struct queue_slot *q = &slots[s];
++		struct queued_job *job = &q->jobs[q->head];
++
++		if (q->running || q->count == 0 || now - job->queued < second || q->stuckReported == job->seq) {
++			continue;
++		}
++		q->stuckReported = job->seq;
++		printf("SWEET MALI: chain %#llx (slot %u, #%llu) waits %llu ms to start: holds %u, reset wanted %d, other slot %s, "
++		    "%u dependencies, first %#llx (%s), finished: slot 0 #%llu, slot 1 #%llu\n", job->chain, s, job->seq,
++		    abs_to_us(now - job->queued) / 1000, queue_holds, queue_reset_wanted, slots[s ^ 1].running ? "running" : "idle",
++		    job->ndeps, job->ndeps ? job->deps[0] : 0ull, job->ndeps && fence_finished(job->deps[0]) ? "finished" : "not finished",
++		    slots[0].finished, slots[1].finished);
++	}
++}
++
+ /* With queue_lock held: start what may start. */
+ static void
+ start_ready(void)
+@@ -868,6 +895,7 @@ queue_thread(void *arg, wait_result_t result)
+ 			(void)poll_running();
+ 		}
+ 		start_ready();
++		report_stuck();
+ 		if (slots[0].running || slots[1].running) {
+ 			uint64_t deadline;
+ 
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index acf1259..f2831a5 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -32,6 +32,7 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>                 /* mach_absolute_time(): what cleaning imported pages costs */
+ #include <kern/task.h>                  /* current_task(): the caller of IMPORT_HOST */
++#include <sys/proc.h>                   /* proc_selfname(): who waits (patch 0137) */
+ 
+ extern "C" {
+ /* bsd/dev/sweet_mali.c */
+@@ -147,8 +148,9 @@ struct sweet_mode {
+ 
+ /* A syncobj of a client in queued mode: signalled by hand, or by the chain whose fence it holds. */
+ struct sweet_syncobj {
+-	uint8_t used, signalled;
++	uint8_t used, signalled, reported;
+ 	uint64_t fence;
++	uint64_t waitedSince;                   /* first wait that found it pending, since it last changed (0137) */
+ };
+ 
+ struct sweet_import_host {
+@@ -637,6 +639,23 @@ sweet_mali_ahead(void)
+ 	return ahead > 0 ? (uint32_t) ahead : 0;
+ }
+ 
++/*
++ * Patch 0137: a wait for the GPU that has lasted a second is logged, once per call, with who waits and on what
++ * (boot 2026-11-24 01:20: the app switcher froze backboardd's drawing; no chain was running or failing).
++ */
++static void
++sweet_mali_long_wait(const char * what, uint64_t since, uint32_t count, uint32_t unsubmitted, uint64_t fence)
++{
++	char name[32] = "";
++	uint64_t ns;
++
++	proc_selfname(name, sizeof(name));
++	absolutetime_to_nanoseconds(mach_absolute_time() - since, &ns);
++	IOLog("SweetMali: %s waits %llu ms in %s: %u object(s), %u never given a chain, e.g. fence %#llx (%s)\n", name,
++	    ns / 1000000, what, count, unsubmitted, fence,
++	    fence == 0 ? "none" : sweet_mali_fence_done(fence) ? "finished" : "not finished");
++}
++
+ /* An absolute deadline from a time to wait (<= 0: none, look once; at most SWEET_WAIT_MAX_NS). */
+ static uint64_t
+ deadline_in(int64_t ns)
+@@ -690,10 +709,16 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 			if (fAheadWaits++ == 0) {
+ 				IOLog("SweetMali: a client is %u chains ahead of the GPU: its SUBMITs now wait for the oldest\n", ahead);
+ 			}
++			uint64_t started = mach_absolute_time(), second;
++
+ 			clock_interval_to_deadline(2000, kMillisecondScale, &deadline);
++			nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
+ 			IOLockUnlock(gSweetMaliLock);
+ 			(void)sweet_mali_fences_wait(&oldest, 1, true, deadline, NULL);
+ 			IOLockLock(gSweetMaliLock);
++			if (mach_absolute_time() - started >= second) {
++				sweet_mali_long_wait("SUBMIT (chains ahead)", started, 1, 0, oldest);
++			}
+ 		}
+ 	}
+ 	for (uint32_t s = 0; s < 2; s++) {
+@@ -773,6 +798,8 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 
+ 		if (out != NULL) {
+ 			out->fence = fence;
++			out->waitedSince = 0;
++			out->reported = 0;
+ 			out->signalled = 0;
+ 			IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
+ 		}
+@@ -808,7 +835,10 @@ SweetMaliUserClient::syncobjWait(struct sweet_syncobj_wait * request)
+ 	uint32_t handles[SWEET_SYNC_HANDLES_MAX], n = request->count_handles;
+ 	bool all = (request->flags & SWEET_SYNCOBJ_WAIT_ALL) != 0;
+ 	bool forSubmit = (request->flags & (SWEET_SYNCOBJ_WAIT_FOR_SUBMIT | SWEET_SYNCOBJ_WAIT_AVAILABLE)) != 0;
+-	uint64_t deadline = deadline_in(request->timeout_nsec);
++	uint64_t deadline = deadline_in(request->timeout_nsec), started = mach_absolute_time(), second;
++	bool reported = false;
++
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
+ 
+ 	if (n == 0 || n > SWEET_SYNC_HANDLES_MAX ||
+ 	    copyin((user_addr_t) request->handles, handles, n * sizeof(uint32_t)) != 0) {
+@@ -829,11 +859,25 @@ SweetMaliUserClient::syncobjWait(struct sweet_syncobj_wait * request)
+ 				if (first == n) {
+ 					first = i;
+ 				}
+-			} else if (so->fence != 0) {
++				continue;
++			}
++			if (so->fence != 0) {
+ 				fences[pending++] = so->fence;
+ 			} else {
+ 				unsubmitted++;
+ 			}
++			/* waited on, call after call (a poll with no time to wait included), for a second: logged once */
++			uint64_t t = mach_absolute_time();
++			if (so->waitedSince == 0) {
++				so->waitedSince = t;
++			} else if (!so->reported && t - so->waitedSince >= second) {
++				char what[64];
++
++				so->reported = 1;
++				snprintf(what, sizeof(what), "waits on syncobj %u (%s)", handles[i],
++				    so->fence == 0 ? "never given a chain" : "its chain unfinished");
++				sweet_mali_long_wait(what, so->waitedSince, 1, so->fence == 0, so->fence);
++			}
+ 		}
+ 		if (all ? done == n : done != 0) {
+ 			request->first_signaled = first == n ? 0 : first;
+@@ -844,6 +888,11 @@ SweetMaliUserClient::syncobjWait(struct sweet_syncobj_wait * request)
+ 			return kIOReturnBadArgument;
+ 		}
+ 		uint64_t now = mach_absolute_time(), slice;
++		if (!reported && now - started >= second) {
++			reported = true;
++			sweet_mali_long_wait(all ? "SYNCOBJ_WAIT (all)" : "SYNCOBJ_WAIT (any)", started, n, unsubmitted,
++			    pending != 0 ? fences[0] : 0);
++		}
+ 		if (now >= deadline) {
+ 			return kIOReturnTimeout;
+ 		}
+@@ -881,6 +930,8 @@ SweetMaliUserClient::syncobjSet(struct sweet_syncobj_array * request, bool signa
+ 
+ 		so->signalled = signal;
+ 		so->fence = 0;
++		so->waitedSince = 0;
++		so->reported = 0;
+ 	}
+ 	if (signal) {
+ 		IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
+@@ -907,10 +958,16 @@ SweetMaliUserClient::waitBO(struct sweet_panfrost_wait_bo * request)
+ 	fences[0] = fLast[0];
+ 	fences[1] = fLast[1];
+ 	if (!sweet_mali_fence_done(fences[0]) || !sweet_mali_fence_done(fences[1])) {
++		uint64_t started = mach_absolute_time(), second;
++
+ 		deadline = deadline_in(request->timeout_ns);
++		nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
+ 		IOLockUnlock(gSweetMaliLock);
+ 		bool done = sweet_mali_fences_wait(fences, 2, true, deadline, NULL);
+ 		IOLockLock(gSweetMaliLock);
++		if (mach_absolute_time() - started >= second) {
++			sweet_mali_long_wait("WAIT_BO", started, 2, 0, sweet_mali_fence_done(fences[0]) ? fences[1] : fences[0]);
++		}
+ 		if (!done) {
+ 			return kIOReturnTimeout;
+ 		}
+@@ -1113,6 +1170,8 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		}
+ 		to->signalled = from->signalled;
+ 		to->fence = from->fence;
++		to->waitedSince = 0;
++		to->reported = 0;
+ 		IOLockWakeup(gSweetMaliLock, &gSyncChanged, false);
+ 		break;
+ 	}
