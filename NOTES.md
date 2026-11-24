@@ -121,6 +121,15 @@ Round m (pushed c8300d4; CI xnu 45491811308, metal2 45491815780, pbwrap 45491821
   IOKitWaitQuiet(1 s) to /var/tmp/sweetbusy.txt.
 - metal2: pipeline log opt-in. Bundle takes a pbwrap run (its usr/local/bin tools).
 - `out/drop-m` root.cmd (repo tools/pbwrap/root.cmd): rm pipelines.log, run sweetbusy, crash logs, cache listing.
+- **0146** (SweetFramebuffer.cpp): the presenter thread binds itself to CPU 7, a Cortex-A75 (`sweetfb_cpu`, -1 =
+  anywhere). Why: the 12.4 ms copy is CPU-bound, not memory-bound: IOSurfaces are IOBufferMemoryDescriptors whose kernel
+  mapping (getBytesNoCopy) is cached (IMPORT_HOST keeps pages cached, metal2vulkan flushes them, `sys_dcache_flush`);
+  the loop does a gather, up to three averages and a store per panel pixel (~18 cycles x 1.15 M px on an A55).
+- root.cmd also lists /Applications/PaperBoard.app/PlugIns (PosterBoard.app has no PlugIns: are there poster
+  extensions at all? sweetposter.log shows PosterBoard never reached a store write before the assert, so the
+  first-time setup runs twice in one process rather than failing to persist).
+- CI: xnu 45492740119 (0145+0146), metal2 45491815780, pbwrap 45491821501 (sweetbusy); **bundle 45494719740 =
+  `sweet-bundle-m`** (33.8 MB): kernel, PanVK (same as k), driver (pipeline log opt-in), pbwrap tools.
 - Payload-m plan: payload-k + `ufsdma=1 sweetsample=-`.
 
 ### 2026-11-24 22:10: payload-k first boot -- the profiler's first answers (observed), payload-l (ufsdma=1, NOT run)

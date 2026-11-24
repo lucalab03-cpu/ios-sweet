@@ -16,3 +16,6 @@ newest /var/mobile/Library/Logs/CrashReporter configd /var/tmp/sweetcrash.config
 
 ls /var/sweet/m2v-cache/backboardd.orig
 ls /var/sweet/m2v-cache/backboardd.orig/mesa
+
+# where the poster extensions are (PosterBoard.app has no PlugIns; iOS 16 has LegacyPoster in PaperBoard.app)
+ls /Applications/PaperBoard.app/PlugIns
