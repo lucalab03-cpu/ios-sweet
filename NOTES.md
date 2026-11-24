@@ -147,6 +147,10 @@ Open, in order:
   the b13 About sample, cache listings), sym.in, sweetents/sweetsym/sweetroot, sweet-boot.list.
 - **CI green:** xnu 45460278746 (0144 compiled, warnings only), panvk-ios 45461624501 (shader-cache enabled, every
   load-time lookup an entrypoint), metal2 45461628248; **bundle 45464521058 = `sweet-bundle-k` (34 MB)** for the user.
+- **Built 21:45 (not run):** `out/payload-k.bin` (sha256 fbb07e66...9857) = payload-j's ADT + kernel of 45460278746 +
+  `sweetsample=Preferences sweetnull=- sweetprof=backboardd.orig,SpringBoard`; `out/drop-k.zip` = drop-k + the bundle's
+  libvulkan_panfrost.dylib and SweetMTLDriver.bundle. Boot twice (the drop installs during the first); the shader
+  cache fills on the first boot with the new driver and pays off on the one after. Symbols in `art/bk/symbols`.
 - Payload-k plan: payload-j's boot-args with `sweetsample=Preferences` (About's blocked main thread),
   `sweetnull=-`, `sweetprof=backboardd.orig,SpringBoard`. **Not done: Preferences out of metal.allow** (without
   Metal, Settings crashes in CoreImage at launch, tools/metal-allow/README.md).
