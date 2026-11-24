@@ -58,6 +58,27 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 11:00: what github.com/popovluka/ios-lemonadep (branch lemonadep) has for us (read, not run)
+
+A sibling port: ios-sweet's tree carried to the OnePlus 9 Pro (SM8350), then moved to furangelz's HackiOS
+(hackios-xnu-kernel/-userland, iOS 16.5 of the iPhone X): standalone boot, Adreno 660 through Mesa GL for backboardd,
+Metal for apps only (`metal=2`), Wi-Fi (ath11k ported, iOS's own Wi-Fi stack joins from Settings, DHCP), Safari,
+location; no audio, Bluetooth, cellular, camera. For us:
+- **Status bar / layout:** they present an **iPhone XS Max display, 1242x2688 (414x896 pt @3x)**, scaled to the panel
+  by the framebuffer (`fbwidth=1242 fbheight=2688`). Ours: `sweetfb_logical=1` presents 1125x2436 (iPhone X) and
+  scales; off by default since the CPU-renderer days (backboardd waited on AppleM2ScalerCSCDriver). Candidate for the
+  lamu: **828x1792 @2x (iPhone XR/11, 414x896 pt)**: a status-bar width UIKit knows, only 1.3x our pixels (1242x2688
+  would be 2.9x), ADT `/chosen/display-scale` 2.
+- **Wallpaper works on their HackiOS 16.5 image**; nothing PosterBoard-specific in their repo (so it comes from
+  furangelz's userland or the image).
+- **CommCenter:** `tools/sweet-root-tweaks.py` (shared with ours) removes the CommCenter jobs from launchd.plist ("no
+  baseband: it crash-loops and Setup blocks on its CoreTelephony XPC"). Fits SpringBoard's crash in CoreTelephony
+  `_CTServerConnectionRegisterForEvent` from SystemStatusServer.
+- **vsync:** they found CoreAnimation deadlines wrong ("now + now") from the vsync notification's layout. HakiOS's
+  MiniIOMobileFramebuffer sends six 32-bit halves: **time, time (presented), counter**. Ours (0046 AppleCLCD::vsyncFired)
+  sends **counter, time, 0**: CA reads a counter as the vsync time. Candidate fix, cheap.
+- Touch-up at 0,0 bug of theirs: not ours (SweetHIDTouch keeps the last position on lift; only the log says 0,0).
+
 ### 2026-11-24 10:52: the user's Android dump (NOT in git: it holds serial numbers)
 
 - `sweetdump.tgz` (made 2026-11-15 on Android 15 for the lamu, `motorola/lamul_ge/lamul:15/VVTA35.51-153`, kernel
