@@ -121,6 +121,12 @@ sweetsym.txt, sweetboot.log) come from that. Ask for a fresh fetch under a new n
 - **payload-l** = payload-k + `ufsdma=1`: 0115/0117/0118's MSDC descriptor DMA for reads after a self-test (PIO vs
   DMA on 128 KiB, compared); the first 512 DMA reads are re-read with PIO and compared (mismatch -> DMA off, PIO
   data used); writes stay PIO (ufsdmaw not set). Look for `SWEET EMMC: DMA self-test` / `DMA verified` in the log.
+- **payload-l result (22:14, user): froze, then rebooted.** The log-area taken after it is byte-identical to the 21:51
+  boot's (wp 221062, same RTC line): **the payload-l boot never flushed its log**, so it died before or soon after the
+  eMMC init (DMA self-test, or the first DMA reads; a DMA write into the wrong memory would also explain a panic).
+  fetch18 (fresh command, new name) is again the 17:37 outbox (md5 ed0a9fb9...): the phone's outbox is not refreshed.
+- **payload-l2** = payload-l + `sweetfb_noconsole=0` (kernel text on the screen): a photo/video of the last lines
+  tells where DMA fails. Recommended order: payload-k first (shader cache, stable), then l2 for one minute.
 
 ### 2026-11-24 19:40: payload-j booted (observed), where the time goes, and round k (CI running)
 
