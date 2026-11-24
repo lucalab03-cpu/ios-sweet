@@ -101,6 +101,16 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-25 00:30: payload-o (observed) and 0149 (CI 45508745873)
+
+- User: **much more fluid and responsive**, touch works, About still not entered (opened before/at the release?).
+- `DMA writes verified on all checked writes, no more checks` (1024 writes read back with PIO): DMA writes work.
+- `panel memory mapped cached`: copy **12.2 ms** (11.5 before): no gain, a little loss (the clean). The stores are
+  not the bottleneck either -> the 4-byte loads from the source surface are. 0149: memcpy each source row once into a
+  cached 2-row buffer, stats print "source rows read N us". Next payload: `sweetfb_fbcache=0` (back to WC panel).
+- About: the release comes at 90 s; Settings opened earlier stays waiting. Next payload `sweetquiet=20`.
+- fetch756 = stale (drop applied this boot): sweetfind's result next boot.
+
 ### 2026-11-25 00:15: round o (built, not run): verified DMA writes, cached panel, sweetfind
 
 - **0148** sweet_ufs.c: with `ufsdmaw=1` writes go through DMA; the first `ufsdmawverify` (default 1024) are read back
