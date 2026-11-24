@@ -5,21 +5,26 @@ name: panvk-ios
 # Errors are also printed as annotations, so they show on the run's summary page.
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: runner label (macos-15-intel when the arm64 Macs are queued)
+        required: false
+        default: macos-15
   push:
     paths:
       - 'tools/panvk-ios/**'
       - '.github/workflows/panvk-ios.yml'
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - name: Tools
         run: |
           brew install meson ninja bison flex pkg-config llvm spirv-llvm-translator spirv-tools
           pip3 install --break-system-packages mako pyyaml packaging || pip3 install mako pyyaml packaging
-          echo "/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
-          /opt/homebrew/opt/llvm/bin/llvm-config --version
+          echo "$(brew --prefix)/opt/bison/bin:$(brew --prefix)/opt/flex/bin" >> $GITHUB_PATH
+          $(brew --prefix)/opt/llvm/bin/llvm-config --version
           pkg-config --modversion LLVMSPIRVLib SPIRV-Tools || true
       - name: Mesa 26.2.7
         run: |
@@ -30,8 +35,8 @@ jobs:
       - name: Native compile tools
         run: |
           set -o pipefail
-          export PATH=/opt/homebrew/opt/llvm/bin:$PATH
-          export PKG_CONFIG_PATH=/opt/homebrew/opt/llvm/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
+          export PATH=$(brew --prefix)/opt/llvm/bin:$PATH
+          export PKG_CONFIG_PATH=$(brew --prefix)/opt/llvm/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig
           cd mesa-26.2.7
           # sweet-ios here too: panfrost_compile links the kmod code, which wants xf86drm.h; macOS has no libdrm,
           # the shim builds on macOS as well (the compile tools never open the GPU).

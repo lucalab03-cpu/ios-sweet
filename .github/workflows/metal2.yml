@@ -5,6 +5,11 @@ name: metal2
 # (/usr/local/lib/libvulkan_panfrost.dylib from the panvk-ios drop). Runs on every push to these paths.
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: runner label (macos-15-intel when the arm64 Macs are queued)
+        required: false
+        default: macos-15
   push:
     paths:
       - 'tools/metal2/**'
@@ -12,7 +17,7 @@ on:
       - '.github/workflows/metal2.yml'
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     timeout-minutes: 120
     env:
       M2V_REPO: https://github.com/steelbrain/metal2vulkan
@@ -41,7 +46,7 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.app
           OUT=$PWD/m2v-bridge
           mkdir -p "$OUT"
-          LLVM_AS=/opt/homebrew/opt/llvm/bin/llvm-as
+          LLVM_AS=$(brew --prefix)/opt/llvm/bin/llvm-as
           "$LLVM_AS" -o "$OUT/runtime_examples.air" m2v/crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll
           "$LLVM_AS" -o "$OUT/function_constant.air" m2v/crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll
           cat > "$OUT/Cargo.toml" <<EOF
