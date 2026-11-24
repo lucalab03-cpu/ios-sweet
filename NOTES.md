@@ -10,6 +10,10 @@ iOS 16 the pieces that carry over (GPU speed, display, hardware drivers), try iO
 experiment, then move to iOS 27 with the drivers. Every round should bring the phone closer to daily use;
 measure against that list.
 
+The user again (2026-11-24): **everything has to work as on a real iPhone** - no subset of apps or features counts as
+done. Order of work stays: the graphics base first (GPU speed, app switcher, wallpaper, status bar), then the hardware
+(Wi-Fi, audio, Bluetooth, cellular, camera, sensors, battery), then the move to iOS 27.
+
 ### Reaching iOS 27
 
 The present work (iOS 16.7.16, xnu-8796, iPhone X files) is the base. Prior art for the jump: HakiOS
