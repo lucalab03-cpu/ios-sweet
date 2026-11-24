@@ -96,6 +96,21 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-25 00:15: round o (built, not run): verified DMA writes, cached panel, sweetfind
+
+- **0148** sweet_ufs.c: with `ufsdmaw=1` writes go through DMA; the first `ufsdmawverify` (default 1024) are read back
+  with PIO and compared; mismatch, failed read-back or DMA error -> the range is rewritten with PIO and DMA writes stay
+  off (reads keep DMA). SweetFramebuffer.cpp: the panel memory is written through a kIOMapCopybackCache mapping and
+  the written rows are cleaned (IOFlushProcessorCache) after each blit/copy/fade step (`sweetfb_fbcache=0` = old WC).
+  Why: the copy took 11.5 ms on an A75 at 2.0 GHz as on an A55 at 1.7 GHz -> stores to WC memory set the pace.
+- `tools/sweetfind` (pbwrap): names containing a string under DIRs, 8 levels, directory entries only.
+- Scanout note: the display engines on MT6768 go through the M4U; our surfaces live above 4 GiB (XNU's memory), the
+  OVL reads the bootloader fb at 0x78200000. Real scanout needs M4U mappings plus disp_rsz0 (MTK resizers scale up and
+  down) plus mutex/mmsys routing: several rounds.
+- CI xnu 45505379353, pbwrap 45505383276; **bundle 45507559261 = `sweet-bundle-o`** (6.6 MB).
+- Plan: payload-o = payload-n-dma + kernel o + `ufsdmaw=1` (io=0x16 removed: it showed nothing); drop-o = root.cmd
+  (sweetfind Poster / ExtensionKit) + sweetfind.
+
 ### 2026-11-24 23:50: payload-n-dma (observed): DMA works, About opens -- new base
 
 - **eMMC DMA works with 0147:** `DMA self-test OK: 128 KiB in 14486 us (PIO) vs 1001 us (DMA)`, `DMA verified on all
