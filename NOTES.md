@@ -10,6 +10,12 @@ iOS 16 the pieces that carry over (GPU speed, display, hardware drivers), try iO
 experiment, then move to iOS 27 with the drivers. Every round should bring the phone closer to daily use;
 measure against that list.
 
+The user (2026-11-24, 18:50): **it is for daily use, so it must be optimised to the top** -- smooth as a real
+iPhone (a Pixel Fold port showed iPhone-like fluidity). The Mali-G52 MC2 is a low-end GPU and the path adds costs
+(Metal -> metal2vulkan -> PanVK, a CPU copy and scale to the panel), so performance work is never "done" while
+anything stutters: remove every wait in the path, show GPU frames without the CPU copy (the display's own
+overlay/scaler), fewer job chains per frame, then power (GPU DVFS, idle) without losing smoothness.
+
 The user again (2026-11-24): **everything has to work as on a real iPhone** - no subset of apps or features counts as
 done. Order of work stays: the graphics base first (GPU speed, app switcher, wallpaper, status bar), then the hardware
 (Wi-Fi, audio, Bluetooth, cellular, camera, sensors, battery), then the move to iOS 27.
