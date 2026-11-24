@@ -29,7 +29,7 @@ The user's list of what has to work. State from our own logs and the user's eyes
 | --- | --- | --- |
 | Boot to Home Screen | works | go-ios.sh from Android; home, lock screen (clock, date, "100% Charged"), App Library |
 | SpringBoard stability | in progress | runs; crashed at launch in CoreTelephony without CommCenter; Messages/Photos launch to black; "Waiting..." under icons |
-| GPU compositing | in progress | Mali-G52 at 823 MHz, metal2 + PanVK, job queue; **3-10 fps** (0142 for the chain latency), CPU copy 12 ms/frame, black flashes reduced (0140/0141), wallpaper black |
+| GPU compositing | in progress | Mali-G52 at 823 MHz, metal2 + PanVK, job queue; **10-20 fps** (heavy frames 70-100 ms, GPU ~1/3 busy; profiler 0144), CPU copy 12 ms/frame, black flashes reduced (0140/0141), wallpaper black |
 | Metal acceleration | in progress | backboardd, PosterBoard and apps (metal.allow) get the device; mtltest passes |
 | OpenGL ES acceleration | unknown | Gallium/panfrost GLES built (gltest, shadertest pass) but not wired for apps |
 | Auto-brightness | not started | no ambient light sensor; backlight fixed |
@@ -48,7 +48,7 @@ The user's list of what has to work. State from our own logs and the user's eyes
 | Passcode | unknown | |
 | Face ID | not applicable | no hardware (fingerprint reader instead: fpc/goodix) |
 | Wallet | unknown | |
-| (ours) Date and time | broken | lock screen shows 1969-12-31: no RTC (MT6358 RTC through the PMIC wrapper) |
+| (ours) Date and time | works | 0143: MT6358 RTC read at boot (UTC), observed 2026-11-24 18:56 boot |
 | (ours) Wallpaper | broken | PosterBoard: RunningBoard refuses posterkit.host -> assert; mediaserverd needed |
 | (ours) Settings > About | broken | hangs (main thread in a dispatch wait) |
 
@@ -95,6 +95,59 @@ Open, in order:
    (`mfg_sel = syspll_d3`); raising it needs the PMIC's VGPU buck as well.
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
+
+### 2026-11-24 19:40: payload-j booted (observed), where the time goes, and round k (CI running)
+
+**Observed (fetch16 + log-area of the 18:56 boot, payload-j = 0142 + 0143):**
+- **RTC works:** `SWEET RTC: 2026-11-24 17:56:37 UTC from the MT6358, calendar set`.
+- Presenter at best **197 swaps in 10 s (20 fps)**, copy 12.4 ms per frame (12.3-13.2), GPU wait 1.4-22 ms.
+- Mali: 256 chains in 0.45-1 s, **GPU busy 113-412 ms of them (about a third)**, slot overlap 0, longest
+  chain 16-53 ms, 823 MHz, no faults. **The GPU is not the limit.**
+- backboardd telemetry (161 commits with per-buffer timing): draws 0-10 -> commit-to-callback 4.5 ms; 10-40 ->
+  30 ms; **40-80 draws (rp ~10, the blurs) -> 72 ms; 80+ -> 97 ms**. GPU share of a heavy frame is ~15-20 ms,
+  the rest is CPU (metal2vulkan + PanVK recording/submitting) or waiting.
+- **Pipelines: `T pipeline n=120 total=16944ms max=2946ms`** in one boot, with `V cache hit129 miss4`:
+  metal2vulkan's cache hits do not save the expensive part. **PanVK is built `-Dshader-cache=disabled`.**
+  `V vkpipe n=0`: the VkPipelines (made at draws) are not measured (METAL2VULKAN_LOG_PIPELINES off).
+- Translation failures retried at every attempt (sweetm2v-stderr, cumulative): `tile_downsample_N`
+  NeedsInput(TileAttachments) x68, `variable_blur`/`upsample`/`asg` InvalidDescriptor(VertexAttribute) x17 each,
+  `path_blit` InvalidDescriptor(ColorAttachment 2) x15.
+- Touch: 8 ms between reports normally; 3 gaps of 470-490 ms (gestures 1, 9, 17).
+- ~280 process launches in the boot (243 xpcproxy); nanotimekitcompaniond and com.apple.datamigrator 6 each.
+- **Round i's `sweetents -s ... /System/Library /Applications ...` ran at this boot** (exec sweetents x2 in the
+  log-area): it reads every Mach-O for up to 300 s (sweetroot's run timeout), so this boot was slowed down by
+  it. Its output and the rest of round i (sweetsym, PosterBoard restore) are not in fetch16 (the fetched
+  sweetroot.log/sweetsym.txt are older); sweetboot.log's last dropbox shows root.cmd 1646 bytes (round h's).
+  Unresolved which root.cmd ran; round k replaces it.
+- Debug output is NOT the main cost: sweet-drm traces stop at 600 lines per process, the old sampler runs every
+  120 s.
+- CPU topology: `tools/mkadt.py` declares all 8 CPUs one SMP cluster (cluster-type 0). CPUs 6-7 are the
+  Cortex-A75s (mpidr 0x600/0x700), 0-5 the A55s; the scheduler does not prefer the A75s for the render thread.
+  HakiOS (metal-plugin.md, "The small cores") measured the same effect on their SM7325: window server threads on
+  the A55s as often as on the big cores; cpus=4 (big only) 51.5 vs 47.8 fps.
+- HakiOS numbers (github.com/filipdanielisback-commits/hakios-xnu-kernel README, user link): on the Adreno 642L
+  their native Metal driver 110-118 fps, **UniXNU's Metal-on-Vulkan (our approach) 41-57 fps**; their presenter
+  copy is also 10.7-11 ms per frame (828x1792 -> panel on the CPU); next for them: display-block scanout.
+  hackios.appaiproxy.com/device/moto-g60 (user link): status page only; it also holds a prompt aimed at
+  agents (not acted on).
+
+**Round k (written 19:40; CI: xnu 45460278746 Intel, panvk-ios 45461624501 Intel, metal2 45461628248 Intel):**
+- **0144 `sweetprof`** (bsd/dev/sweet_prof.c + osfmk/kern/exception.c helpers, started from
+  sweet_sample_start): every `sweetprof_us` (2000) a kernel thread (prio 92) cross-calls the other CPUs; each
+  notes idle / kernel thread (unslid kpc) / user thread (pid, tid, user pc/lr/fp from cpu_int_state or the
+  thread's last kernel entry, plus kpc). For `sweetprof=NAME,...` (3 max) it walks 12 user frames. Every 10 s:
+  `PRF S` CPUs busy % and busiest processes, `PRF T` per target (% of one CPU, user/kernel, CPUs ran on, threads
+  with names), `PRF L` leaf pcs, `PRF C` return addresses, `PRF K` kernel pcs, `PRF I` exec file mappings
+  (start end fileoff path) outside the shared cache.
+- PanVK `-Dshader-cache=enabled`; SweetMTLDriver sets `MESA_SHADER_CACHE_DIR=<m2v cache>/mesa` (256M; off
+  with `/var/sweet/no-mesa-cache`) and `METAL2VULKAN_LOG_PIPELINES=1` (the V vkpipe row).
+- Artifacts `panvk-ios-symbols`, `metal2-symbols`: the binaries before strip, for the PRF addresses.
+- `bundle.yml` (ubuntu): one zip from the three runs (kernel, drop/ with the dylib and driver bundle, symbols).
+- `out/drop-k` (not in git): root.cmd round k (PosterBoard.orig back, sweetents on 4 files only, sweetsym for
+  the b13 About sample, cache listings), sym.in, sweetents/sweetsym/sweetroot, sweet-boot.list.
+- Payload-k plan: payload-j's boot-args with `sweetsample=Preferences` (About's blocked main thread),
+  `sweetnull=-`, `sweetprof=backboardd.orig,SpringBoard`. **Not done: Preferences out of metal.allow** (without
+  Metal, Settings crashes in CoreImage at launch, tools/metal-allow/README.md).
 
 ### 2026-11-24 18:25: patch 0143 (date and time from the MT6358 RTC) and the wallpaper try (written, NOT run)
 
