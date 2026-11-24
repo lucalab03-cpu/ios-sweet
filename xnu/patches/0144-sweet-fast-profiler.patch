@@ -1,0 +1,675 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@
+ bsd/dev/sweet_conn.c			standard
+ bsd/dev/sweet_gpu.c			standard
+ bsd/dev/sweet_mali.c			standard
++bsd/dev/sweet_prof.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_prof.c b/bsd/dev/sweet_prof.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_prof.c
+@@ -0,0 +1,503 @@
++/*
++ * SWEET profiler: where the named processes spend the CPU, and what the
++ * CPUs are doing.
++ *
++ * boot-arg sweetprof=NAME[,NAME[,NAME]] (process names as proc_name gives
++ * them, e.g. backboardd.orig; absent or "-" = off), sweetprof_us=PERIOD
++ * (default 2000, 500..50000).
++ *
++ * A kernel thread cross-calls the other CPUs every period. Each one notes,
++ * in the interrupt, what it was running (sweet_prof_cpu in
++ * osfmk/kern/exception.c): idle, a kernel thread (its unslid kernel pc), or
++ * a user thread: its pid, thread id, user pc/lr/fp (at the interrupt, or at
++ * its last kernel entry if it was in the kernel, with the kernel pc). For
++ * the named processes the thread then walks 12 user frames from fp.
++ *
++ * Every 10 s, when the CPUs were more than 5% busy or a named process ran:
++ *   PRF S  samples, each CPU's busy %, the busiest processes (% of one CPU)
++ *   PRF T  name[pid]: % of one CPU, user/kernel split, CPUs it ran on, threads
++ *   PRF L  its leaf pcs "pc:count", PRF C the return addresses in its stacks
++ *          (once per sample), PRF K kernel pcs (unslid) across all CPUs
++ *   PRF I  a named process's executable file mappings outside the shared
++ *          cache: start end file-offset path (when they changed)
++ * The counts restart after each report. User pcs in the shared cache are
++ * named on the phone with tools/sweetsym; the others with the I lines and
++ * the unstripped binaries; kernel pcs with the kernel's symbols.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/proc.h>
++#include <sys/proc_internal.h>
++#include <sys/vnode.h>
++#include <sys/bsdtask_info.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <kern/task.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <mach/vm_prot.h>
++
++extern kern_return_t kernel_thread_start_priority(thread_continue_t, void *, integer_t, thread_t *);  /* MACH_KERNEL_PRIVATE */
++extern task_t proc_task(proc_t);
++extern unsigned int cpu_broadcast_xcall_simple(boolean_t, void (*)(void *), void *);
++extern int vn_getpath(struct vnode *vp, char *pathbuf, int *len);
++extern void sweet_prof_start(void);
++
++/* osfmk/kern/exception.c */
++struct sweet_prof_hit {
++	uint64_t pc, lr, fp, kpc, tid;
++	void *task;
++	int32_t pid;
++	uint16_t flags;                 /* PH_* */
++	uint16_t cpu;
++};
++#define PH_SAMPLED      1
++#define PH_USER         2
++#define PH_IDLE         4
++#define PH_KTHREAD      8
++#define PROF_CPUS       16
++extern void sweet_prof_cpu(void *arg);
++extern int sweet_prof_walk(void *task, uint64_t fp, uint64_t *out, int max);
++extern int sweet_prof_thread_name(void *task, uint64_t tid, char *buf, size_t size);
++extern void sweet_prof_task_ref(void *task, int add);
++
++#define NTARGETS        3
++#define TABLE           2048            /* per table, power of two */
++#define FRAMES          12
++#define REPORT_SECS     10
++#define NPIDS           128
++#define NTIDS           48
++
++struct count {
++	uint64_t key;
++	uint32_t n;
++};
++
++struct target {
++	char name[24];
++	int pid;
++	void *task;
++	uint32_t total, user, kernel, lost;
++	uint32_t cpu[PROF_CPUS];
++	struct count tids[NTIDS];
++	struct count leaf[TABLE], caller[TABLE];
++	uint64_t images_sig;
++};
++
++static struct target targets[NTARGETS];
++static int ntargets;
++static struct count kpcs[TABLE];
++static struct count pids[NPIDS];
++static uint32_t kpc_lost;
++static uint32_t cpu_busy[PROF_CPUS], cpu_seen[PROF_CPUS];
++static uint32_t rounds;
++static struct sweet_prof_hit hits[PROF_CPUS];
++static uint32_t period_us = 2000;
++static int prof_chan;
++
++static uint32_t
++slot_of(uint64_t key)
++{
++	key ^= key >> 29;
++	key *= 0xbf58476d1ce4e5b9ull;
++	key ^= key >> 32;
++	return (uint32_t)key & (TABLE - 1);
++}
++
++/* Count key in an open-addressed table; false if the table is full. */
++static bool
++bump(struct count *t, uint32_t size, uint64_t key)
++{
++	if (key == 0) {
++		key = 1;
++	}
++	uint32_t i = slot_of(key) & (size - 1);
++	for (uint32_t probe = 0; probe < size; probe++, i = (i + 1) & (size - 1)) {
++		if (t[i].key == key) {
++			t[i].n++;
++			return true;
++		}
++		if (t[i].key == 0) {
++			t[i].key = key;
++			t[i].n = 1;
++			return true;
++		}
++	}
++	return false;
++}
++
++/* Small tables (tids, pids) are scanned linearly. */
++static void
++bump_small(struct count *t, uint32_t size, uint64_t key)
++{
++	uint32_t i;
++	for (i = 0; i < size && t[i].key != 0; i++) {
++		if (t[i].key == key) {
++			t[i].n++;
++			return;
++		}
++	}
++	if (i < size) {
++		t[i].key = key;
++		t[i].n = 1;
++	}
++}
++
++/* Moves the top n entries of t to the front, largest first (selection; n is small). */
++static uint32_t
++top(struct count *t, uint32_t size, uint32_t n)
++{
++	uint32_t got = 0;
++	for (; got < n; got++) {
++		uint32_t best = size;
++		for (uint32_t i = got; i < size; i++) {
++			if (t[i].key != 0 && (best == size || t[i].n > t[best].n)) {
++				best = i;
++			}
++		}
++		if (best == size) {
++			break;
++		}
++		struct count c = t[got];
++		t[got] = t[best];
++		t[best] = c;
++	}
++	return got;
++}
++
++static void
++print_counts(const char *tag, const char *name, struct count *t, uint32_t size, uint32_t n, bool hex)
++{
++	uint32_t got = top(t, size, n);
++	char line[240];
++	int len = 0;
++	for (uint32_t i = 0; i < got; i++) {
++		if (len == 0) {
++			len = snprintf(line, sizeof(line), "PRF %s %s:", tag, name);
++		}
++		len += snprintf(line + len, sizeof(line) - len, hex ? " %llx:%u" : " %llu:%u", t[i].key, t[i].n);
++		if (len > (int)sizeof(line) - 30 || i + 1 == got) {
++			printf("%s\n", line);
++			len = 0;
++		}
++	}
++}
++
++static int
++find_target(proc_t p, __unused void *arg)
++{
++	char name[32];
++	proc_name(proc_pid(p), name, sizeof(name));
++	for (int i = 0; i < ntargets; i++) {
++		struct target *t = &targets[i];
++		if (strcmp(t->name, name) == 0 && t->pid != proc_pid(p)) {
++			task_t task = proc_task(p);
++			if (task == TASK_NULL) {
++				continue;
++			}
++			sweet_prof_task_ref(task, 1);
++			if (t->task != NULL) {
++				sweet_prof_task_ref(t->task, -1);
++			}
++			t->task = task;
++			t->pid = proc_pid(p);
++			t->images_sig = 0;
++		}
++	}
++	return PROC_RETURNED;
++}
++
++/* A target whose process has gone is let go of. */
++static void
++check_targets(void)
++{
++	for (int i = 0; i < ntargets; i++) {
++		struct target *t = &targets[i];
++		if (t->task != NULL) {
++			proc_t p = proc_find(t->pid);
++			if (p == PROC_NULL) {
++				sweet_prof_task_ref(t->task, -1);
++				t->task = NULL;
++				t->pid = 0;
++			} else {
++				proc_rele(p);
++			}
++		}
++	}
++	proc_iterate(PROC_ALLPROCLIST, find_target, NULL, NULL, NULL);
++}
++
++static void
++print_images(struct target *t)
++{
++	struct proc_regioninfo_internal info;
++	uintptr_t vp;
++	uint32_t vid;
++	uint64_t addr = 0, sig = 0;
++	int n = 0;
++
++	/* first pass: has anything changed? */
++	while (n < 400) {
++		bzero(&info, sizeof(info));
++		if (!fill_procregioninfo_onlymappedvnodes(t->task, addr, &info, &vp, &vid)) {
++			break;
++		}
++		if (info.pri_protection & VM_PROT_EXECUTE) {
++			sig = sig * 31 + info.pri_address + info.pri_size;
++		}
++		addr = info.pri_address + info.pri_size;
++		n++;
++	}
++	if (sig == t->images_sig) {
++		return;
++	}
++	t->images_sig = sig;
++	addr = 0;
++	n = 0;
++	while (n < 400) {
++		bzero(&info, sizeof(info));
++		if (!fill_procregioninfo_onlymappedvnodes(t->task, addr, &info, &vp, &vid)) {
++			break;
++		}
++		if ((info.pri_protection & VM_PROT_EXECUTE) && vp != 0) {
++			char path[MAXPATHLEN];
++			int len = (int)sizeof(path);
++			struct vnode *v = (struct vnode *)vp;
++			path[0] = 0;
++			if (vnode_getwithvid(v, vid) == 0) {
++				if (vn_getpath(v, path, &len) != 0) {
++					path[0] = 0;
++				}
++				vnode_put(v);
++			}
++			printf("PRF I %s[%d]: %llx %llx %llx %s\n", t->name, t->pid, info.pri_address,
++			    info.pri_address + info.pri_size, info.pri_offset, path[0] ? path : "?");
++		}
++		addr = info.pri_address + info.pri_size;
++		n++;
++	}
++}
++
++static void
++report(uint64_t elapsed_us)
++{
++	uint32_t busy = 0, seen = 0;
++	for (int c = 0; c < PROF_CPUS; c++) {
++		busy += cpu_busy[c];
++		seen += cpu_seen[c];
++	}
++	bool any = false;
++	for (int i = 0; i < ntargets; i++) {
++		any |= targets[i].total >= 10;
++	}
++	if (seen == 0 || (!any && busy * 20 < seen)) {
++		goto reset;
++	}
++
++	/* S: samples, CPUs, processes */
++	{
++		char line[240];
++		int len = snprintf(line, sizeof(line), "PRF S %u rounds in %llu ms, every %u us; CPUs busy %%:",
++		    rounds, elapsed_us / 1000, period_us);
++		for (int c = 0; c < PROF_CPUS; c++) {
++			if (cpu_seen[c]) {
++				len += snprintf(line + len, sizeof(line) - len, " %d:%u", c, cpu_busy[c] * 100 / cpu_seen[c]);
++			}
++		}
++		printf("%s\n", line);
++		uint32_t got = top(pids, NPIDS, 14);
++		len = snprintf(line, sizeof(line), "PRF S processes (%% of one CPU):");
++		for (uint32_t i = 0; i < got; i++) {
++			char name[20];
++			int pid = (int)pids[i].key - 1;
++			if (pid == 0) {
++				strlcpy(name, "kernel", sizeof(name));
++			} else {
++				proc_name(pid, name, sizeof(name));
++				if (name[0] == 0) {
++					strlcpy(name, "?", sizeof(name));
++				}
++			}
++			len += snprintf(line + len, sizeof(line) - len, " %s[%d]:%u", name, pid,
++			    rounds ? pids[i].n * 100 / rounds : 0);
++			if (len > (int)sizeof(line) - 40 || i + 1 == got) {
++				printf("%s\n", line);
++				len = snprintf(line, sizeof(line), "PRF S  ");
++			}
++		}
++	}
++
++	for (int i = 0; i < ntargets; i++) {
++		struct target *t = &targets[i];
++		char line[240];
++		int len;
++		if (t->total < 10 || t->task == NULL) {
++			continue;
++		}
++		print_images(t);
++		len = snprintf(line, sizeof(line), "PRF T %s[%d]: %u samples = %u%% of one CPU, user %u kernel %u, lost %u; CPUs:",
++		    t->name, t->pid, t->total, rounds ? t->total * 100 / rounds : 0, t->user, t->kernel, t->lost);
++		for (int c = 0; c < PROF_CPUS; c++) {
++			if (t->cpu[c]) {
++				len += snprintf(line + len, sizeof(line) - len, " %d:%u", c, t->cpu[c]);
++			}
++		}
++		printf("%s\n", line);
++		uint32_t got = top(t->tids, NTIDS, 8);
++		for (uint32_t k = 0; k < got; k++) {
++			char tname[64];
++			tname[0] = 0;
++			(void)sweet_prof_thread_name(t->task, t->tids[k].key, tname, sizeof(tname));
++			printf("PRF T %s thread %llu \"%s\": %u\n", t->name, t->tids[k].key, tname, t->tids[k].n);
++		}
++		print_counts("L", t->name, t->leaf, TABLE, 48, true);
++		print_counts("C", t->name, t->caller, TABLE, 48, true);
++	}
++	print_counts("K", "kernel", kpcs, TABLE, 32, true);
++	if (kpc_lost) {
++		printf("PRF K lost %u\n", kpc_lost);
++	}
++
++reset:
++	for (int i = 0; i < ntargets; i++) {
++		struct target *t = &targets[i];
++		t->total = t->user = t->kernel = t->lost = 0;
++		bzero(t->cpu, sizeof(t->cpu));
++		bzero(t->tids, sizeof(t->tids));
++		bzero(t->leaf, sizeof(t->leaf));
++		bzero(t->caller, sizeof(t->caller));
++	}
++	bzero(kpcs, sizeof(kpcs));
++	bzero(pids, sizeof(pids));
++	bzero(cpu_busy, sizeof(cpu_busy));
++	bzero(cpu_seen, sizeof(cpu_seen));
++	kpc_lost = 0;
++	rounds = 0;
++}
++
++static void
++account(struct sweet_prof_hit *h)
++{
++	int c = h->cpu;
++	cpu_seen[c]++;
++	if (h->flags & PH_IDLE) {
++		return;
++	}
++	cpu_busy[c]++;
++	bump_small(pids, NPIDS, (uint64_t)h->pid + 1);
++	if (h->kpc != 0 && !bump(kpcs, TABLE, h->kpc)) {
++		kpc_lost++;
++	}
++	if (h->flags & PH_KTHREAD) {
++		return;
++	}
++	for (int i = 0; i < ntargets; i++) {
++		struct target *t = &targets[i];
++		if (t->task == NULL || h->task != t->task) {
++			continue;
++		}
++		t->total++;
++		if (h->flags & PH_USER) {
++			t->user++;
++		} else {
++			t->kernel++;
++		}
++		t->cpu[c]++;
++		bump_small(t->tids, NTIDS, h->tid);
++		if (h->pc == 0) {
++			return;
++		}
++		if (!bump(t->leaf, TABLE, h->pc)) {
++			t->lost++;
++		}
++		uint64_t frames[FRAMES + 1];
++		int n = 0;
++		frames[n++] = h->lr;
++		n += sweet_prof_walk(t->task, h->fp, frames + n, FRAMES);
++		for (int f = 0; f < n; f++) {
++			bool again = false;
++			if (frames[f] == 0) {
++				continue;
++			}
++			for (int g = 0; g < f; g++) {
++				again |= frames[g] == frames[f];
++			}
++			if (!again && !bump(t->caller, TABLE, frames[f])) {
++				t->lost++;
++			}
++		}
++		return;
++	}
++}
++
++static void
++prof_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t start = mach_absolute_time(), last_check = 0, now, deadline, ns;
++
++	printf("SWEET PROF: on, every %u us, for", period_us);
++	for (int i = 0; i < ntargets; i++) {
++		printf(" %s", targets[i].name);
++	}
++	printf("\n");
++	for (;;) {
++		now = mach_absolute_time();
++		absolutetime_to_nanoseconds(now - last_check, &ns);
++		if (last_check == 0 || ns >= NSEC_PER_SEC) {
++			check_targets();
++			last_check = now;
++		}
++		bzero(hits, sizeof(hits));
++		(void)cpu_broadcast_xcall_simple(FALSE, sweet_prof_cpu, hits);
++		rounds++;
++		for (int c = 0; c < PROF_CPUS; c++) {
++			if (hits[c].flags & PH_SAMPLED) {
++				hits[c].cpu = (uint16_t)c;
++				account(&hits[c]);
++			}
++		}
++		absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
++		if (ns >= REPORT_SECS * NSEC_PER_SEC) {
++			report(ns / NSEC_PER_USEC);
++			start = mach_absolute_time();
++		}
++		clock_interval_to_deadline(period_us, NSEC_PER_USEC, &deadline);
++		(void)assert_wait_deadline(&prof_chan, THREAD_UNINT, deadline);
++		(void)thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
++void
++sweet_prof_start(void)
++{
++	char names[96];
++	thread_t thread;
++
++	if (!PE_parse_boot_argn("sweetprof", names, sizeof(names)) || names[0] == 0 || names[0] == '-') {
++		return;
++	}
++	(void)PE_parse_boot_argn("sweetprof_us", &period_us, sizeof(period_us));
++	if (period_us < 500 || period_us > 50000) {
++		period_us = 2000;
++	}
++	for (char *s = names; *s && ntargets < NTARGETS;) {
++		char *end = strchr(s, ',');
++		size_t len = end ? (size_t)(end - s) : strlen(s);
++		if (len > 0 && len < sizeof(targets[0].name)) {
++			memcpy(targets[ntargets].name, s, len);
++			targets[ntargets].name[len] = 0;
++			ntargets++;
++		}
++		if (!end) {
++			break;
++		}
++		s = end + 1;
++	}
++	if (ntargets == 0) {
++		return;
++	}
++	if (kernel_thread_start_priority(prof_thread, NULL, 92, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -78,10 +78,13 @@
+ 	}
+ }
+ 
++extern void sweet_prof_start(void);     /* bsd/dev/sweet_prof.c */
++
+ void
+ sweet_sample_start(void)
+ {
+ 	thread_t thread;
++	sweet_prof_start();
+ 	if (kernel_thread_start(sweet_sample_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	}
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1040,6 +1040,138 @@
+ 	task_unlock(task);
+ }
+ 
++/*
++ * SWEET profiler (bsd/dev/sweet_prof.c): what this CPU was running when the
++ * profiler's cross-call interrupt came in. Interrupted in user mode, the
++ * interrupt's saved state is the thread's user state; in the kernel, the
++ * user state is the one at its last kernel entry and the kernel pc is kept
++ * too (unslid). The struct is the same in sweet_prof.c.
++ */
++#include <arm/cpu_data_internal.h>
++#include <arm64/proc_reg.h>
++
++struct sweet_prof_hit {
++	uint64_t pc, lr, fp, kpc, tid;
++	void *task;
++	int32_t pid;
++	uint16_t flags;                 /* 1 sampled, 2 user mode, 4 idle, 8 kernel thread */
++	uint16_t cpu;
++};
++void sweet_prof_cpu(void *arg);
++int sweet_prof_walk(void *task, uint64_t fp, uint64_t *out, int max);
++int sweet_prof_thread_name(void *task, uint64_t tid, char *buf, size_t size);
++void sweet_prof_task_ref(void *task, int add);
++extern void bsd_getthreadname(void *uth, char *buffer);
++
++void
++sweet_prof_cpu(void *arg)
++{
++	thread_t th = current_thread();
++	task_t task = get_threadtask(th);
++	arm_saved_state_t *st = (arm_saved_state_t *)getCpuDatap()->cpu_int_state;
++	arm_saved_state_t *us;
++	struct sweet_prof_hit *h;
++	int cpu = cpu_number();
++	bool user;
++
++	if (cpu < 0 || cpu >= 16) {
++		return;
++	}
++	h = &((struct sweet_prof_hit *)arg)[cpu];
++	h->tid = thread_tid(th);
++	h->task = task;
++	h->pid = 0;
++	h->pc = h->lr = h->fp = h->kpc = 0;
++	if (th == current_processor()->idle_thread) {
++		h->flags = 1 | 4;
++		return;
++	}
++	user = st != NULL && is_saved_state64(st) && PSR64_IS_USER(get_saved_state_cpsr(st));
++	if (!user && st != NULL && is_saved_state64(st)) {
++		h->kpc = VM_KERNEL_UNSLIDE(get_saved_state_pc(st));
++	}
++	if (task == kernel_task || task == TASK_NULL) {
++		h->flags = 1 | 8;
++		return;
++	}
++	h->pid = task_pid(task);
++	us = user ? st : find_user_regs(th);
++	if (us != NULL && is_saved_state64(us)) {
++		h->pc = get_saved_state_pc(us);
++		h->lr = get_saved_state_lr(us);
++		h->fp = get_saved_state_fp(us);
++	}
++	h->flags = 1 | (user ? 2 : 0);
++}
++
++/* The user frame chain from fp, from the profiler's thread (process context). */
++int
++sweet_prof_walk(void *t, uint64_t fp, uint64_t *out, int max)
++{
++	task_t task = (task_t)t;
++	vm_map_t map;
++	int n = 0;
++
++	task_lock(task);
++	map = task->map;
++	if (map != VM_MAP_NULL) {
++		vm_map_reference(map);
++	}
++	task_unlock(task);
++	if (map == VM_MAP_NULL) {
++		return 0;
++	}
++	while (n < max && fp != 0 && (fp & 7) == 0) {
++		uint64_t frame[2];
++		if (vm_map_read_user(map, fp, frame, sizeof(frame)) != KERN_SUCCESS) {
++			break;
++		}
++		out[n++] = frame[1];
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++	vm_map_deallocate(map);
++	return n;
++}
++
++int
++sweet_prof_thread_name(void *t, uint64_t tid, char *buf, size_t size)
++{
++	task_t task = (task_t)t;
++	thread_t thread;
++	char name[64];
++	int found = 0;
++
++	bzero(name, sizeof(name));
++	task_lock(task);
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		if (thread_tid(thread) == tid) {
++			void *uth = get_bsdthread_info(thread);
++			if (uth != NULL) {
++				bsd_getthreadname(uth, name);
++			}
++			found = 1;
++			break;
++		}
++	}
++	task_unlock(task);
++	name[sizeof(name) - 1] = 0;
++	strlcpy(buf, name, size);
++	return found;
++}
++
++void
++sweet_prof_task_ref(void *t, int add)
++{
++	if (add > 0) {
++		task_reference((task_t)t);
++	} else {
++		task_deallocate((task_t)t);
++	}
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ kern_return_t
