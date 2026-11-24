@@ -1,0 +1,174 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 16200d8..5ca78ba 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -1094,6 +1094,20 @@ sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_
+ 	return queue_wait(fences, count, all, deadline, first);
+ }
+ 
++/* Patch 0140: the newest chain queued on each slot (fences; 0 0 without the queue). Any thread. */
++void
++sweet_mali_submitted(uint64_t out[2])
++{
++	if (!queue_on()) {
++		out[0] = out[1] = 0;
++		return;
++	}
++	lck_mtx_lock(&queue_lock);
++	out[0] = slots[0].submitted ? fence_of(0, slots[0].submitted) : 0;
++	out[1] = slots[1].submitted ? fence_of(1, slots[1].submitted) : 0;
++	lck_mtx_unlock(&queue_lock);
++}
++
+ /* What every finished chain has reached, per slot: a program's "has anything finished since" is a comparison. */
+ void
+ sweet_mali_finished(uint64_t out[2])
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index c407df5..2a5fb6b 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,10 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++/* bsd/dev/sweet_mali.c: the GPU job queue (patches 0135, 0140) */
++extern "C" void sweet_mali_submitted(uint64_t out[2]);
++extern "C" bool sweet_mali_fence_done(uint64_t fence);
++extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -204,12 +208,17 @@ public:
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	uint64_t      fPendingGPU[2]; /* the GPU chains queued when the pending swap came (0140) */
++	IOLock       *fPresentLock;   /* one copy into the panel at a time (0140) */
++	bool          fSync;          /* copy in SwapEnd, after the frame's GPU work (sweetfb_sync, 0140) */
++	uint64_t      fStatSync, fStatWaited, fStatWaitMax, fStatSkipped;
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void presentNow(void);
+ 	void scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+@@ -301,6 +310,19 @@ AppleCLCD::start(IOService *provider)
+ 		fOffX = fOffY = 0;
+ 	}
+ 	fLock = IOLockAlloc();
++	fPresentLock = IOLockAlloc();
++	/*
++	 * Patch 0140: since 0135 a SUBMIT returns before its chain has run, so a frame can be swapped while the GPU is
++	 * still drawing it, and the vsync copy took half-drawn surfaces (user, 2026-11-24: black flashes since the job
++	 * queue). sweetfb_sync=1 (default): SwapEnd waits for the GPU chains queued before it (at most 100 ms) and copies
++	 * the frame into the panel itself, before CoreAnimation can draw into that surface again. 0: the copy stays on the
++	 * vsync timer, which skips a tick while the frame's chains run.
++	 */
++	{
++		int sync = 1;
++		PE_parse_boot_argn("sweetfb_sync", &sync, sizeof(sync));
++		fSync = sync != 0;
++	}
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
+@@ -380,6 +402,10 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+ 	uint8_t *rec = NULL;
++	if (flush && (!sweet_mali_fence_done(fb->fPendingGPU[0]) || !sweet_mali_fence_done(fb->fPendingGPU[1]))) {
++		flush = false;                  /* the frame is still being drawn: the next tick (0140) */
++		fb->fStatSkipped++;
++	}
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		if (rec != NULL) {
+@@ -389,12 +415,53 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
++		IOLockLock(fb->fPresentLock);
+ 		fb->present(rec);
++		IOLockUnlock(fb->fPresentLock);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
++/* Patch 0140: the pending frame into the panel now, once the GPU chains queued before its swap have run. */
++void
++AppleCLCD::presentNow(void)
++{
++	uint64_t gpu[2], deadline, started = mach_absolute_time(), ns;
++	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++
++	if (rec == NULL) {
++		return;
++	}
++	IOLockLock(fLock);
++	gpu[0] = fPendingGPU[0];
++	gpu[1] = fPendingGPU[1];
++	IOLockUnlock(fLock);
++	if (!sweet_mali_fence_done(gpu[0]) || !sweet_mali_fence_done(gpu[1])) {
++		clock_interval_to_deadline(100, kMillisecondScale, &deadline);
++		(void)sweet_mali_fences_wait(gpu, 2, true, deadline, NULL);
++		absolutetime_to_nanoseconds(mach_absolute_time() - started, &ns);
++		fStatWaited++;
++		if (ns / 1000 > fStatWaitMax) {
++			fStatWaitMax = ns / 1000;
++		}
++	}
++	IOLockLock(fPresentLock);
++	IOLockLock(fLock);
++	memcpy(rec, fPending, SWEET_FB_SWAP_REC_SIZE);
++	bool show = fDirty && !fPowerOff;
++	if (show) {
++		fDirty = false;
++	}
++	IOLockUnlock(fLock);
++	if (show) {
++		present(rec);
++		fStatSync++;
++	}
++	IOLockUnlock(fPresentLock);
++	IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++}
++
+ void
+ AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
+ {
+@@ -435,12 +502,19 @@ static uint64_t sweet_fb_swap_count;
+ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
++	uint64_t gpu[2];
++
++	sweet_mali_submitted(gpu);
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
++	fPendingGPU[0] = gpu[0];
++	fPendingGPU[1] = gpu[1];
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+-		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
++		IOLog("SWEET FB: %llu swaps: %llu shown at the swap, %llu of them after waiting for the GPU (longest %llu us), "
++		    "%llu vsync copies put off\n", sweet_fb_swap_count, fStatSync, fStatWaited, fStatWaitMax, fStatSkipped);
++		fStatWaitMax = 0;
+ 	}
+ }
+ 
+@@ -766,6 +840,9 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 		}
+ 		memcpy(rec, args->structureInput, sizeof(rec));
+ 		fFB->swap(rec);
++		if (fFB->fSync) {
++			fFB->presentNow();
++		}
+ 		break;
+ 	}
+ 	case kSweetFBGetID:

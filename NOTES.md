@@ -58,6 +58,20 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 17:20: payload-g fixes the status bar; patch 0140 for the black flashes (written, NOT built)
+
+- **payload-g** (0139 kernel, `sweetfb_w=828 sweetfb_h=1792`, ADT disp0 canvas 828x1792 and
+  **`/product/artwork-device-subtype` 1792**): **the red rdar bar is gone, time and battery show** (user). More
+  reactive, but full of **black flashes** and jerky movement; wallpaper black; Settings > About still hangs. GPU at
+  823 MHz, 0 faults, no long waits. payload-g2 (also artwork-scale-factor 2) not needed. payload-g = the base.
+- Black flashes, likely cause: since 0135 SUBMIT returns before the chain runs, and the framebuffer copied the
+  latest swapped surface at the next vsync whether or not the GPU had finished drawing it; nor does it tell
+  CoreAnimation when a surface is free (SwapWait returns at once), so CA can draw into a surface being copied.
+- **0140**: `sweet_mali_submitted()` (newest queued chain per slot); a swap records it; **`sweetfb_sync=1`
+  (default): SwapEnd waits for those chains (<= 100 ms) and copies the frame into the panel before returning**;
+  the vsync copy (sweetfb_sync=0, or a power-on redraw) is put off while they run. `SWEET FB: N swaps: ... shown at
+  the swap, ... after waiting for the GPU (longest N us), N vsync copies put off` every 1000 swaps.
+
 ### 2026-11-24 17:10: the MediaTek HakiOS ports (read, not run) -- the Infinix Hot 20 is an MT6768
 
 Found through hackiosx.dev and hackios.appaiproxy.com (user). **oosexgang/hakios-xnu-kernel, branch `mtk` = the
