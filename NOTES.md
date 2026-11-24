@@ -58,6 +58,22 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 17:55: the crash reports themselves (.ips, copied by sweetroot) name exported functions
+
+Read again on the user's prompt: the .ips JSON reports carry `symbol` for exported functions and the last
+exception's backtrace. Found (old reports, still the newest of each):
+- **mediaserverd** SIGABRT, uncaught ObjC exception (unrecognized selector, `___forwarding___`) in VideoToolbox
+  `FigGetAlignmentForIOSurfaceOutputToDisplayService` <- MediaToolbox `FPSupport_CopyDestinationPixelBufferAttributes
+  WithIOSurfaceSupport` <- `itemfig_createRenderTriplesForVideo` (player setup): the display service answers with a
+  type it does not expect. The wallpaper needs mediaserverd (MT6768 Infinix notes). Next: its heap text (sweetscan
+  has mediaserverd since payload-h) for the selector and class.
+- **SpringBoard** SIGSEGV at launch in CoreTelephony `ReregisterClientForAllEvents` <- `_CTServerConnectionRegister
+  ForEvent` <- SystemStatusServer `-[STTelephonyStateProvider init]` <- `-[SpringBoard _startSystemStatusServerAnd
+  Friends]`: no CommCenter (removed from launchd.plist by sweet-root-tweaks).
+- **locationd** SIGBUS, KERN_PROTECTION_FAILURE writing at `OBJC_CLASS_$_NSURLSessionConfiguration` from CFNetwork.
+- JetsamEvent: largest process sweet-boot (the dropbox install), 246570 free pages: no memory pressure.
+- /Library/Wallpaper/{Collections,Stills,DefaultWallpapers~iphone.plist} exist; PosterBoard.app has no PlugIns.
+
 ### 2026-11-24 17:50: patch 0141, the presenter thread (written, NOT built)
 
 - payload-h (0140, sweetfb_sync=1): user: **fewer black flashes, but not fluid**: backboardd's SwapEnd now waits for
