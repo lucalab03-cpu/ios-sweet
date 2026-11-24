@@ -1,0 +1,88 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -44,6 +44,7 @@
+ extern "C" processor_t cpu_to_processor(int cpu);
+ extern "C" processor_t thread_bind(processor_t processor);
+ extern "C" int ml_get_max_cpu_number(void);
++static uint64_t sweet_fb_rowread_us;       /* 0149: time spent reading source rows, for the stats */
+ extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first);
+ 
+ #if defined(SWEET)
+@@ -556,8 +557,10 @@
+ 		return;
+ 	}
+ 	IOLog("SWEET FB: in %llu ms: %llu swaps, %llu frames shown (%llu replaced by a newer one), copy %llu us average "
+-	    "%llu longest, GPU wait %llu us average\n", ns / 1000000, fStatSwaps, fStatCopies, fStatDropped,
+-	    fStatCopies ? fStatCopyUs / fStatCopies : 0, fStatCopyMax, fStatCopies ? fStatWaitUs / fStatCopies : 0);
++	    "%llu longest (source rows read %llu us), GPU wait %llu us average\n", ns / 1000000, fStatSwaps, fStatCopies,
++	    fStatDropped, fStatCopies ? fStatCopyUs / fStatCopies : 0, fStatCopyMax,
++	    fStatCopies ? sweet_fb_rowread_us / fStatCopies : 0, fStatCopies ? fStatWaitUs / fStatCopies : 0);
++	sweet_fb_rowread_us = 0;
+ 	fStatT0 = now;
+ 	fStatSwaps = fStatCopies = fStatDropped = fStatCopyUs = fStatCopyMax = fStatWaitUs = 0;
+ }
+@@ -674,6 +677,30 @@
+ }
+ 
+ /* Nearest-neighbour blit of a logical-display rectangle onto the panel. */
++/*
++ * Patch 0149: the source rows are read once each, with memcpy (16-byte loads), into a cached two-row buffer, and the
++ * gather and the averages read from there. The copy took 11.5-12.4 ms whatever the core (A55 1.7 GHz, A75 2.0 GHz) and
++ * whatever the panel mapping (write-combined or cached, 0148), so the 4-byte loads from the surface are what is slow.
++ * The time spent reading the rows is reported in the stats ("source rows read").
++ */
++#define SWEET_FB_ROW_MAX 4096
++static uint32_t sweet_fb_row[2][SWEET_FB_ROW_MAX];
++static int32_t sweet_fb_row_y[2];
++
++static const uint32_t *
++sweet_fb_row_load(uintptr_t base, uint32_t bpr, int32_t r, uint32_t pixels, int32_t keep)
++{
++	for (int i = 0; i < 2; i++) {
++		if (sweet_fb_row_y[i] == r) {
++			return sweet_fb_row[i];
++		}
++	}
++	int v = sweet_fb_row_y[0] == keep ? 1 : 0;
++	memcpy(sweet_fb_row[v], (const void *)(base + (uint64_t)r * bpr), (size_t)pixels * 4);
++	sweet_fb_row_y[v] = r;
++	return sweet_fb_row[v];
++}
++
+ void
+ AppleCLCD::flushPanel(uint32_t y0, uint32_t y1)
+ {
+@@ -758,6 +785,9 @@
+ 		sweet_fb_xmap[X - X0] = (uint32_t)(sx + i);
+ 		sweet_fb_xblend[X - X0] = blend;
+ 	}
++	bool rowbuf = (uint32_t)(sx + w) <= SWEET_FB_ROW_MAX;
++	uint64_t read_abs = 0;
++	sweet_fb_row_y[0] = sweet_fb_row_y[1] = -1;
+ 	for (int32_t Y = Y0; Y < Y1; Y++) {
+ 		int64_t pos = (((int64_t)(2 * Y + 1) * LH) << 7) / PH - 128;
+ 		int32_t j = (int32_t)(pos >> 8) - dy;
+@@ -779,6 +809,13 @@
+ 		}
+ 		const uint32_t *srow = (const uint32_t *)(src + s->offset + (uint64_t)(sy + j) * s->bytesPerRow);
+ 		const uint32_t *nrow = (const uint32_t *)((uintptr_t)srow + (blendY ? s->bytesPerRow : 0));
++		if (rowbuf) {
++			uint64_t t0 = mach_absolute_time();
++			uintptr_t base = src + s->offset;
++			srow = sweet_fb_row_load(base, s->bytesPerRow, sy + j, (uint32_t)(sx + w), -1);
++			nrow = blendY ? sweet_fb_row_load(base, s->bytesPerRow, sy + j + 1, (uint32_t)(sx + w), sy + j) : srow;
++			read_abs += mach_absolute_time() - t0;
++		}
+ 		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)Y * fRowBytes);
+ 		for (int32_t X = X0; X < X1; X++) {
+ 			uint32_t at = sweet_fb_xmap[X - X0];
+@@ -799,6 +836,9 @@
+ 		}
+ 	}
+ 	flushPanel((uint32_t)Y0, (uint32_t)Y1);
++	uint64_t read_ns;
++	absolutetime_to_nanoseconds(read_abs, &read_ns);
++	sweet_fb_rowread_us += read_ns / 1000;
+ }
+ 
+ void
