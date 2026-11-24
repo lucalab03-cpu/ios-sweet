@@ -1,0 +1,186 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 2a5fb6b..22ca48e 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -53,6 +53,7 @@ extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, b
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
++#include <kern/thread.h>
+ #include <sys/proc.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ 
+@@ -210,7 +211,9 @@ public:
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+ 	uint64_t      fPendingGPU[2]; /* the GPU chains queued when the pending swap came (0140) */
+ 	IOLock       *fPresentLock;   /* one copy into the panel at a time (0140) */
+-	bool          fSync;          /* copy in SwapEnd, after the frame's GPU work (sweetfb_sync, 0140) */
++	bool          fSync;          /* copy in SwapEnd, after the frame's GPU work (sweetfb_sync=1, 0140) */
++	bool          fAsync;         /* copy on the presenter thread as soon as the GPU is done (sweetfb_sync=2, 0141) */
++	uint64_t      fStatT0, fStatSwaps, fStatCopies, fStatDropped, fStatCopyUs, fStatCopyMax, fStatWaitUs;
+ 	uint64_t      fStatSync, fStatWaited, fStatWaitMax, fStatSkipped;
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+@@ -219,6 +222,9 @@ public:
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
+ 	void presentNow(void);
++	static void presenterThread(void *arg, wait_result_t wr);
++	void presenterLoop(void);
++	void stats(void);
+ 	void scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe, int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h);
+ };
+ 
+@@ -319,9 +325,16 @@ AppleCLCD::start(IOService *provider)
+ 	 * vsync timer, which skips a tick while the frame's chains run.
+ 	 */
+ 	{
+-		int sync = 1;
++		/*
++		 * 0141: sweetfb_sync=2 (default): a kernel thread does the waiting and the copy, so backboardd's SwapEnd
++		 * returns at once and draws the next frame meanwhile (with 1, SwapEnd waited and copied: fewer black flashes,
++		 * but not fluid -- user, 2026-11-24 17:40). A frame swapped while the previous one still waits for the GPU
++		 * replaces it (counted as dropped).
++		 */
++		int sync = 2;
+ 		PE_parse_boot_argn("sweetfb_sync", &sync, sizeof(sync));
+-		fSync = sync != 0;
++		fSync = sync == 1;
++		fAsync = sync == 2;
+ 	}
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -343,6 +356,15 @@ AppleCLCD::start(IOService *provider)
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+ 	fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 
++	if (fAsync) {
++		thread_t thread;
++		if (kernel_thread_start(&AppleCLCD::presenterThread, this, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		} else {
++			fAsync = false;
++			fSync = true;
++		}
++	}
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
+@@ -400,7 +422,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+ 	}
+-	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	bool flush = !fb->fAsync && fb->fDirty && (count % fb->fFlushTicks) == 0;
+ 	uint8_t *rec = NULL;
+ 	if (flush && (!sweet_mali_fence_done(fb->fPendingGPU[0]) || !sweet_mali_fence_done(fb->fPendingGPU[1]))) {
+ 		flush = false;                  /* the frame is still being drawn: the next tick (0140) */
+@@ -423,6 +445,86 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ }
+ 
++/* Patch 0141: the presenter thread. */
++void
++AppleCLCD::presenterThread(void *arg, wait_result_t wr)
++{
++	(void)wr;
++	((AppleCLCD *)arg)->presenterLoop();
++}
++
++void
++AppleCLCD::presenterLoop(void)
++{
++	uint8_t *rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
++
++	if (rec == NULL) {
++		return;
++	}
++	IOLockLock(fLock);
++	for (;;) {
++		while (!fDirty || fPowerOff) {
++			IOLockSleep(fLock, &fPendingGPU, THREAD_UNINT);
++		}
++		uint64_t gpu[2] = { fPendingGPU[0], fPendingGPU[1] };
++		IOLockUnlock(fLock);
++
++		uint64_t t0 = mach_absolute_time(), deadline, ns;
++		if (!sweet_mali_fence_done(gpu[0]) || !sweet_mali_fence_done(gpu[1])) {
++			clock_interval_to_deadline(100, kMillisecondScale, &deadline);
++			(void)sweet_mali_fences_wait(gpu, 2, true, deadline, NULL);
++		}
++		uint64_t t1 = mach_absolute_time();
++
++		IOLockLock(fPresentLock);
++		IOLockLock(fLock);
++		bool newer = fPendingGPU[0] != gpu[0] || fPendingGPU[1] != gpu[1];
++		if (newer && (!sweet_mali_fence_done(fPendingGPU[0]) || !sweet_mali_fence_done(fPendingGPU[1]))) {
++			/* a newer frame came while this one waited, and is not drawn yet: wait for it instead */
++			fStatDropped++;
++			IOLockUnlock(fPresentLock);
++			continue;
++		}
++		memcpy(rec, fPending, SWEET_FB_SWAP_REC_SIZE);
++		fDirty = false;
++		IOLockUnlock(fLock);
++		present(rec);
++		IOLockUnlock(fPresentLock);
++		uint64_t t2 = mach_absolute_time();
++
++		absolutetime_to_nanoseconds(t1 - t0, &ns);
++		fStatWaitUs += ns / 1000;
++		absolutetime_to_nanoseconds(t2 - t1, &ns);
++		fStatCopyUs += ns / 1000;
++		if (ns / 1000 > fStatCopyMax) {
++			fStatCopyMax = ns / 1000;
++		}
++		fStatCopies++;
++		IOLockLock(fLock);
++	}
++}
++
++/* Every 10 s with swaps: what the presenter did (0141). With fLock held. */
++void
++AppleCLCD::stats(void)
++{
++	uint64_t now = mach_absolute_time(), ns;
++
++	if (fStatT0 == 0) {
++		fStatT0 = now;
++		return;
++	}
++	absolutetime_to_nanoseconds(now - fStatT0, &ns);
++	if (ns < 10ull * NSEC_PER_SEC) {
++		return;
++	}
++	IOLog("SWEET FB: in %llu ms: %llu swaps, %llu frames shown (%llu replaced by a newer one), copy %llu us average "
++	    "%llu longest, GPU wait %llu us average\n", ns / 1000000, fStatSwaps, fStatCopies, fStatDropped,
++	    fStatCopies ? fStatCopyUs / fStatCopies : 0, fStatCopyMax, fStatCopies ? fStatWaitUs / fStatCopies : 0);
++	fStatT0 = now;
++	fStatSwaps = fStatCopies = fStatDropped = fStatCopyUs = fStatCopyMax = fStatWaitUs = 0;
++}
++
+ /* Patch 0140: the pending frame into the panel now, once the GPU chains queued before its swap have run. */
+ void
+ AppleCLCD::presentNow(void)
+@@ -510,6 +612,11 @@ AppleCLCD::swap(const uint8_t *rec)
+ 	fPendingGPU[0] = gpu[0];
+ 	fPendingGPU[1] = gpu[1];
+ 	fDirty = true;
++	fStatSwaps++;
++	stats();
++	if (fAsync) {
++		IOLockWakeup(fLock, &fPendingGPU, false);
++	}
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
+ 		IOLog("SWEET FB: %llu swaps: %llu shown at the swap, %llu of them after waiting for the GPU (longest %llu us), "
+@@ -891,6 +998,9 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 				fFB->fPowerOff = off;
+ 				fFB->fFadeStep = 0;
+ 				fFB->fDirty = true;     /* on: redraw the latest frame */
++				if (fFB->fAsync && !off) {
++					IOLockWakeup(fFB->fLock, &fFB->fPendingGPU, false);
++				}
+ 			}
+ 			IOLockUnlock(fFB->fLock);
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");

@@ -58,6 +58,15 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 17:50: patch 0141, the presenter thread (written, NOT built)
+
+- payload-h (0140, sweetfb_sync=1): user: **fewer black flashes, but not fluid**: backboardd's SwapEnd now waits for
+  the GPU and copies 720x1604 filtered pixels before it can draw the next frame.
+- **0141**: `sweetfb_sync=2` (new default): a kernel thread waits for the swapped frame's GPU chains and copies it at
+  once; SwapEnd returns immediately; a frame swapped while the previous one still waits replaces it. `sweetfb_sync=1`
+  = 0140's behaviour, `0` = the vsync copy. Every 10 s with swaps: `SWEET FB: in N ms: N swaps, N frames shown (N
+  replaced by a newer one), copy N us average N longest, GPU wait N us average`.
+
 ### 2026-11-24 17:40: why PosterBoard dies (payload-h: sweetscan heap text, observed)
 
 - PosterBoard.inj SIGTRAP; its heap (`STR` lines): **`Invalid condition not satisfying: !_stateLock_switcherConfiguration`**
