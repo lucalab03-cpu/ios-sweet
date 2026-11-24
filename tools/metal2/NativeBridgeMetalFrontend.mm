@@ -257,12 +257,27 @@ NB_RESOURCE_SPI
 // owners keep the mapping live through this phase. Maintain each exact CPU
 // range once; no address identity or decision is carried into another phase
 // or command, and distinct/partially overlapping ranges retain their calls.
-static void flushSurfaces(NSMutableSet *surfaces) {
- if(!surfaces.count)return;
+//
+// 2026-11-25 (kernel patch 0151): the kernel no longer cleans every imported page around every SUBMIT and wait for this
+// process (SWEET_MALI_SELF_COHERENT=1, mode 3), so every host range a command can touch is maintained here: the
+// surfaces, and the caller's no-copy buffers and buffers over surfaces among the command's resources (directly, or
+// under a texture made on such a buffer). Buffers the runtime made itself are write-combined and need nothing.
+static void hostBufferRange(std::vector<std::pair<uintptr_t,size_t>> &ranges,NBBuffer *buffer) {
+ if(!buffer || !(buffer.wrapped || buffer.surfaceOwner))return;
+ void *contents=nmb_buffer_contents(buffer.handle);const size_t length=nmb_buffer_length(buffer.handle);
+ if(contents && length)ranges.emplace_back(reinterpret_cast<uintptr_t>(contents),length);
+}
+static void flushSurfaces(NSMutableSet *surfaces,NSMutableSet *owners) {
+ if(!surfaces.count && !owners.count)return;
  std::vector<std::pair<uintptr_t,size_t>> ranges;
- ranges.reserve(surfaces.count);
+ ranges.reserve(surfaces.count+owners.count);
  for(NBTexture *texture in surfaces)if(texture.surface)
   ranges.emplace_back(reinterpret_cast<uintptr_t>(IOSurfaceGetBaseAddress(texture.surface)),IOSurfaceGetAllocSize(texture.surface));
+ for(id owner in owners) {
+  if([owner isKindOfClass:[NBBuffer class]])hostBufferRange(ranges,(NBBuffer *)owner);
+  else if([owner isKindOfClass:[NBTexture class]] && !((NBTexture *)owner).surface)hostBufferRange(ranges,((NBTexture *)owner).buffer);
+ }
+ if(ranges.empty())return;
  std::sort(ranges.begin(),ranges.end());
  const auto last=std::unique(ranges.begin(),ranges.end());
  gSurfaceFlushDuplicates+=(uint64_t)(ranges.end()-last);
@@ -901,7 +916,7 @@ static void scheduled(void *context);
 }
 // After completion (or a refusal): invalidate the CPU's view of imported surfaces, then completed handlers, once.
 - (void)finish {
- flushSurfaces(_surfaces);
+ flushSurfaces(_surfaces,_resourceOwners);
  // Actual GPU completion (or a local refusal that never submitted) is the
  // release point. A retained completed command must not pin every old frame.
  [_surfaces removeAllObjects];[_resourceOwners removeAllObjects];
@@ -934,7 +949,7 @@ static void scheduled(void *context);
  dispatch_group_enter(_schedulingHandlers);
  @synchronized(gInFlight){[gInFlight addObject:self];}
  if(!self.encodeFailure) {
-  flushSurfaces(_surfaces);
+  flushSurfaces(_surfaces,_resourceOwners);
   // Completion owns this reference; the runtime orders the non-owning scheduled callback before it.
   void *context=(__bridge_retained void *)self;
   if(nmb_command_buffer_on_completed(_handle,completed,context) &&

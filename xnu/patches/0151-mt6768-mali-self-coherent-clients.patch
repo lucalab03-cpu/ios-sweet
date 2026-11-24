@@ -1,0 +1,76 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index f2831a5..599d05f 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -238,6 +238,7 @@ class SweetMaliUserClient : public IOUserClient
+ 	uint32_t                   fNextBuffer;
+ 	uint32_t                   fSubmits, fFailed, fRequests;
+ 	bool                       fAsync;      /* SUBMIT only queues; syncobjs are real (kSweetMode) */
++	bool                       fSelfCoherent;       /* the program cleans and invalidates its imported pages (0151) */
+ 	bool                       fUnnamed;    /* a SUBMIT named no buffers: any chain may use any buffer */
+ 	uint64_t                   fLast[2];    /* the fence of this client's newest chain on each slot */
+ 	uint64_t                   fInvalidated[2];     /* what had finished when its imported pages were last invalidated */
+@@ -611,7 +612,7 @@ SweetMaliUserClient::invalidateImported(void)
+ {
+ 	uint64_t now[2];
+ 
+-	if (!fAsync) {
++	if (!fAsync || fSelfCoherent) {
+ 		return;
+ 	}
+ 	sweet_mali_finished(now);
+@@ -627,6 +628,25 @@ SweetMaliUserClient::invalidateImported(void)
+ 	fInvalidated[1] = now[1];
+ }
+ 
++/*
++ * Mode bit 2 (patch 0151): the client cleans the imported pages a command uses before committing it and invalidates
++ * them after it ends, by address (DC CIVAC reaches every core's caches). Here they were cleaned all of them before
++ * every SUBMIT and invalidated after every wait: the 2026-11-25 profile had backboardd's render threads 52% of their
++ * kernel time in clean_mmu_dcache/CleanPoC_DcacheRegion (14 MB imported, two 5.9 MB surfaces, set/way cleans of the
++ * local core only). Boot-arg sweetmaliself=0 refuses the bit, so the kernel cleans as before.
++ */
++static bool
++sweet_mali_self_coherent(void)
++{
++	static int answer = -1;
++	if (answer < 0) {
++		int v = 1;
++		PE_parse_boot_argn("sweetmaliself", &v, sizeof(v));
++		answer = v != 0;
++	}
++	return answer != 0;
++}
++
+ /* How many chains a queued client may have in front of the GPU (patch 0136): boot-arg sweetmaliahead, default 8. */
+ static uint32_t
+ sweet_mali_ahead(void)
+@@ -749,8 +769,11 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 		}
+ 	}
+ 	fSubmits++;
+-	/* the processor's writes to imported pages, and (sweetmaliwc=0) to the small buffers the chain names, to memory */
+-	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
++	/*
++	 * The processor's writes to imported pages, and (sweetmaliwc=0) to the small buffers the chain names, to memory.
++	 * Not for a self-coherent client (0151): it cleans exactly the pages a command uses, by address, before the commit.
++	 */
++	for (uint32_t i = 0; !fSelfCoherent && i < SWEET_MALI_BUFFERS; i++) {
+ 		if (fBuffers[i].imported != NULL) {
+ 			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOStore, 0, fBuffers[i].size);
+ 		}
+@@ -1117,9 +1140,11 @@ SweetMaliUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments
+ 		break;
+ 	case kSweetMode:
+ 		/* queued SUBMITs and real syncobjs, asked for before the first SUBMIT; refused without the queue */
+-		fAsync = r.mode.mode == 1 && sweet_mali_async() && fSubmits == 0;
+-		r.mode.result = fAsync ? 1 : 0;
+-		IOLog("SweetMali: a client asks for mode %u: %s\n", r.mode.mode, fAsync ? "queued" : "every chain run to its end");
++		fAsync = (r.mode.mode & 1) != 0 && (r.mode.mode & ~3u) == 0 && sweet_mali_async() && fSubmits == 0;
++		fSelfCoherent = fAsync && (r.mode.mode & 2) != 0 && sweet_mali_self_coherent();
++		r.mode.result = (fAsync ? 1 : 0) | (fSelfCoherent ? 2 : 0);
++		IOLog("SweetMali: a client asks for mode %u: %s%s\n", r.mode.mode, fAsync ? "queued" : "every chain run to its end",
++		    fSelfCoherent ? ", it keeps its imported pages coherent itself (no cleaning here)" : "");
+ 		break;
+ 	case kPanfrostSetLabelBO:               /* a label is for the driver's debug output: kept nowhere */
+ 		break;

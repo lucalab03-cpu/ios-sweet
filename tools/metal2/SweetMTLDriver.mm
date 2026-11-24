@@ -278,6 +278,12 @@ static void start_telemetry(void)
 		if (access("/var/sweet/m2v-pipelog", F_OK) == 0) {
 			setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
 		}
+		/* The frontend cleans and invalidates each command's host pages itself (by address): the kernel (0151) stops
+		 * cleaning all 14 MB of imported pages around every SUBMIT and wait, half of backboardd's kernel time in the
+		 * 2026-11-25 profile. /var/sweet/mali-kernel-clean gives the cleaning back to the kernel. */
+		if (access("/var/sweet/mali-kernel-clean", F_OK) != 0) {
+			setenv("SWEET_MALI_SELF_COHERENT", "1", 0);
+		}
 		uint64_t registryID = 0;
 		IORegistryEntryGetRegistryEntryID(port, &registryID);
 		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();

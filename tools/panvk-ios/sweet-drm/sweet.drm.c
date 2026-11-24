@@ -135,10 +135,29 @@ choose_sync(void)
 		trace("sweetdrm: syncobjs in this process (/var/sweet/mali-sync-off)");
 		return;
 	}
-	error = call(SWEET_MODE_NR, &m, sizeof(m));
-	kernel_sync = error == 0 && m.result == 1;
-	trace("sweetdrm: %s (mode request -> err %d, result %u)", kernel_sync ? "queued SUBMITs, the kernel's syncobjs" :
-	    "every chain run to its end in SUBMIT, syncobjs in this process", error, m.result);
+	/*
+	 * Mode bit 2 (kernel patch 0151): this process cleans and invalidates the host pages it imported itself, so the
+	 * kernel stops cleaning every imported page around every SUBMIT and wait. Only the Metal driver does that
+	 * (it sets SWEET_MALI_SELF_COHERENT=1, its frontend flushes each command's host ranges by address); a kernel
+	 * without 0151 refuses mode 3, and the request is repeated with mode 1.
+	 */
+	const char *self = getenv("SWEET_MALI_SELF_COHERENT");
+	if (self != NULL && strcmp(self, "1") == 0) {
+		m.mode = 3;
+		error = call(SWEET_MODE_NR, &m, sizeof(m));
+		if (error != 0 || (m.result & 1) == 0) {
+			trace("sweetdrm: mode 3 refused (err %d, result %u): asking for mode 1", error, m.result);
+			m.mode = 1;
+			m.result = 0;
+			error = call(SWEET_MODE_NR, &m, sizeof(m));
+		}
+	} else {
+		error = call(SWEET_MODE_NR, &m, sizeof(m));
+	}
+	kernel_sync = error == 0 && (m.result & 1) != 0;
+	trace("sweetdrm: %s%s (mode request %u -> err %d, result %u)", kernel_sync ? "queued SUBMITs, the kernel's syncobjs" :
+	    "every chain run to its end in SUBMIT, syncobjs in this process",
+	    (m.result & 2) != 0 ? ", imported pages kept coherent by this process" : "", m.mode, error, m.result);
 }
 
 static int
