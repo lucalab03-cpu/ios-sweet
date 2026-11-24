@@ -58,6 +58,27 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 17:10: the MediaTek HakiOS ports (read, not run) -- the Infinix Hot 20 is an MT6768
+
+Found through hackiosx.dev and hackios.appaiproxy.com (user). **oosexgang/hakios-xnu-kernel, branch `mtk` = the
+Infinix Hot 20 (X6826B), MT6768**: the "hakios-mt6768" 0122 cites. Its docs travel in the fork
+**github.com/nicolascuaces/hakios-xnu-kernel, branch `a22-5g`** (Galaxy A22 5G, MT6833/Mali-G57: GPU via panfrost
+43-52 fps, **CONNSYS Wi-Fi working** `tools/redwood_a22wifi.c`/`redwood_a22connsys.c`, audio and MT6360 charger
+experimental). Also **github.com/david7xw/hakios-a22** (Galaxy A22 4G, **MT6769V, Mali-G52 MC2, 720x1600 @2**: GPU
+partial). In a22-5g's `docs/`:
+- **`x6826b-wallpaper.md` -- the iOS wallpaper on the MT6768**, in order: PosterBoard/PaperBoard launch angels
+  among the jobs; **"No compatible wallpaper found on disk (wallpaperIdentifier 7400): the wallpaper exists for @3x
+  screens only"** at scale 2 -> they make `-[NSUserDefaults wk_ignoreLogicalScreenClassForWallpaperBundle]` answer YES
+  (injected into SpringBoard, CollectionsPoster, PosterBoard, PaperBoard); CollectionsPoster needs **mediaserverd**
+  (HEIC decode, `VTTileDecompressionSessionCreate`), which needs **nanoregistryd + nanoprefsyncd** (else waits for
+  ever in NanoRegistry) and **mediaremoted**; mediaserverd aborted in AppleCVAPhoto asking Metal for a library at a
+  nil URL ("url must not be nil") -> their Metal driver answers a nil URL with an error. Then the whole wallpaper.
+- `wifi-x6826b.md` (ru): the Wi-Fi plan for CONNSYS on the MT6768 (upper half: `redwood_apple80211.c`,
+  `redwood_sta.c`, the network interface and WPA2 `lx_wpa.c`, shared with their Qualcomm branch; lower half: the
+  MediaTek radio, to write). `bluetooth-x6826b.md`, `camera-x6826b.md`, `sensors-x6826b.md`, `x6826b-emmc.md`.
+- Ours: PosterBoard dies in the switcher-configuration first-run assert (not their path), our screen is @2x (their
+  @3x-only wallpaper problem applies), mediaserverd crashed twice on our phone too.
+
 ### 2026-11-24 16:40: first iPhone-11-screen boot (payload-f, 0138) and patch 0139 (written, NOT built)
 
 - Observed: `SWEET FB: AppleCLCD 720x1604 ... presented as 828x1792 (scaled, 326 ppi), vsync time, time, count`;
