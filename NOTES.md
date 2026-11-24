@@ -96,6 +96,19 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 23:50: payload-n-dma (observed): DMA works, About opens -- new base
+
+- **eMMC DMA works with 0147:** `DMA self-test OK: 128 KiB in 14486 us (PIO) vs 1001 us (DMA)`, `DMA verified on all
+  checked reads, no more checks` (512 reads compared with PIO); no failure, touch fine (1 timeout, 31 gestures).
+  User: boot to home in about a minute, "much faster". Profiler: emmc_read_sectors gone from the top (was 77% of a
+  CPU); ufs_write_blocks (PIO writes) 8%; ml_set_interrupts_enabled 50% (idle counted as busy, see 22:10).
+- **About:** `SWEET: D22AP busy 1 after 90 s: released, so that IOKit goes quiet` at 90 s; Settings opened before it
+  stayed waiting; after closing it (switcher froze with the "white line" for ~2 min, then recovered) **About opens**.
+  Shows Model = a barcode-like garbage string (no model number from MobileGestalt), Serial N/A, Capacity 17 GB,
+  **Available 2.58 GB** (watch the debug logs/caches). io=0x16 printed no IOKit probe/start lines into the log ring
+  (IOKit's debug output does not reach it), so the busy holder is still unnamed.
+- **Base now: payload-n-dma** (kernel 45499183935: 0144-0147; ufsdma=1, io=0x16 can go).
+
 ### 2026-11-24 23:40: About's cause found (sweetbusy), DMA order fixed (0147, built)
 
 - sweetbusy (fetch1457, payload-m and m2 boots): `IOKitWaitQuiet(1 s) -> 0xe00002d6 (NOT quiet)`,
