@@ -8,9 +8,3 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
-
-# iOSOnAnd tracker: the key lives in TRACKER_TOKEN or the CLI's saved login, never in a tracked file
-.env
-.env.*
-cli.mjs
-TRACKER_QUEUE.md
