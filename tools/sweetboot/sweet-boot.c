@@ -97,20 +97,39 @@ read_all(int fd, uint8_t *buf, size_t len)
 static void
 write_outbox(void)
 {
-	static char buf[OUTBOX_MAX];
-	size_t n = 16;
+	/*
+	 * Written in pieces through a 256 KB buffer (2026-11-25): the whole 32 MB outbox in one static buffer grew with
+	 * /var/tmp until jetsam killed sweet-boot for its per-process limit ("CRASH sweet-boot sig 9 ... reason ns 1
+	 * code 0x7" in every boot of 2026-11-24 evening), and from then on the outbox was never refreshed. Each file
+	 * gives at most its last 1 MB; the header goes last, once the length is known.
+	 */
+	static char buf[256 << 10];
+	const uint64_t per_file = 1u << 20;
+	uint64_t pos = 16;                      /* outbox offset of the next text byte, header excluded */
+	size_t fill = 0;
 	DIR *d = opendir("/var/tmp");
 	struct dirent *e;
-	int fd;
+	int fd = open(DROPBOX, O_WRONLY);
 
-	if (!d) {
+	if (!d || fd < 0) {
+		if (d) {
+			closedir(d);
+		}
+		if (fd >= 0) {
+			close(fd);
+		}
 		return;
 	}
+#define OUT_FLUSH() do { \
+		if (fill && pos + fill <= OUTBOX_MAX) { \
+			(void)pwrite(fd, buf, fill, OUTBOX_OFFSET + pos); \
+			pos += fill; \
+		} \
+		fill = 0; \
+	} while (0)
 	while ((e = readdir(d)) != NULL) {
 		char path[300];
 		int in;
-		size_t room;
-		ssize_t got;
 
 		if (strncmp(e->d_name, "malitest", 8) && strncmp(e->d_name, "gltest", 6) && strncmp(e->d_name, "sweet", 5)) {
 			continue;
@@ -120,34 +139,43 @@ write_outbox(void)
 		if (in < 0) {
 			continue;
 		}
-		room = sizeof(buf) - n;
-		n += (size_t)snprintf(buf + n, room, "\n===== %s =====\n", e->d_name);
-		room = sizeof(buf) - n;
-		/* the end of a long file is what matters */
+		if (sizeof(buf) - fill < 400) {
+			OUT_FLUSH();
+		}
+		fill += (size_t)snprintf(buf + fill, sizeof(buf) - fill, "\n===== %s =====\n", e->d_name);
 		off_t size = lseek(in, 0, SEEK_END);
-		off_t start = size > (off_t)(room / 2) ? size - (off_t)(room / 2) : 0;
-		got = pread(in, buf + n, room / 2, start);
-		if (got > 0) {
-			n += (size_t)got;
+		off_t at = size > (off_t)per_file ? size - (off_t)per_file : 0;
+		for (;;) {
+			if (fill == sizeof(buf)) {
+				OUT_FLUSH();
+			}
+			ssize_t got = pread(in, buf + fill, sizeof(buf) - fill, at);
+			if (got <= 0) {
+				break;
+			}
+			fill += (size_t)got;
+			at += got;
 		}
 		close(in);
+		if (pos + fill > OUTBOX_MAX - (64 << 10)) {
+			break;                  /* full: what fits */
+		}
 	}
 	closedir(d);
-	memcpy(buf, "SWOUT001", 8);
-	uint64_t len = n - 16;
-	memcpy(buf + 8, &len, 8);
-	fd = open(DROPBOX, O_WRONLY);
-	if (fd >= 0) {
-		size_t total = (n + 4095) & ~(size_t)4095;
-		if (total > sizeof(buf)) {
-			total = sizeof(buf);
-		}
-		memset(buf + n, 0, total - n);
-		if (pwrite(fd, buf, total, OUTBOX_OFFSET) == (ssize_t)total) {
-			fsync(fd);
-		}
-		close(fd);
+	OUT_FLUSH();
+#undef OUT_FLUSH
+	/* zero the next block so a shorter outbox does not show an older tail, then the header */
+	memset(buf, 0, 4096);
+	if (pos + 4096 <= OUTBOX_MAX) {
+		(void)pwrite(fd, buf, 4096, OUTBOX_OFFSET + pos);
 	}
+	char head[16];
+	uint64_t len = pos - 16;
+	memcpy(head, "SWOUT001", 8);
+	memcpy(head + 8, &len, 8);
+	(void)pwrite(fd, head, sizeof(head), OUTBOX_OFFSET);
+	fsync(fd);
+	close(fd);
 }
 
 static void *
