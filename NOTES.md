@@ -130,7 +130,8 @@ Round m (pushed c8300d4; CI xnu 45491811308, metal2 45491815780, pbwrap 45491821
   first-time setup runs twice in one process rather than failing to persist).
 - CI: xnu 45492740119 (0145+0146), metal2 45491815780, pbwrap 45491821501 (sweetbusy); **bundle 45494719740 =
   `sweet-bundle-m`** (33.8 MB): kernel, PanVK (same as k), driver (pipeline log opt-in), pbwrap tools.
-- Payload-m plan: payload-k + `ufsdma=1 sweetsample=-`.
+- **Built 22:52 (not run):** `out/payload-m.bin` (sha256 108e086a...) = payload-k + kernel 45492740119 + `ufsdma=1
+  sweetsample=-`; `out/drop-m.zip` = root.cmd round m, sweetbusy, SweetMTLDriver (metal2 45491815780).
 
 ### 2026-11-24 22:10: payload-k first boot -- the profiler's first answers (observed), payload-l (ufsdma=1, NOT run)
 
