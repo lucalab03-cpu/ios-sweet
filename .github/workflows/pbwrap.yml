@@ -18,6 +18,8 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetsym/sweetsym.c -o sweetsym
           # entitlements of a binary, and which binaries hold one (PosterBoard's RunningBoard refusal, 2026-11-24)
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetents/sweetents.c -o sweetents
+          # IOKit services still busy (Settings > About waits for IOKit to go quiet, 2026-11-24)
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetbusy/sweetbusy.c -framework IOKit -o sweetbusy
           # install-wrap with --patch/--verify (2026-11-16): the copy on the phone came from inject.yml before them
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/inject/install-wrap.c -o install-wrap
           # _bs_set_crash_log_message lives in BoardServices, not in the SDK: the interposition table points at a
@@ -32,9 +34,9 @@ jobs:
           otool -s __DATA __interpose sweetposter.dylib
           otool -s __DATA_CONST __interpose sweetposter.dylib
           nm -u sweetposter.dylib | sort
-          codesign -s - --force sweetroot pbwrap install-wrap sweetsym sweetents sweetposter.dylib
+          codesign -s - --force sweetroot pbwrap install-wrap sweetsym sweetents sweetbusy sweetposter.dylib
           mkdir -p drop/usr/local/bin drop/usr/local/libexec drop/usr/lib drop/usr/local/etc drop/var/sweet
-          cp sweetroot install-wrap sweetsym sweetents drop/usr/local/bin/
+          cp sweetroot install-wrap sweetsym sweetents sweetbusy drop/usr/local/bin/
           cp pbwrap drop/usr/local/libexec/
           cp sweetposter.dylib drop/usr/lib/
           cp tools/pbwrap/root.cmd drop/var/sweet/

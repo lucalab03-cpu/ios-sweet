@@ -15,6 +15,9 @@ on:
       metal2_run:
         description: metal2 run id (metal2, metal2-symbols); empty = none
         required: false
+      pbwrap_run:
+        description: pbwrap run id (its usr/local/bin tools); empty = none
+        required: false
       name:
         description: name of the zip
         required: false
@@ -61,6 +64,13 @@ jobs:
           path: in/symbols
           run-id: ${{ inputs.metal2_run }}
           github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.pbwrap_run != ''
+        with:
+          name: pbwrap
+          path: in/pbwrap
+          run-id: ${{ inputs.pbwrap_run }}
+          github-token: ${{ github.token }}
       - name: Pick the files
         run: |
           set -e
@@ -74,8 +84,12 @@ jobs:
             mkdir -p out/drop/System/Library/Extensions/SweetMTLDriver.bundle
             cp in/metal2/System/Library/Extensions/SweetMTLDriver.bundle/* out/drop/System/Library/Extensions/SweetMTLDriver.bundle/
           fi
+          if [ -d in/pbwrap ]; then
+            mkdir -p out/drop/usr/local/bin
+            cp in/pbwrap/usr/local/bin/* out/drop/usr/local/bin/
+          fi
           if [ -d in/symbols ]; then mkdir -p out/symbols && cp -R in/symbols/. out/symbols/; fi
-          printf 'xnu %s\npanvk-ios %s\nmetal2 %s\n' "${{ inputs.xnu_run }}" "${{ inputs.panvk_run }}" "${{ inputs.metal2_run }}" > out/RUNS.txt
+          printf 'xnu %s\npanvk-ios %s\nmetal2 %s\npbwrap %s\n' "${{ inputs.xnu_run }}" "${{ inputs.panvk_run }}" "${{ inputs.metal2_run }}" "${{ inputs.pbwrap_run }}" > out/RUNS.txt
           find out -type f -exec ls -l {} \;
           (cd out && find . -type f ! -name SHA256SUMS -exec sha256sum {} \; > SHA256SUMS)
       - uses: actions/upload-artifact@v4

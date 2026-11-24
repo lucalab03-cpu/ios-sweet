@@ -263,7 +263,9 @@ static void start_telemetry(void)
 		}
 		/* PanVK's own disk cache of compiled shaders (Mesa built with shader-cache, 2026-11-24): next to
 		 * metal2vulkan's, so a boot does not compile again what the one before did. /var/sweet/no-mesa-cache
-		 * turns it off. The runtime's VkPipeline log feeds the telemetry's "V vkpipe" row (they are made at draws). */
+		 * turns it off. The runtime's VkPipeline log feeds the telemetry's "V vkpipe" row (they are made at draws);
+		 * it wrote a 7 MB pipelines.log in one boot (2026-11-24 22:20) on a disk the CPU reads word by word, so it is
+		 * on only while /var/sweet/m2v-pipelog exists. */
 		if (access("/var/sweet/no-mesa-cache", F_OK) == 0) {
 			setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
 		} else {
@@ -273,7 +275,9 @@ static void start_telemetry(void)
 			setenv("MESA_SHADER_CACHE_DIR", mesa, 0);
 			setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
 		}
-		setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
+		if (access("/var/sweet/m2v-pipelog", F_OK) == 0) {
+			setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
+		}
 		uint64_t registryID = 0;
 		IORegistryEntryGetRegistryEntryID(port, &registryID);
 		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();

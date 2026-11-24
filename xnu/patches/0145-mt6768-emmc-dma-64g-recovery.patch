@@ -1,0 +1,97 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -64,6 +64,8 @@
+ #define M_RESP0         0x40
+ #define M_BLK_NUM       0x50
+ #define M_PATCH_BIT1    0xb4
++#define M_PATCH_BIT2    0xb8
++#define PB2_SUPPORT_64G (1u << 1)               /* 36-bit DMA addresses (mtk-sd.c MSDC_PB2_SUPPORT_64G) */
+ #define M_CQ            0x800                   /* CQHCI window inside the MSDC block */
+ #define CQ_CFG          (M_CQ + 0x08)
+ #define CQ_CTL          (M_CQ + 0x0c)
+@@ -357,6 +359,22 @@
+ }
+ 
+ /*
++ * After a failed data transfer the card may still be in its data state (a multi-block read whose
++ * auto-CMD12 never ran): stop it with CMD12 (R1b) and wait until CMD13 reports "tran", so that the
++ * next command, DMA or PIO, is answered. msdc_cmd() resets a busy controller first.
++ */
++static int
++msdc_recover_card(void)
++{
++	int stop = msdc_cmd(12, 0, 7, 0, 0, 0, NULL);
++	int ready = msdc_card_ready();
++
++	printf("SWEET EMMC: recovery: CMD12 %d, card ready %d (sts %#x int %#x pb2 %#x)\n", stop, ready,
++	    ufs_rd(M_SDC_STS), ufs_rd(M_INT), ufs_rd(M_PATCH_BIT2));
++	return ready;
++}
++
++/*
+  * Transfer nsec sectors between the card and the bounce buffer with the MSDC DMA engine.
+  * Addresses are 36 bits wide: the high nibble goes into the descriptors and into DMA_SA_H4BIT.
+  */
+@@ -437,8 +455,9 @@
+ 		}
+ 	}
+ 	if (error) {
+-		printf("SWEET EMMC: DMA %s of %u sectors at 0x%x failed (%d, int %#x)\n",
+-		    write ? "write" : "read", nsec, sector, error, st);
++		printf("SWEET EMMC: DMA %s of %u sectors at 0x%x failed (%d, int %#x, sts %#x, dma_ctrl %#x, dma_cfg %#x, "
++		    "h4 %#x, pb2 %#x)\n", write ? "write" : "read", nsec, sector, error, st, ufs_rd(M_SDC_STS),
++		    ufs_rd(M_DMA_CTRL), ufs_rd(M_DMA_CFG), ufs_rd(M_DMA_H4), ufs_rd(M_PATCH_BIT2));
+ 	}
+ 	/* Always leave the engine and the controller idle, like msdc_data_xfer_done() in mtk-sd.c. */
+ 	msdc_dma_engine_stop();
+@@ -457,6 +476,8 @@
+ 	}
+ 	if (error) {
+ 		msdc_reset_hw();
++		ufs_wr(M_CFG, ufs_rd(M_CFG) | CFG_PIO);
++		(void)msdc_recover_card();
+ 	}
+ 	ufs_wr(M_CFG, ufs_rd(M_CFG) | CFG_PIO);
+ 	if (!error && write) {
+@@ -510,9 +531,9 @@
+ 			}
+ 			return 0;
+ 		}
+-		if (++su.dma_fail >= 3) {
++		if (++su.dma_fail >= 1) {
+ 			su.use_dma = false;
+-			printf("SWEET EMMC: DMA disabled after repeated errors, back to PIO\n");
++			printf("SWEET EMMC: DMA disabled after an error, back to PIO\n");
+ 		}
+ 	}
+ 	if (nsec == 1) {
+@@ -547,9 +568,9 @@
+ 		if (!error) {
+ 			return 0;
+ 		}
+-		if (++su.dma_fail >= 3) {
++		if (++su.dma_fail >= 1) {
+ 			su.use_dma = false;
+-			printf("SWEET EMMC: DMA disabled after repeated errors, back to PIO\n");
++			printf("SWEET EMMC: DMA disabled after an error, back to PIO\n");
+ 		}
+ 	}
+ 	if (nsec == 1) {
+@@ -919,6 +940,17 @@
+ 	uint64_t t0, t1, t2, us_pio, us_dma;
+ 	int error;
+ 
++	if (su.dma_pa + DMA_SIZE > 0x100000000ull) {
++		/*
++		 * Buffers above 4 GiB: mtk-sd.c's msdc_init_hw() sets MSDC_PB2_SUPPORT_64G before the descriptors'
++		 * high nibbles mean anything. Android may have left it set (the self-test of 2026-11-24 passed and
++		 * the reads after it did not), so set it ourselves and say what it was.
++		 */
++		uint32_t pb2 = ufs_rd(M_PATCH_BIT2);
++		ufs_wr(M_PATCH_BIT2, pb2 | PB2_SUPPORT_64G);
++		printf("SWEET EMMC: PATCH_BIT2 %#x -> %#x (64G DMA)\n", pb2, ufs_rd(M_PATCH_BIT2));
++	}
++
+ 	t0 = mach_absolute_time();
+ 	error = emmc_read_sectors(sector, nsec);        /* su.use_dma is still false: PIO */
+ 	t1 = mach_absolute_time();
