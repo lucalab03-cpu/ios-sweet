@@ -96,6 +96,25 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 23:40: About's cause found (sweetbusy), DMA order fixed (0147, built)
+
+- sweetbusy (fetch1457, payload-m and m2 boots): `IOKitWaitQuiet(1 s) -> 0xe00002d6 (NOT quiet)`,
+  **`BUSY IOPlatformExpertDevice "D22AP" busy 1  IOService:/`**, 187-197 services, no other busy one, at 2, 8 and 9
+  minutes after boot. configd's InterfaceNamer waits for quiet -> About hangs.
+- mtk-sd.c (android common kernel, read 23:15): the command is written first; msdc_start_data (descriptors, DMA_SA,
+  DMA_CTRL_START) runs only from msdc_cmd_next after the response. Ours started DMA first and msdc_cmd() then
+  cleared FIFO and interrupts under the running engine.
+- **0147**: sweet_ufs.c issues the command (PIO bit cleared) and programs/starts the DMA only after CMDRDY;
+  SweetPlatformExpert starts a thread that after `sweetquiet` s (default 90, 0 = off) logs and releases
+  IOPlatformExpertDevice's busy count (`SWEET: <name> busy N after 90 s: released...`). adjustBusy below 0 only
+  reports "bad busy count" (no panic).
+- CI xnu 45499183935 (Intel) OK; bundle 45500888795 = `sweet-kernel-n` (kernel only, 6.5 MB zip).
+- Plan: payload-n = payload-m2 + kernel n + `io=0x16` (probe/start/match logging, to name the stuck matching);
+  payload-n-dma = the same with `ufsdma=1` (touch may die if DMA still fails: reboot with n).
+- Display scanout: Android dump (platform-devices.txt) lists disp_rsz0 @0x14015000, disp_ovl0 @0x1400b000,
+  ovl0_2l @0x1400c000, rdma0 @0x1400d000, disp_mutex0 @0x14001000, mmsys_config @0x14000000 (mediatek-drm binds
+  disp_rsz0, comp_id 66). Next: a read-only register dump of that path, then OVL->RSZ scanout of the surface.
+
 ### 2026-11-24 23:10: DMA breaks the touch (observed); CPU clocks were already at max
 
 - payload-m second boot (log-area 152a55ad, fetch157 fresh): DMA again fails at the first real read (16 sectors),
