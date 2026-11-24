@@ -1,40 +1,24 @@
-# sweetroot command file: gives PosterBoard the tracing dylib, once.
+# sweetroot command file (tools/pbwrap/root.cmd). Delivered by the dropbox (/var/sweet/root.cmd), applied at boot by
+# /usr/local/bin/sweetroot; the first operation must be "apply". Log: /var/tmp/sweetroot.log
 #
-# Delivered by the dropbox (/var/sweet/root.cmd) and applied at boot by /usr/local/bin/sweetroot. The first
-# operation must be "apply": without it sweetroot only prints what it would do. Log: /var/tmp/sweetroot.log
+# 2026-11-24 round "i": PosterBoard asserts !_stateLock_switcherConfiguration after RunningBoard invalidated its
+# prewarm assertion, "originator doesn't have entitlement com.apple.runningboard.posterkit.host". Who has it, and
+# what does the running PosterBoard (the pbwrap wrapper, then PosterBoard.inj) carry? -> /var/tmp/sweetents.txt
 apply
 
-# the last crash of PosterBoard (and of SpringBoard), whatever its date, into the outbox
-newest /var/mobile/Library/Logs/CrashReporter PosterBoard /var/tmp/sweetcrash.PosterBoard.log
-newest /var/mobile/Library/Logs/CrashReporter SpringBoard /var/tmp/sweetcrash.SpringBoard.log
-newest /var/mobile/Library/Logs/CrashReporter Preferences /var/tmp/sweetcrash.Preferences.log
+run /usr/local/bin/sweetents -o /var/tmp/sweetents.txt /Applications/PosterBoard.app/PosterBoard.orig /Applications/PosterBoard.app/PosterBoard.inj /Applications/PosterBoard.app/PosterBoard /System/Library/CoreServices/SpringBoard.app/SpringBoard
+run /usr/local/bin/sweetents -o /var/tmp/sweetents.txt -s com.apple.runningboard.posterkit.host /System/Library/CoreServices /Applications /usr/libexec /System/Library/PrivateFrameworks/PosterBoardServices.framework /System/Library/PrivateFrameworks/PosterKit.framework /System/Library/PrivateFrameworks/PosterFoundation.framework
 
-# names for the addresses of earlier boots' crashes and stack samples (tools/sweetsym; /var/sweet/sym.in comes with
-# the dropbox): /var/tmp/sweetsym.txt, fetched with the outbox
+# names for the addresses of the last boot (Settings > About's main thread): /var/tmp/sweetsym.txt
 run /usr/local/bin/sweetsym /var/sweet/sym.in /var/tmp/sweetsym.txt
 
-# the queued GPU mode back on (2026-11-24: the app switcher froze without it too, so it was not the cause)
-rm /var/sweet/mali-sync-off
+newest /var/mobile/Library/Logs/CrashReporter PosterBoard /var/tmp/sweetcrash.PosterBoard.log
+newest /var/mobile/Library/Logs/CrashReporter mediaserverd /var/tmp/sweetcrash.mediaserverd.log
 
-# the untouched binary, kept once (cp -n never overwrites what an earlier boot made)
+# PosterBoard with the tracing dylib (each step leaves what an earlier boot made)
 cp -n /Applications/PosterBoard.app/PosterBoard /Applications/PosterBoard.app/PosterBoard.orig
-
-# the copy that install-wrap adds LC_LOAD_DYLIB to; it also fixes the first page's code signature hash
 cp -n /Applications/PosterBoard.app/PosterBoard.orig /Applications/PosterBoard.app/PosterBoard.inj
-# "patch: 0" done, "patch: 1" already there, "patch: -2" no room for the load command (the binary's header is full),
-# other negatives: not a Mach-O, not arm64, or a signature this code cannot rewrite
 run /usr/local/bin/install-wrap --patch /Applications/PosterBoard.app/PosterBoard.inj /usr/lib/sweetposter.dylib
-# "verify: 0" first page of every arm64 slice matches its signature again; negative: the hash still differs, so the
-# kernel will not take the binary and the interposition would look like a failure of its own
 run /usr/local/bin/install-wrap --verify /Applications/PosterBoard.app/PosterBoard.inj
-
-# the wrapper takes the place of the real binary and starts .inj (after two quick crashes: .orig)
 cp /usr/local/libexec/pbwrap /Applications/PosterBoard.app/PosterBoard
 chmod 755 /Applications/PosterBoard.app/PosterBoard
-ls /Applications/PosterBoard.app
-
-# no relaunch here: there is no killall on the phone (boot 2026-11-23). PosterBoard dies 30-70 s after each launch
-# anyway, and launchd starts it again through the wrapper.
-
-# To go back (a later root.cmd, or the same file with these two lines uncommented):
-# cp /Applications/PosterBoard.app/PosterBoard.orig /Applications/PosterBoard.app/PosterBoard

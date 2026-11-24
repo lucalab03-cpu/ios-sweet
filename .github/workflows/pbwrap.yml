@@ -1,9 +1,13 @@
 name: pbwrap
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: runner image (macos-15; macos-15-intel when the arm64 Macs are queued for hours)
+        default: macos-15
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - run: |
@@ -12,6 +16,8 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/pbwrap/pbwrap.c -o pbwrap
           # names for addresses from earlier boots (CRASH and SMP lines), worked out on the phone with dladdr()
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetsym/sweetsym.c -o sweetsym
+          # entitlements of a binary, and which binaries hold one (PosterBoard's RunningBoard refusal, 2026-11-24)
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetents/sweetents.c -o sweetents
           # install-wrap with --patch/--verify (2026-11-16): the copy on the phone came from inject.yml before them
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/inject/install-wrap.c -o install-wrap
           # _bs_set_crash_log_message lives in BoardServices, not in the SDK: the interposition table points at a
@@ -26,9 +32,9 @@ jobs:
           otool -s __DATA __interpose sweetposter.dylib
           otool -s __DATA_CONST __interpose sweetposter.dylib
           nm -u sweetposter.dylib | sort
-          codesign -s - --force sweetroot pbwrap install-wrap sweetsym sweetposter.dylib
+          codesign -s - --force sweetroot pbwrap install-wrap sweetsym sweetents sweetposter.dylib
           mkdir -p drop/usr/local/bin drop/usr/local/libexec drop/usr/lib drop/usr/local/etc drop/var/sweet
-          cp sweetroot install-wrap sweetsym drop/usr/local/bin/
+          cp sweetroot install-wrap sweetsym sweetents drop/usr/local/bin/
           cp pbwrap drop/usr/local/libexec/
           cp sweetposter.dylib drop/usr/lib/
           cp tools/pbwrap/root.cmd drop/var/sweet/
