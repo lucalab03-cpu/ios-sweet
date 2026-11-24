@@ -127,6 +127,16 @@ sweetsym.txt, sweetboot.log) come from that. Ask for a fresh fetch under a new n
   fetch18 (fresh command, new name) is again the 17:37 outbox (md5 ed0a9fb9...): the phone's outbox is not refreshed.
 - **payload-l2** = payload-l + `sweetfb_noconsole=0` (kernel text on the screen): a photo/video of the last lines
   tells where DMA fails. Recommended order: payload-k first (shader cache, stable), then l2 for one minute.
+- **payload-l2 photos (22:18, user, 14 screen photos; log-area not written: md5 8d752fef = the 21:51 boot's):**
+  `SWEET EMMC: bounce buffer at 0x14485c000 is above 4 GiB, DMA_SA_H4BIT test reads 0xf`;
+  **`DMA self-test OK: 128 KiB in 14489 us (PIO) vs 993 us (DMA)`** -> PIO is ~9 MB/s, DMA ~130 MB/s (15x).
+  Then the first real reads: `DMA read of 32 sectors at 0x1a1ddb50 failed (60, int 0x100)` (timeout, only CMDRDY),
+  `DMA read of 8 sectors ... failed (5, int 0)`, `DMA disabled after repeated errors, back to PIO`, but **PIO then
+  fails too** (`read of 8 sectors ... failed (5)`, `controller still busy after DMA`): the controller stays stuck,
+  HFS journal replay fails, `write of 8 sectors ... failed (5)` (nothing written), `cannot mount root, errno = 19`.
+  The disk was not changed by l/l2 (writes failed; DMA data was never used unverified). Next: after a DMA failure
+  reset/re-init the MSDC so PIO works again; find why a 1-BD 16 KiB read times out after the 4-BD self-test passed
+  (buffer above 4 GiB: check the high address bits in GPD/BD as mtk-sd.c sets them).
 
 ### 2026-11-24 19:40: payload-j booted (observed), where the time goes, and round k (CI running)
 
