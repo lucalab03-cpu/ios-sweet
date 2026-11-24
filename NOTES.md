@@ -14,6 +14,38 @@ The user again (2026-11-24): **everything has to work as on a real iPhone** - no
 done. Order of work stays: the graphics base first (GPU speed, app switcher, wallpaper, status bar), then the hardware
 (Wi-Fi, audio, Bluetooth, cellular, camera, sensors, battery), then the move to iOS 27.
 
+### The checklist (the iOSOnAnd tracker's areas, user 2026-11-24) and where the lamu stands
+
+The user's list of what has to work. State from our own logs and the user's eyes, 2026-11-24 18:10
+(payload-i, iOS 16.7.16):
+
+| Area | State | What we have / what is missing |
+| --- | --- | --- |
+| Boot to Home Screen | works | go-ios.sh from Android; home, lock screen (clock, date, "100% Charged"), App Library |
+| SpringBoard stability | in progress | runs; crashed at launch in CoreTelephony without CommCenter; Messages/Photos launch to black; "Waiting..." under icons |
+| GPU compositing | in progress | Mali-G52 at 823 MHz, metal2 + PanVK, job queue; **3-10 fps** (0142 for the chain latency), CPU copy 12 ms/frame, black flashes reduced (0140/0141), wallpaper black |
+| Metal acceleration | in progress | backboardd, PosterBoard and apps (metal.allow) get the device; mtltest passes |
+| OpenGL ES acceleration | unknown | Gallium/panfrost GLES built (gltest, shadertest pass) but not wired for apps |
+| Auto-brightness | not started | no ambient light sensor; backlight fixed |
+| Touch + buttons | works | ILITEK touch, power and volume keys |
+| Keyboard input | unknown | not tried |
+| Haptics | not started | vibrator (Android: leds-vibrator) |
+| Sensors (general) | not started | sensor hub (accelhub, gyrohub, alspshub in the Android dump) |
+| Audio output | not started | VirtualAudio disabled; mediaserverd crashes in VideoToolbox |
+| Camera capture | not started | |
+| Video encode (HEVC) | not started | |
+| Wi-Fi | not started | MT6768 CONNSYS (wlan_drv_gen4m_6768, wmt_drv); references: a22-5g fork's redwood_a22wifi.c, wifi-x6826b.md |
+| Bluetooth | not started | CONNSYS bt_drv_connac1x |
+| Cellular modem / Phone calls / SMS | not started | CCCI modem (MOLY.LR12A.R3.MP.V340.4.P43); CommCenter removed from the image |
+| Battery reporting | partial | "100% Charged" shown: a fixed answer, not the MT6358 fuel gauge |
+| Thermals under load | not started | GPU fixed at 823 MHz, no throttling |
+| Passcode | unknown | |
+| Face ID | not applicable | no hardware (fingerprint reader instead: fpc/goodix) |
+| Wallet | unknown | |
+| (ours) Date and time | broken | lock screen shows 1969-12-31: no RTC (MT6358 RTC through the PMIC wrapper) |
+| (ours) Wallpaper | broken | PosterBoard: RunningBoard refuses posterkit.host -> assert; mediaserverd needed |
+| (ours) Settings > About | broken | hangs (main thread in a dispatch wait) |
+
 ### Reaching iOS 27
 
 The present work (iOS 16.7.16, xnu-8796, iPhone X files) is the base. Prior art for the jump: HakiOS
