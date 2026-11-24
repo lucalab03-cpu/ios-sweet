@@ -7,6 +7,14 @@ apply
 # the last crash of PosterBoard (and of SpringBoard), whatever its date, into the outbox
 newest /var/mobile/Library/Logs/CrashReporter PosterBoard /var/tmp/sweetcrash.PosterBoard.log
 newest /var/mobile/Library/Logs/CrashReporter SpringBoard /var/tmp/sweetcrash.SpringBoard.log
+newest /var/mobile/Library/Logs/CrashReporter Preferences /var/tmp/sweetcrash.Preferences.log
+
+# names for the addresses of earlier boots' crashes and stack samples (tools/sweetsym; /var/sweet/sym.in comes with
+# the dropbox): /var/tmp/sweetsym.txt, fetched with the outbox
+run /usr/local/bin/sweetsym /var/sweet/sym.in /var/tmp/sweetsym.txt
+
+# the queued GPU mode back on (2026-11-24: the app switcher froze without it too, so it was not the cause)
+rm /var/sweet/mali-sync-off
 
 # the untouched binary, kept once (cp -n never overwrites what an earlier boot made)
 cp -n /Applications/PosterBoard.app/PosterBoard /Applications/PosterBoard.app/PosterBoard.orig
