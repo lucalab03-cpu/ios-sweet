@@ -20,6 +20,11 @@ The user again (2026-11-24): **everything has to work as on a real iPhone** - no
 done. Order of work stays: the graphics base first (GPU speed, app switcher, wallpaper, status bar), then the hardware
 (Wi-Fi, audio, Bluetooth, cellular, camera, sensors, battery), then the move to iOS 27.
 
+**Final form (user, 2026-11-25 00:10):** a **flashable zip, installed like an Android ROM**, and it must be perfect:
+the user must be able to **set it up and use it like a real iPhone** (first-run setup included: today's image
+skips Setup through purplebuddy/activation tweaks, image v14). Everything done by hand now (go-ios.sh from Android,
+GPU OPP/cpufreq pinning, dropbox drops, root.cmd fixes, boot-args) has to end up inside that package.
+
 ### The checklist (the iOSOnAnd tracker's areas, user 2026-11-24) and where the lamu stands
 
 The user's list of what has to work. State from our own logs and the user's eyes, 2026-11-24 18:10
