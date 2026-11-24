@@ -65,6 +65,11 @@ Open, in order:
   User: more fluid, but text looks low quality, some glitches in the top right corner, **status bar still red**,
   wallpaper still black. MobileGestaltHelper asked the display size (sel 8) but the MG disk cache (keyed by build and
   UUID only) keeps the old 720-wide screen: `drop-mg` removes it (root.cmd), the boot after reads the new one.
+- drop-mg found **no MobileGestalt cache** at `systemgroup.com.apple.mobilegestaltcache/...` (the directory does not
+  exist on this image), so the cache is not what keeps the red bar. The ADT's **`/product/artwork-device-subtype` is
+  0x984 = 2436 (iPhone X)**, with `artwork-scale-factor` 3: UIKit picks status bar providers by that subtype, and a
+  2436 subtype does not fit a 414x896 pt @2x screen. Next payload: subtype **1792 (0x700, iPhone XR/11)**, and a second
+  one also with artwork-scale-factor 2 (the real XR's; risk: the image's assets are thinned for @3x).
 - **0139**: the downscale averages the two neighbouring presented pixels where a panel pixel's centre falls between
   them (a quarter to three quarters), per axis, with a packed 4-channel average (`sweetfb_filter`, default 1).
 
