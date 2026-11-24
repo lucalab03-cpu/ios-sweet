@@ -96,6 +96,32 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 22:10: payload-k first boot -- the profiler's first answers (observed), payload-l (ufsdma=1, NOT run)
+
+Log-area of the 21:51 boot (payload-k, drop-k applied during it; first boot of the new PanVK/driver, caches empty).
+The uploaded fetch (d6ff3aed) is **byte-identical** to the fetches of 17:37, 18:10 and 19:02 (md5 ed0a9fb9...): the
+outbox has not been refreshed since the 17:37 boot, or the old file was sent. fetch16's "stale" contents (sweetroot.log,
+sweetsym.txt, sweetboot.log) come from that. Ask for a fresh fetch under a new name and what the command prints.
+- **Kernel time (PRF K, symbolized with nm of the bundle's kernel): `emmc_read_sectors` = 55-99% of one CPU in
+  almost every 10 s window for ~4 minutes after boot**, `ufs_write_blocks` up to 42%. The eMMC runs **PIO** (the CPU
+  moves every word through the FIFO, one command at a time): `ufsdma` was never set. Every page-in waits on it.
+  SpringBoard's main thread (tid 253) was 30-39% of a CPU, all in the kernel.
+- `ml_set_interrupts_enabled_with_debug` 20-70%: most likely idle time counted as busy (XNU idles on the blocking
+  thread's context in processor_idle, so the IPI lands where interrupts are re-enabled). Read busy % with that in mind.
+- **backboardd user samples: 73% in libvulkan_panfrost.dylib, 65% of all in `bi_register_allocate`** (Bifrost
+  register allocation), then bi_pack, nir passes: the window server compiles shaders. With the shader cache this
+  should go from the next boot (to verify: mesa/ under /var/sweet/m2v-cache/backboardd.orig).
+- metal2vulkan's own code: under 1% (NBLibrary functionNames, Problem Debug fmt, live_bind).
+- Threads named: metal2vulkan-scheduler, -queue-wait-0, -shader-cache, -completion, -handlers.
+- CPUs 6-7 (A75) the least busy in most windows; CPU 0 the most.
+- Video 21:56: Settings opens to a black card (stuck, first boot), App Library opens. Screenshot: "Waiting..." over
+  Photos and Settings, wallpaper black, 12:55 = the RTC's UTC time shown in Cupertino's zone (21:55 Rome).
+- **Time zone:** the clock is right (RTC UTC), the zone is America/Los_Angeles: SpringBoard's log stamps are 9 h
+  behind. User: set Rome in Settings; else set /var/db/timezone/localtime in a round.
+- **payload-l** = payload-k + `ufsdma=1`: 0115/0117/0118's MSDC descriptor DMA for reads after a self-test (PIO vs
+  DMA on 128 KiB, compared); the first 512 DMA reads are re-read with PIO and compared (mismatch -> DMA off, PIO
+  data used); writes stay PIO (ufsdmaw not set). Look for `SWEET EMMC: DMA self-test` / `DMA verified` in the log.
+
 ### 2026-11-24 19:40: payload-j booted (observed), where the time goes, and round k (CI running)
 
 **Observed (fetch16 + log-area of the 18:56 boot, payload-j = 0142 + 0143):**
