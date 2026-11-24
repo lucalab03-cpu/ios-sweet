@@ -58,6 +58,17 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 10:52: the user's Android dump (NOT in git: it holds serial numbers)
+
+- `sweetdump.tgz` (made 2026-11-15 on Android 15 for the lamu, `motorola/lamul_ge/lamul:15/VVTA35.51-153`, kernel
+  6.6.139-android15): dmesg, logcat, getprop, the live FDT (`fdt.dtb`), iomem/interrupts/memblock, platform devices
+  and drivers, i2c/spi devices, all 257 kernel modules (.ko: wlan_drv_gen4m_6768, wmt_drv, bt_drv_connac1x,
+  gps_drv_stp, fmradio_drv_mt6631, ccci_* modem, sensors hubs, camera, fingerprint, audio...), vendor/etc (init rc,
+  audio policy and aurisys XML, wpa_supplicant, modem/VoLTE rc), dumpsys of audio/battery/display/input/power/
+  sensors/telephony/wifi, asound cards, thermal, power_supply. Baseband MOLY.LR12A.R3.MP.V340.4.P43. The reference
+  for the hardware work (Wi-Fi/BT/GPS through the CONNSYS WMT, modem through CCCI, audio, sensors). Ask the user for
+  it again in a new session; it was unpacked in that session's scratch space only.
+
 ### 2026-11-24 10:20: the app-switcher "freeze" explained (observed: video IMG_0450, log-area 9, sweetsym)
 
 - Not a freeze: it **recovers by itself** after a while (user's video). The switcher shows the Settings card and a
