@@ -65,7 +65,7 @@ jobs:
         run: |
           set -e
           mkdir -p out
-          if [ -d in/xnu-kernel ]; then mkdir -p out/kernel && cp -R in/xnu-kernel/. out/kernel/; fi
+          if [ -d in/xnu-kernel ]; then mkdir -p out/kernel && cp in/xnu-kernel/kernel.development.sweet out/kernel/; fi  # the kernel only (the .link tree is 130 MB)
           if [ -d in/panvk-ios ]; then
             mkdir -p out/drop/usr/local/lib
             cp in/panvk-ios/usr/local/lib/libvulkan_panfrost.dylib out/drop/usr/local/lib/
