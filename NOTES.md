@@ -58,6 +58,16 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 16:40: first iPhone-11-screen boot (payload-f, 0138) and patch 0139 (written, NOT built)
+
+- Observed: `SWEET FB: AppleCLCD 720x1604 ... presented as 828x1792 (scaled, 326 ppi), vsync time, time, count`;
+  backboardd draws 828x1792 surfaces; GPU 823 MHz, queued; Settings launched without crashing (apps have Metal).
+  User: more fluid, but text looks low quality, some glitches in the top right corner, **status bar still red**,
+  wallpaper still black. MobileGestaltHelper asked the display size (sel 8) but the MG disk cache (keyed by build and
+  UUID only) keeps the old 720-wide screen: `drop-mg` removes it (root.cmd), the boot after reads the new one.
+- **0139**: the downscale averages the two neighbouring presented pixels where a panel pixel's centre falls between
+  them (a quarter to three quarters), per axis, with a packed 4-channel average (`sweetfb_filter`, default 1).
+
 ### 2026-11-24 11:10: Messages/Settings crash in CoreImage; patch 0138 (iPhone 11 screen, vsync) (written, NOT built)
 
 - Boot 10:55 (payload-e, drop-sym4), user: **the app switcher now works** (moved through it and closed apps).

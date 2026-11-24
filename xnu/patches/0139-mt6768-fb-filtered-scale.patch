@@ -1,0 +1,101 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 4cf0a29..c407df5 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -445,6 +445,15 @@ AppleCLCD::swap(const uint8_t *rec)
+ }
+ 
+ static uint32_t sweet_fb_xmap[2048];
++static uint8_t sweet_fb_xblend[2048];
++static int sweet_fb_filter = -1;
++
++/* Two BGRA pixels averaged, all four channels at once (each loses its lowest bit). */
++static inline uint32_t
++sweet_fb_avg(uint32_t a, uint32_t b)
++{
++	return ((a >> 1) & 0x7f7f7f7fu) + ((b >> 1) & 0x7f7f7f7fu) + (a & b & 0x01010101u);
++}
+ 
+ /* Nearest-neighbour blit of a logical-display rectangle onto the panel. */
+ void
+@@ -485,18 +494,77 @@ AppleCLCD::scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe,
+ 	if (Y1 > (int32_t)fHeight) {
+ 		Y1 = (int32_t)fHeight;
+ 	}
++	/*
++	 * Patch 0139: where a panel pixel's centre falls between two presented pixels (a quarter to three quarters of the
++	 * way), it gets their average, in each direction (boot-arg sweetfb_filter, default 1; 0 = nearest neighbour).
++	 * Nearest neighbour alone drops every 7th column and row of an 828x1792 display on the 720x1604 panel: text looked
++	 * ragged (user, 2026-11-24). The average costs a shift and a mask per pixel, no per-channel arithmetic.
++	 */
++	if (sweet_fb_filter < 0) {
++		int f = 1;
++		PE_parse_boot_argn("sweetfb_filter", &f, sizeof(f));
++		sweet_fb_filter = f != 0;
++	}
+ 	for (int32_t X = X0; X < X1; X++) {
+-		int32_t i = (int32_t)(((int64_t)(2 * X + 1) * LW) / (2 * PW)) - dx;
++		int64_t pos = (((int64_t)(2 * X + 1) * LW) << 7) / PW - 128;     /* centre, 1/256 presented pixel */
++		int32_t i = (int32_t)(pos >> 8) - dx;
++		uint32_t frac = (uint32_t)(pos & 255);
++		uint8_t blend = 0;
++
++		if (pos < 0) {
++			i = -dx;
++			frac = 0;
++		}
++		if (frac > 192) {
++			i++;
++		} else if (frac >= 64 && sweet_fb_filter) {
++			blend = 1;
++		}
+ 		i = i < 0 ? 0 : (i > w - 1 ? w - 1 : i);
++		if (i == w - 1) {
++			blend = 0;
++		}
+ 		sweet_fb_xmap[X - X0] = (uint32_t)(sx + i);
++		sweet_fb_xblend[X - X0] = blend;
+ 	}
+ 	for (int32_t Y = Y0; Y < Y1; Y++) {
+-		int32_t j = (int32_t)(((int64_t)(2 * Y + 1) * LH) / (2 * PH)) - dy;
++		int64_t pos = (((int64_t)(2 * Y + 1) * LH) << 7) / PH - 128;
++		int32_t j = (int32_t)(pos >> 8) - dy;
++		uint32_t frac = (uint32_t)(pos & 255);
++		bool blendY = false;
++
++		if (pos < 0) {
++			j = -dy;
++			frac = 0;
++		}
++		if (frac > 192) {
++			j++;
++		} else if (frac >= 64 && sweet_fb_filter) {
++			blendY = true;
++		}
+ 		j = j < 0 ? 0 : (j > h - 1 ? h - 1 : j);
++		if (j == h - 1) {
++			blendY = false;
++		}
+ 		const uint32_t *srow = (const uint32_t *)(src + s->offset + (uint64_t)(sy + j) * s->bytesPerRow);
++		const uint32_t *nrow = (const uint32_t *)((uintptr_t)srow + (blendY ? s->bytesPerRow : 0));
+ 		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)Y * fRowBytes);
+ 		for (int32_t X = X0; X < X1; X++) {
+-			drow[X] = srow[sweet_fb_xmap[X - X0]];
++			uint32_t at = sweet_fb_xmap[X - X0];
++			uint32_t p = srow[at];
++
++			if (sweet_fb_xblend[X - X0]) {
++				p = sweet_fb_avg(p, srow[at + 1]);
++			}
++			if (blendY) {
++				uint32_t q = nrow[at];
++
++				if (sweet_fb_xblend[X - X0]) {
++					q = sweet_fb_avg(q, nrow[at + 1]);
++				}
++				p = sweet_fb_avg(p, q);
++			}
++			drow[X] = p;
+ 		}
+ 	}
+ }
