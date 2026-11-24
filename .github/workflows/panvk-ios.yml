@@ -58,7 +58,7 @@ jobs:
             -Dbuildtype=release -Dsweet-ios=true -Dvulkan-drivers=panfrost -Dgallium-drivers= -Dplatforms= \
             -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
             -Dllvm=disabled -Dmesa-clc=system -Dprecomp-compiler=system -Dspirv-tools=disabled \
-            -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled \
+            -Dshader-cache=enabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled \
             -Dvalgrind=disabled -Dlibunwind=disabled -Dtools= -Dbuild-tests=false -Dvideo-codecs= -Dvulkan-layers= \
             > ../ios-setup.log 2>&1 \
             || { grep -iE "error|not found" ../ios-setup.log | tail -12 | sed 's/^/::error::ios setup: /'; tail -80 ../ios-setup.log; exit 1; }
@@ -75,6 +75,8 @@ jobs:
           mkdir -p drop/usr/local/lib drop/usr/local/bin drop/usr/local/etc
           cp "$lib" drop/usr/local/lib/libvulkan_panfrost.dylib
           install_name_tool -id /usr/local/lib/libvulkan_panfrost.dylib drop/usr/local/lib/libvulkan_panfrost.dylib
+          # the same file before strip, for naming the profiler's addresses (kernel 0144); not for the phone
+          mkdir -p symbols && cp drop/usr/local/lib/libvulkan_panfrost.dylib symbols/
           # local symbols out: the dropbox and sweet-boot have to carry less (exports stay)
           echo "driver before strip: $(stat -f %z drop/usr/local/lib/libvulkan_panfrost.dylib) bytes"
           strip -x drop/usr/local/lib/libvulkan_panfrost.dylib
@@ -104,6 +106,10 @@ jobs:
         with:
           name: panvk-ios
           path: drop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panvk-ios-symbols
+          path: symbols
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -94,6 +94,8 @@ jobs:
             '-Wl,-U,_OBJC_CLASS_$__MTLDevice' '-Wl,-U,_OBJC_METACLASS_$__MTLDevice' -o "$B/SweetMTLDriver" > bundle.log 2>&1 \
             || { grep -E "error" bundle.log | sort -u | head -30 | sed 's/^/::error::bundle: /'; head -80 bundle.log; exit 1; }
           grep -v "was built for newer" bundle.log || true
+          # before strip, for naming the profiler's addresses (kernel 0144); not for the phone
+          mkdir -p symbols && cp "$B/SweetMTLDriver" symbols/SweetMTLDriver.unstripped
           strip -x "$B/SweetMTLDriver"
           echo "bundle: $(stat -f %z $B/SweetMTLDriver) bytes"
           nm -m "$B/SweetMTLDriver" | grep "weak external" | grep -v "dynamically looked up" || true
@@ -129,6 +131,10 @@ jobs:
         with:
           name: metal2
           path: drop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metal2-symbols
+          path: symbols
       - uses: actions/upload-artifact@v4
         with:
           name: m2vtest

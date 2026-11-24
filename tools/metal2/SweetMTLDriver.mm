@@ -261,6 +261,19 @@ static void start_telemetry(void)
 				mkdir(cache, 0700);
 			}
 		}
+		/* PanVK's own disk cache of compiled shaders (Mesa built with shader-cache, 2026-11-24): next to
+		 * metal2vulkan's, so a boot does not compile again what the one before did. /var/sweet/no-mesa-cache
+		 * turns it off. The runtime's VkPipeline log feeds the telemetry's "V vkpipe" row (they are made at draws). */
+		if (access("/var/sweet/no-mesa-cache", F_OK) == 0) {
+			setenv("MESA_SHADER_CACHE_DISABLE", "true", 1);
+		} else {
+			char mesa[300];
+			snprintf(mesa, sizeof(mesa), "%s/mesa", cache);
+			mkdir(mesa, 0777);
+			setenv("MESA_SHADER_CACHE_DIR", mesa, 0);
+			setenv("MESA_SHADER_CACHE_MAX_SIZE", "256M", 0);
+		}
+		setenv("METAL2VULKAN_LOG_PIPELINES", "1", 0);
 		uint64_t registryID = 0;
 		IORegistryEntryGetRegistryEntryID(port, &registryID);
 		CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
