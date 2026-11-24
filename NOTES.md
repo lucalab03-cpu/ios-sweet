@@ -115,6 +115,7 @@ Open, in order:
 - CI xnu 45505379353, pbwrap 45505383276; **bundle 45507559261 = `sweet-bundle-o`** (6.6 MB).
 - Plan: payload-o = payload-n-dma + kernel o + `ufsdmaw=1` (io=0x16 removed: it showed nothing); drop-o = root.cmd
   (sweetfind Poster / ExtensionKit) + sweetfind.
+- **Built 00:15:** `out/payload-o.bin` (ufsdma=1 ufsdmaw=1 io=0), `out/drop-o.zip` (root.cmd + sweetfind).
 
 ### 2026-11-24 23:50: payload-n-dma (observed): DMA works, About opens -- new base
 
