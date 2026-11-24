@@ -58,6 +58,22 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 18:15: payload-i (0141) still laggy; why: chain-end latency (patch 0142, written, NOT built)
+
+- Video IMG 18:08 (user): lock screen complete (Wednesday December 31, 4:29, 100% Charged, camera button) -- **date and
+  time wrong (1969-12-31): no RTC read**; App Library works; Safari start page; Phone keypad; Settings > General >
+  About does not open; Messages and Photos launch to black with a spinner for many seconds (MobileSlideShow sig 6
+  this boot); **"Waiting..." under Photos and Settings icons** (SpringBoard thinks they are installing).
+- Presenter stats: **3-10 swaps a second** (104 in 10 s at best); copy 12.3 ms per frame (828x1792 -> 720x1604
+  filtered, on its own thread), GPU wait 2-48 ms average. GPU busy 214-288 ms per 256 chains, chains ~424/s while
+  animating: **~40 chains per frame**, each waiting for the previous one of the same client.
+- Cause (likely): the queue thread slept 200 us between looks with lck_mtx_sleep_deadline, whose timer leeway
+  coalesces that into milliseconds; every chain's end was seen ms late, x40 per frame.
+- **0142**: after starting chains the thread watches JOB_INT_RAWSTAT without the lock for up to `sweetmalispin` us
+  (default 2000, 0 = off; delay(2) steps), then sleeps with `assert_wait_deadline_with_leeway(..., SYS_CRITICAL |
+  LEEWAY, deadline, 0)`; the thread runs at priority 93 (BASEPRI_PREEMPT_HIGH).
+- drop-i was not on the phone this boot (drop-h's root.cmd ran again): sweetents and the About naming still to come.
+
 ### 2026-11-24 17:55: the crash reports themselves (.ips, copied by sweetroot) name exported functions
 
 Read again on the user's prompt: the .ips JSON reports carry `symbol` for exported functions and the last

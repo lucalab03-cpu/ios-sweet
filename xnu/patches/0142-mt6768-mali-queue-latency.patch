@@ -1,0 +1,66 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 5ca78ba..ca4bffa 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -660,6 +660,7 @@ static int queue_thread_chan, queue_done_chan;
+ static uint32_t queue_holds;                /* sweet_mali_mapped() is waiting for the GPU to be idle, or using it */
+ static bool queue_reset_wanted;
+ static uint64_t queue_timeout;              /* JOB_TIMEOUT_MS in mach_absolute_time units */
++static uint32_t queue_spin_us = 2000;       /* sweetmalispin (0142) */
+ 
+ /* what the queue did, logged every 256 chains (with the GPU time of each slot, and how long the two overlapped) */
+ static struct {
+@@ -897,11 +898,37 @@ queue_thread(void *arg, wait_result_t result)
+ 		start_ready();
+ 		report_stuck();
+ 		if (slots[0].running || slots[1].running) {
++			/*
++			 * Patch 0142: a frame is ~40 chains, each waiting for the one before (boot 2026-11-24 18:05: 10 swaps a
++			 * second, the GPU busy 5-35 % of the time). A 200 us timed sleep is coalesced into milliseconds by the
++			 * timer leeway, and every chain's end waited that long to be seen. Now the register is watched, without
++			 * the lock, for up to sweetmalispin us (default 2000, 0 = off), and the sleep after that has no leeway.
++			 */
++			uint32_t mask = 0;
+ 			uint64_t deadline;
+ 
++			for (uint32_t s = 0; s < 2; s++) {
++				if (slots[s].running) {
++					mask |= (1u << s) | (1u << (s + 16));
++				}
++			}
++			lck_mtx_unlock(&queue_lock);
++			for (uint32_t us = 0; us < queue_spin_us; us += 2) {
++				if (rd(mali, JOB_INT_RAWSTAT) & mask) {
++					break;
++				}
++				delay(2);
++			}
++			lck_mtx_lock(&queue_lock);
++			if (rd(mali, JOB_INT_RAWSTAT) & mask) {
++				continue;
++			}
+ 			clock_interval_to_deadline(POLL_US, NSEC_PER_USEC, &deadline);
+-			(void)lck_mtx_sleep_deadline(&queue_lock, LCK_SLEEP_DEFAULT, (event_t)&queue_thread_chan, THREAD_UNINT,
+-			    deadline);
++			(void)assert_wait_deadline_with_leeway((event_t)&queue_thread_chan, THREAD_UNINT,
++			    TIMEOUT_URGENCY_SYS_CRITICAL | TIMEOUT_URGENCY_LEEWAY, deadline, 0);
++			lck_mtx_unlock(&queue_lock);
++			(void)thread_block(THREAD_CONTINUE_NULL);
++			lck_mtx_lock(&queue_lock);
+ 		} else {
+ 			/* nothing runs: woken by a SUBMIT or the end of a hold; a chain whose dependency never finishes is
+ 			 * looked at again every 10 ms */
+@@ -1031,10 +1058,12 @@ queue_start(void)
+ 	thread_t thread;
+ 
+ 	(void)PE_parse_boot_argn("sweetmaliasync", &on, sizeof(on));
++	(void)PE_parse_boot_argn("sweetmalispin", &queue_spin_us, sizeof(queue_spin_us));
+ 	nanoseconds_to_absolutetime((uint64_t)JOB_TIMEOUT_MS * NSEC_PER_MSEC, &queue_timeout);
+ 	slots[0].js = JS0;
+ 	slots[1].js = JS1;
+-	if (on && kernel_thread_start(queue_thread, NULL, &thread) == KERN_SUCCESS) {
++	/* 0142: above ordinary kernel threads (BASEPRI_PREEMPT_HIGH, 93): frames wait on it */
++	if (on && kernel_thread_start_priority(queue_thread, NULL, 93, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 		queue_mode = 1;
+ 		printf("SWEET MALI: job queue on: chains run while their programs go on, both slots at once\n");
