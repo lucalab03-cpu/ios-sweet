@@ -1145,3 +1145,11 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+### 2026-11-25 00:50 — round p ready (bundle sweet-bundle-p, run 45512090043)
+- Kernel 45509511439: 0149 (presenter reads each source row once), 0150 (profiler: kernel pcs per target, `PRF KT`).
+- pbwrap 45509676296 now also builds sweet-boot with the streamed outbox (256 KB buffer instead of a 32 MB static one,
+  which got it jetsam-killed at its per-process limit and left stale fetches).
+- payload-p = payload-o + this kernel, `sweetfb_fbcache=0 sweetquiet=20`.
+- drop-p: root.cmd runs sweetsym on backboardd's hottest shared-cache pcs (sym-o.in, slide 0x1b248000) and sweetfind for
+  the poster extensions. Purpose: last data before the GPU fixes (blur shader translations, per-frame CPU cost, slot overlap).
