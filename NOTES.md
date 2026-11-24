@@ -58,6 +58,22 @@ Open, in order:
 3. **Real syncobjs and async submit** (Vulkan phase 4), then the rest of the GPU clients (SpringBoard,
    apps, WebKit) instead of only the `/var/sweet/metal.allow` list.
 
+### 2026-11-24 10:20: the app-switcher "freeze" explained (observed: video IMG_0450, log-area 9, sweetsym)
+
+- Not a freeze: it **recovers by itself** after a while (user's video). The switcher shows the Settings card and a
+  black **Messages** card with a spinner dot: **MobileSMS crashes at launch, twice, SIGSEGV with pc 0** (a call
+  through a NULL pointer; lr unslid 0x194b3858c, same in both). During the stall, sample 2: SpringBoard's main thread
+  inside a synchronous mach_msg with a deep UIKit/SpringBoard stack; sample 3 on: main thread idle in its run loop.
+  0137 logged **no GPU wait** of a second: the GPU path is cleared.
+- **tools/sweetsym** works (run by sweetroot, `/var/sweet/sym.in` in, `/var/tmp/sweetsym.txt` out); local symbols are
+  `<redacted>` in the device's shared cache, so only exported names and the image come back. Found:
+  - SpringBoard SIGSEGV (boot 01:10): in **CoreTelephony** `_CTServerConnectionRegisterForEvent`, called from
+    SystemStatusServer (status bar data) -> CommCenter (cellular) is missing or not answering.
+  - PosterBoard SIGTRAP: PosterBoard's own code, reached through PosterBoardServices <- BoardServices
+    `BSXPCServiceConnectionExecuteCallOut` (an XPC call from SpringBoard: the prewarm path, as known).
+  - Settings SIGTRAP: in **PodcastsUI** on a dispatch queue (the Podcasts settings bundle), not in About itself.
+- Next naming round: drop-sym2 (sym.in with MobileSMS's crash and the samples of this boot).
+
 ### 2026-11-24 01:30: boots with 0136 at 823 MHz (observed) and patch 0137 (written, NOT run)
 
 - **0136 boots (payload-c.bin, `echo 0 > /proc/gpufreqv2/fix_target_opp_index` before go-ios.sh):** `GPU clock 823 MHz
