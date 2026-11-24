@@ -1,0 +1,97 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -422,14 +422,14 @@
+ 	flush_dcache64(su.dma_pa, DMA_BOUNCE, 1);
+ 	flush_dcache64(buf_pa, len, 1);
+ 
++	/*
++	 * Patch 0147: the order of mtk-sd.c. The command goes first (PIO bit cleared, msdc_cmd_prepare_raw_cmd), and the
++	 * DMA engine is programmed and started only once the command's response is in (msdc_cmd_next ->
++	 * msdc_start_data -> msdc_dma_setup -> DMA_CTRL_START). Before, START came first and msdc_cmd() then cleared the
++	 * FIFO and the interrupts under a running engine: the 4-descriptor self-test passed, every real read after it
++	 * timed out with only CMDRDY (boots of 2026-11-24 22:16-23:00), and the touch's SPI died after it.
++	 */
+ 	ufs_wr(M_CFG, ufs_rd(M_CFG) & ~CFG_PIO);
+-	ufs_wr(M_DMA_CFG, ufs_rd(M_DMA_CFG) | DMA_CFG_DECSEN);
+-	ufs_wr(M_DMA_CTRL, (ufs_rd(M_DMA_CTRL) & ~(DMA_BURST_MASK | DMA_CTRL_START | DMA_CTRL_STOP)) |
+-	    DMA_BURST_64B | DMA_CTRL_DESC);
+-	ufs_wr(M_DMA_H4, (ufs_rd(M_DMA_H4) & ~0xfu) | H4(gpd_pa));
+-	ufs_wr(M_DMA_SA, (uint32_t)gpd_pa);
+-	ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_START);
+-
+ 	if (write) {
+ 		error = msdc_cmd(nsec == 1 ? 24 : 25, sector, 1, nsec == 1 ? 1 : 2, nsec,
+ 		    CMD_WRITE | (nsec == 1 ? 0 : CMD_AUTO12), NULL);
+@@ -438,6 +438,12 @@
+ 		    nsec == 1 ? 0 : CMD_AUTO12, NULL);
+ 	}
+ 	if (!error) {
++		ufs_wr(M_DMA_CFG, ufs_rd(M_DMA_CFG) | DMA_CFG_DECSEN);
++		ufs_wr(M_DMA_CTRL, (ufs_rd(M_DMA_CTRL) & ~(DMA_BURST_MASK | DMA_CTRL_START | DMA_CTRL_STOP)) |
++		    DMA_BURST_64B | DMA_CTRL_DESC);
++		ufs_wr(M_DMA_H4, (ufs_rd(M_DMA_H4) & ~0xfu) | H4(gpd_pa));
++		ufs_wr(M_DMA_SA, (uint32_t)gpd_pa);
++		ufs_wr(M_DMA_CTRL, ufs_rd(M_DMA_CTRL) | DMA_CTRL_START);
+ 		nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
+ 		deadline += mach_absolute_time();
+ 		for (;;) {
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -9,6 +9,8 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <kern/thread.h>
++#include <pexpert/pexpert.h>
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -22,6 +24,34 @@
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+ 
++/*
++ * Patch 0147: IOPlatformExpertDevice keeps a busy count of 1 for ever (tools/sweetbusy, boot of 2026-11-24 22:58:
++ * "BUSY IOPlatformExpertDevice "D22AP" busy 1", IOKitWaitQuiet NOT quiet; 197 services, no other one busy). configd's
++ * InterfaceNamer waits for IOKit to go quiet, and Settings > General > About waits for it
++ * (_SCNetworkInterfaceCopyAllWithPreferences -> SCDynamicStoreNotifyWait). After sweetquiet seconds (default 90,
++ * 0 = never) whatever busy count the device still has is logged and released. Which matching holds it shows with
++ * boot-arg io=0x16 (probe, start, match).
++ */
++static void
++sweet_pe_quiet(void *arg, wait_result_t wr)
++{
++	IOService *device = (IOService *)arg;
++	int secs = 90;
++
++	(void)wr;
++	PE_parse_boot_argn("sweetquiet", &secs, sizeof(secs));
++	if (secs > 0) {
++		IOSleep((unsigned)secs * 1000);
++		UInt32 busy = device->getBusyState();
++		IOLog("SWEET: %s busy %u after %d s%s\n", device->getName(), (unsigned)busy, secs,
++		    busy ? ": released, so that IOKit goes quiet" : "");
++		if (busy != 0) {
++			device->adjustBusy(-(SInt32)busy);
++		}
++	}
++	device->release();
++}
++
+ bool
+ SweetPlatformExpert::start(IOService *provider)
+ {
+@@ -31,6 +61,13 @@
+ 	}
+ 	registerService();
+ 	IOLog("SWEET: platform expert registered\n");
++	thread_t quiet;
++	provider->retain();
++	if (kernel_thread_start(sweet_pe_quiet, provider, &quiet) == KERN_SUCCESS) {
++		thread_deallocate(quiet);
++	} else {
++		provider->release();
++	}
+ 	return true;
+ }
+ 
