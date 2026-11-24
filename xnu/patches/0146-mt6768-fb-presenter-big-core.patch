@@ -1,0 +1,34 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -40,6 +40,10 @@
+ /* bsd/dev/sweet_mali.c: the GPU job queue (patches 0135, 0140) */
+ extern "C" void sweet_mali_submitted(uint64_t out[2]);
+ extern "C" bool sweet_mali_fence_done(uint64_t fence);
++/* osfmk/kern: the presenter's copy goes to a big core (0146) */
++extern "C" processor_t cpu_to_processor(int cpu);
++extern "C" processor_t thread_bind(processor_t processor);
++extern "C" int ml_get_max_cpu_number(void);
+ extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first);
+ 
+ #if defined(SWEET)
+@@ -461,6 +465,20 @@
+ 	if (rec == NULL) {
+ 		return;
+ 	}
++	/*
++	 * Patch 0146: the copy is CPU-bound (12.4 ms a frame: a gather, up to three averages and a write per panel pixel,
++	 * on whichever core the scheduler picked, mostly a Cortex-A55). The MT6768's CPUs 6 and 7 are its Cortex-A75s
++	 * (mpidr 0x600/0x700): bind this thread to one (boot-arg sweetfb_cpu, default 7; -1 = anywhere).
++	 */
++	int cpu = 7;
++	PE_parse_boot_argn("sweetfb_cpu", &cpu, sizeof(cpu));
++	if (cpu >= 0 && cpu <= ml_get_max_cpu_number()) {
++		processor_t p = cpu_to_processor(cpu);
++		if (p != NULL) {
++			(void)thread_bind(p);
++			IOLog("SWEET FB: presenter bound to CPU %d\n", cpu);
++		}
++	}
+ 	IOLockLock(fLock);
+ 	for (;;) {
+ 		while (!fDirty || fPowerOff) {
