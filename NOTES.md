@@ -145,6 +145,8 @@ Open, in order:
 - `bundle.yml` (ubuntu): one zip from the three runs (kernel, drop/ with the dylib and driver bundle, symbols).
 - `out/drop-k` (not in git): root.cmd round k (PosterBoard.orig back, sweetents on 4 files only, sweetsym for
   the b13 About sample, cache listings), sym.in, sweetents/sweetsym/sweetroot, sweet-boot.list.
+- **CI green:** xnu 45460278746 (0144 compiled, warnings only), panvk-ios 45461624501 (shader-cache enabled, every
+  load-time lookup an entrypoint), metal2 45461628248; **bundle 45464521058 = `sweet-bundle-k` (34 MB)** for the user.
 - Payload-k plan: payload-j's boot-args with `sweetsample=Preferences` (About's blocked main thread),
   `sweetnull=-`, `sweetprof=backboardd.orig,SpringBoard`. **Not done: Preferences out of metal.allow** (without
   Metal, Settings crashes in CoreImage at launch, tools/metal-allow/README.md).
