@@ -1,0 +1,37 @@
+--- a/bsd/dev/sweet_prof.c
++++ b/bsd/dev/sweet_prof.c
+@@ -81,7 +81,7 @@
+ 	uint32_t total, user, kernel, lost;
+ 	uint32_t cpu[PROF_CPUS];
+ 	struct count tids[NTIDS];
+-	struct count leaf[TABLE], caller[TABLE];
++	struct count leaf[TABLE], caller[TABLE], kern[TABLE];   /* kern: 0150, its own kernel pcs */
+ 	uint64_t images_sig;
+ };
+ 
+@@ -353,6 +353,7 @@
+ 		}
+ 		print_counts("L", t->name, t->leaf, TABLE, 48, true);
+ 		print_counts("C", t->name, t->caller, TABLE, 48, true);
++		print_counts("KT", t->name, t->kern, TABLE, 24, true);
+ 	}
+ 	print_counts("K", "kernel", kpcs, TABLE, 32, true);
+ 	if (kpc_lost) {
+@@ -367,6 +368,7 @@
+ 		bzero(t->tids, sizeof(t->tids));
+ 		bzero(t->leaf, sizeof(t->leaf));
+ 		bzero(t->caller, sizeof(t->caller));
++		bzero(t->kern, sizeof(t->kern));
+ 	}
+ 	bzero(kpcs, sizeof(kpcs));
+ 	bzero(pids, sizeof(pids));
+@@ -405,6 +407,9 @@
+ 		}
+ 		t->cpu[c]++;
+ 		bump_small(t->tids, NTIDS, h->tid);
++		if (!(h->flags & PH_USER) && h->kpc != 0 && !bump(t->kern, TABLE, h->kpc)) {
++			t->lost++;
++		}
+ 		if (h->pc == 0) {
+ 			return;
+ 		}
