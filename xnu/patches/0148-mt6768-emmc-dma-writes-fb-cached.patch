@@ -1,0 +1,146 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -128,6 +128,7 @@
+ 	bool use_dma;                           /* boot-arg ufsdma=1 and the self-test passed */
+ 	bool dma_write;                         /* boot-arg ufsdmaw=1: also write with DMA (default: PIO) */
+ 	unsigned dma_verify;                    /* boot-arg ufsdmaverify=N: re-read the first N DMA reads with PIO */
++	unsigned dma_wverify;                   /* boot-arg ufsdmawverify=N: read back the first N DMA writes with PIO */
+ 	unsigned dma_fail;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+@@ -570,14 +571,43 @@
+ 		return EINVAL;
+ 	}
+ 	if (su.use_dma && su.dma_write) {
++		/*
++		 * Patch 0148: DMA writes, read back with PIO and compared for the first dma_wverify of them. On a mismatch,
++		 * a failed read-back or a DMA error the sectors are written again with PIO (the whole range, so whatever the
++		 * DMA left there is overwritten) and DMA writes stay off; DMA reads go on.
++		 */
++		uint8_t *data = (uint8_t *)(su.dma + DMA_BOUNCE);
++		uint32_t bytes = nsec * EMMC_SECTOR;
++		bool check = su.dma_wverify > 0;
++
++		if (check) {
++			memcpy(sw_dma_verify, data, bytes);
++		}
+ 		error = msdc_dma_xfer((uint32_t)sector, nsec, true);
+-		if (!error) {
++		if (!error && !check) {
+ 			return 0;
+ 		}
+-		if (++su.dma_fail >= 1) {
++		if (!error) {
++			bool reads = su.use_dma;
++
++			su.dma_wverify--;
+ 			su.use_dma = false;
+-			printf("SWEET EMMC: DMA disabled after an error, back to PIO\n");
++			int perr = emmc_read_sectors(sector, nsec);
++			su.use_dma = reads;
++			bool same = perr == 0 && memcmp(sw_dma_verify, data, bytes) == 0;
++			memcpy(data, sw_dma_verify, bytes);
++			if (same) {
++				if (su.dma_wverify == 0) {
++					printf("SWEET EMMC: DMA writes verified on all checked writes, no more checks\n");
++				}
++				return 0;
++			}
++			printf("SWEET EMMC: DMA write read-back %s (%u sectors at 0x%llx): rewriting with PIO, DMA writes off\n",
++			    perr ? "failed" : "MISMATCH", nsec, sector);
++		} else {
++			printf("SWEET EMMC: DMA write failed (%d): rewriting with PIO, DMA writes off\n", error);
+ 		}
++		su.dma_write = false;
+ 	}
+ 	if (nsec == 1) {
+ 		error = msdc_cmd(24, (uint32_t)sector, 1, 1, 1, CMD_WRITE, NULL);
+@@ -1003,6 +1033,10 @@
+ 	if (PE_parse_boot_argn("ufsdmaw", &v, sizeof(v))) {
+ 		su.dma_write = (v == 1);
+ 	}
++	su.dma_wverify = 1024;
++	if (PE_parse_boot_argn("ufsdmawverify", &v, sizeof(v))) {
++		su.dma_wverify = v;
++	}
+ 	printf("SWEET EMMC: DMA self-test OK: 128 KiB in %llu us (PIO) vs %llu us (DMA); DMA enabled (reads verified: %u, DMA writes: %s)\n",
+ 	    us_pio, us_dma, su.dma_verify, su.dma_write ? "on" : "off");
+ }
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -202,6 +202,8 @@
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
+ 	bool          fScale;                   /* scale logical -> panel (default) */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
++	IOMemoryMap  *fCachedMap;       /* 0148: a cached mapping of it (sweetfb_fbcache, default 1) */
++	void          flushPanel(uint32_t y0, uint32_t y1);
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+ 	IOLock       *fLock;            /* swaps and client list */
+@@ -343,6 +345,22 @@
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	/*
++	 * Patch 0148: the copy wrote the panel through a write-combined mapping, 4 bytes at a time: 11.5 ms a frame on an
++	 * A75 at 2 GHz as on an A55 at 1.7 (boot of 2026-11-24 23:00), so the stores, not the arithmetic, set the pace.
++	 * Write through a cached mapping instead and clean the rows written to memory once the frame is in
++	 * (flushPanel). boot-arg sweetfb_fbcache=0 keeps the write-combined mapping.
++	 */
++	int fbcache = 1;
++	PE_parse_boot_argn("sweetfb_fbcache", &fbcache, sizeof(fbcache));
++	if (fbcache && fSurface != NULL && fSurface->memory != NULL) {
++		fCachedMap = fSurface->memory->map(kIOMapCopybackCache);
++		if (fCachedMap != NULL) {
++			fPixels = (uintptr_t)fCachedMap->getVirtualAddress();
++		}
++		IOLog("SWEET FB: panel memory %s\n", fCachedMap != NULL ? "mapped cached (cleaned after each frame)" :
++		    "stays write-combined (no cached mapping)");
++	}
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
+@@ -422,6 +440,7 @@
+ 					row[x] = step < 6 ? (row[x] >> 1) & 0x7f7f7f7f : 0;
+ 				}
+ 			}
++			fb->flushPanel(0, fb->fHeight);
+ 		}
+ 		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
+ 		return;
+@@ -656,6 +675,19 @@
+ 
+ /* Nearest-neighbour blit of a logical-display rectangle onto the panel. */
+ void
++AppleCLCD::flushPanel(uint32_t y0, uint32_t y1)
++{
++	if (fCachedMap == NULL || y1 <= y0) {
++		return;
++	}
++	if (y1 > fHeight) {
++		y1 = fHeight;
++	}
++	IOFlushProcessorCache(kernel_task, (IOVirtualAddress)(fPixels + (uint64_t)y0 * fRowBytes),
++	    (IOByteCount)(y1 - y0) * fRowBytes);
++}
++
++void
+ AppleCLCD::scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe,
+     int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h)
+ {
+@@ -766,6 +798,7 @@
+ 			drow[X] = p;
+ 		}
+ 	}
++	flushPanel((uint32_t)Y0, (uint32_t)Y1);
+ }
+ 
+ void
+@@ -861,6 +894,7 @@
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
++			flushPanel((uint32_t)dy, (uint32_t)(dy + h));
+ 		}
+ 		s->release();
+ 	}
