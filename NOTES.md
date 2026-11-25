@@ -1282,3 +1282,16 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - Round y: bundle y (run 45716478753, kernel sha256 388bc46c...), `payload-s.bin` = payload-r's ADT and boot-args + this
   kernel (sha256 445b2bee...), drop-y = bundle drop + /var/sweet/gl (noinject stays on the phone -> orig + DYLD_INSERT).
   Look for: "SWEET AMFI: dyld policy asked (backboardd...)", sweetgl.log in backboardd.orig, "boot-arg state asked".
+
+### 2026-11-26 00:40 — round y observed: GL in backboardd.orig, SIGSEGV memmove 0x30; 0154 for round z
+- 0153 works: "SWEET AMFI: dyld policy asked (launchd): everything allowed", "boot-arg state asked (lsd): not
+  enforcing"; libsweet-gl is in backboardd.orig (PRF I image list), HID clients fine. CoreAnimation made its
+  OpenGL ES 3.1 context (Mali-G52 Panfrost), compiled shaders, attached the 828x1792 BGRA target, then died: three
+  times `CRASH backboardd.orig sig 11 ... pc _platform_memmove+0xb0 far 0x30`, bt all QuartzCore. Fallback Metal.
+- Cause (from pixel3-ios, same 20H392, built on our SweetSurface): the GL renderer calls IOSurfaceWrapClientImage
+  (IOSurfaceRootUserClient selector 6) -- kernel log shows "SWEET SURF: backboardd.orig sel 6" right before the
+  crash -- and our externalMethod's default case answered success with a zeroed reply (state page at 0).
+- **0154**: selector 6 wraps the caller's range (IOMemoryDescriptor::withAddressRange + prepare, completed in
+  free), IOSurfaceAddress creates likewise (app icons were going to be blank). Boot-arg sweetsurfwrap=0 = refuse.
+- eagl.c: crash recorder (registers, dladdr callers, last 32 GL calls) and /var/sweet/glargs (extra switches).
+- Builds: xnu 45719688793, mesa-ios 45719030800, bundle z 45721118706.
