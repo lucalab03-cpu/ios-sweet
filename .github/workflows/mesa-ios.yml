@@ -1,16 +1,30 @@
 name: mesa-ios
+# Gallium/Panfrost (Mesa 25.0.7, OSMesa) for iOS over SweetMali, and CoreAnimation's OpenGL ES behind it
+# (tools/sweetgl, from HakiOS): libOSMesa.8.dylib with OpenGL ES contexts and IOSurface textures, libsweet-gl.dylib
+# (our EAGLContext for the window server), gltest and drawtest, and the backboardd wrapper and sweetinject that
+# load it when /var/sweet/gl exists.
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: runner label (macos-15-intel when the arm64 Macs are queued)
+        required: false
+        default: macos-15
+  push:
+    paths:
+      - 'tools/mesa-ios/**'
+      - 'tools/sweetgl/**'
+      - '.github/workflows/mesa-ios.yml'
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ${{ inputs.runner || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - name: Tools
         run: |
           brew install meson ninja bison flex pkg-config python-setuptools
           pip3 install --break-system-packages mako pyyaml packaging || pip3 install mako pyyaml packaging
-          echo "/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix)/opt/bison/bin:$(brew --prefix)/opt/flex/bin" >> $GITHUB_PATH
       - name: Mesa 25.0.7
         run: |
           curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-25.0.7.tar.xz
@@ -19,12 +33,11 @@ jobs:
           python3 -I tools/mesa-ios/patch-mesa.py "$PWD/mesa-25.0.7" "$PWD/tools/mesa-ios"
       - name: Configure
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.app
           cd mesa-25.0.7
           meson setup build --cross-file ../tools/mesa-ios/ios.cross --prefix /usr/local \
             -Dbuildtype=release -Dsweet-ios=true -Dgallium-drivers=panfrost,softpipe \
             -Dvulkan-drivers= -Dllvm=disabled -Dplatforms= -Dglx=disabled -Degl=disabled -Dgbm=disabled \
-            -Dgles1=disabled -Dgles2=disabled -Dopengl=true -Dosmesa=true -Dshared-glapi=enabled \
+            -Dgles1=disabled -Dgles2=enabled -Dopengl=true -Dosmesa=true -Dshared-glapi=enabled \
             -Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled -Dlmsensors=disabled -Dvalgrind=disabled \
             -Dlibunwind=disabled -Dgallium-va=disabled -Dgallium-vdpau=disabled -Dgallium-xa=disabled \
             -Dtools= -Dbuild-tests=false -Dmesa-clc=auto -Dprecomp-compiler=auto \
@@ -32,23 +45,35 @@ jobs:
       - name: Build
         run: |
           cd mesa-25.0.7
-          ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib
-      - name: Test program and package
+          ninja -C build src/gallium/targets/osmesa/libOSMesa.8.dylib 2>&1 | tail -150
+          test -f build/src/gallium/targets/osmesa/libOSMesa.8.dylib
+      - name: libsweet-gl, tests, wrapper
         run: |
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/mesa-ios/gltest/gltest.c -framework IOKit -o gltest
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetboot/sweet-boot.c -o sweet-boot
-          mkdir -p out/usr/local/lib out/usr/local/bin
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/cpubench/cpubench.c -o cpubench
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -Itools/sweetaccel tools/sweetaccel/sweetaccel-d.c -framework IOKit -o sweetaccel-d
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/metaltest/metaltest.c -o metaltest
-          cp sweet-boot cpubench sweetaccel-d metaltest out/usr/local/bin/
-          cp tools/sweetboot/pack-dropbox.py out/
-          cp mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib out/usr/local/lib/
-          cp gltest out/usr/local/bin/
+          set -e
+          C="xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0"
+          M=mesa-25.0.7/build/src/gallium/targets/osmesa/libOSMesa.8.dylib
+          mkdir -p obj out/usr/local/lib out/usr/local/bin out/usr/local/libexec out/usr/lib
+          cp $M out/usr/local/lib/
           install_name_tool -id /usr/local/lib/libOSMesa.8.dylib out/usr/local/lib/libOSMesa.8.dylib
-          otool -L out/usr/local/lib/libOSMesa.8.dylib
-          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/bin/gltest out/usr/local/bin/sweet-boot out/usr/local/bin/cpubench out/usr/local/bin/sweetaccel-d out/usr/local/bin/metaltest
-          ls -l out/usr/local/lib out/usr/local/bin
+          # the gl* functions it exports, for mkeagl.py
+          nm -gU out/usr/local/lib/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ {print substr($3, 2)}' | sort -u > obj/exported-gl.txt
+          wc -l obj/exported-gl.txt
+          grep -c "glEGLImageTargetTexture2DOES" obj/exported-gl.txt || echo "::warning::no glEGLImageTargetTexture2DOES export"
+          python3 tools/sweetgl/mkeagl.py tools/sweetgl/eagl_slots.txt mesa-25.0.7/src/mapi/glapi/registry/gl.xml \
+            obj/exported-gl.txt tools/sweetgl/eagl.c > obj/eagl_gen.h
+          $C -O2 -dynamiclib -install_name /usr/local/lib/libsweet-gl.dylib -Iobj -Itools/sweetgl \
+            -Wno-deprecated-declarations -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc \
+            out/usr/local/lib/libOSMesa.8.dylib -o out/usr/local/lib/libsweet-gl.dylib \
+            tools/sweetgl/eagl.c tools/sweetgl/gl_osmesa.c 2>&1 | grep -v "warning: " | head -80
+          test -f out/usr/local/lib/libsweet-gl.dylib
+          $C -O1 tools/mesa-ios/gltest/gltest.c -framework IOKit -o out/usr/local/bin/gltest
+          $C -O1 tools/drawtest/drawtest.c -o out/usr/local/bin/drawtest
+          $C -O1 tools/inject/backboardd-wrap.c -o out/usr/local/libexec/backboardd-wrap
+          $C -dynamiclib tools/inject/sweetinject.c -install_name /usr/lib/sweetinject.dylib -o out/usr/lib/sweetinject.dylib
+          codesign -s - --force out/usr/local/lib/libOSMesa.8.dylib out/usr/local/lib/libsweet-gl.dylib \
+            out/usr/local/bin/gltest out/usr/local/bin/drawtest out/usr/local/libexec/backboardd-wrap out/usr/lib/sweetinject.dylib
+          otool -L out/usr/local/lib/libsweet-gl.dylib
+          ls -lR out
       - uses: actions/upload-artifact@v4
         with:
           name: mesa-ios

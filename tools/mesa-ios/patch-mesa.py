@@ -19,12 +19,12 @@ def sub_once(path, old, new):
         sys.exit("patch-mesa: %s: anchor found %d times, expected 1:\n%s" % (path, s.count(old), old))
     wr(path, s.replace(old, new))
 
-# 1. the shim goes in the tree, and `dep_libdrm` becomes it
+# 1. the shim goes in the tree, and `dep_libdrm` becomes it. 2026-11-25: PanVK's shim (tools/panvk-ios/sweet-drm), the
+#    one that is kept up to date: write-combined mappings (the old one mapped cached, and drawtest read zeros), queued
+#    SUBMITs, the kernel's syncobjs, host-page imports (IOSurfaces for glEGLImageTargetTexture2DOES).
 dst = os.path.join(mesa, 'src/sweet-drm')
 shutil.rmtree(dst, ignore_errors=True)
-os.makedirs(dst)
-for n in ('xf86drm.h', 'sweet.drm.c'):
-    shutil.copy(os.path.join(shim, 'sweet-drm', n), dst)
+shutil.copytree(os.path.join(shim, '..', 'panvk-ios', 'sweet-drm'), dst)
 with open(os.path.join(dst, 'meson.build'), 'w') as f:
     f.write("""libsweetdrm = static_library(
   'sweetdrm', 'sweet.drm.c',
@@ -35,7 +35,7 @@ with open(os.path.join(dst, 'meson.build'), 'w') as f:
 dep_libdrm = declare_dependency(
   include_directories : include_directories('.'),
   link_with : libsweetdrm,
-  link_args : ['-framework', 'IOKit'],
+  link_args : ['-framework', 'IOKit', '-framework', 'IOSurface', '-framework', 'CoreFoundation'],
 )
 """)
 
@@ -83,7 +83,7 @@ sub_once('src/panfrost/lib/kmod/pan_kmod.h',
                        mmap_offset + bo_offset);
 """,
 """#ifdef SWEET_IOS
-   host_addr = sweet_drm_mmap(size, mmap_offset + bo_offset);
+   host_addr = sweet_os_mmap(host_addr, size, prot, flags, bo->dev->fd, mmap_offset + bo_offset);
 #else
    host_addr = os_mmap(host_addr, size, prot, flags, bo->dev->fd,
                        mmap_offset + bo_offset);
@@ -91,7 +91,7 @@ sub_once('src/panfrost/lib/kmod/pan_kmod.h',
 """)
 s = rd('src/panfrost/lib/kmod/pan_kmod.h')
 i = s.index('#include')
-s = s[:i] + "#ifdef SWEET_IOS\nvoid *sweet_drm_mmap(size_t size, uint64_t offset);\n#endif\n" + s[i:]
+s = s[:i] + "#ifdef SWEET_IOS\n#include <stddef.h>\nvoid *sweet_os_mmap(void *address, size_t size, int prot, int flags, int fd, long long offset);\n#endif\n" + s[i:]
 wr('src/panfrost/lib/kmod/pan_kmod.h', s)
 sub_once('meson.build', "sweet_ios = host_machine.system() == 'darwin' and get_option('sweet-ios')\n",
 "sweet_ios = host_machine.system() == 'darwin' and get_option('sweet-ios')\nif sweet_ios\n  add_project_arguments('-DSWEET_IOS', language : ['c', 'cpp'])\nendif\n")
@@ -99,7 +99,7 @@ sub_once('meson.build', "sweet_ios = host_machine.system() == 'darwin' and get_o
 # 4b. and its unmapping
 sub_once('src/gallium/drivers/panfrost/pan_bo.c',
 "   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n",
-"#ifdef SWEET_IOS\n   if (sweet_drm_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#else\n   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#endif\n")
+"#ifdef SWEET_IOS\n   if (sweet_os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#else\n   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#endif\n")
 
 # 5. the osmesa target: panfrost's screen, software rendering as the fallback
 shutil.copy(os.path.join(shim, "osmesa/sweet_winsys.c"), os.path.join(mesa, "src/gallium/targets/osmesa/sweet_winsys.c"))
@@ -113,4 +113,131 @@ t = t.replace(sub_once_t, sub_once_t + "\n#ifdef SWEET_IOS\n   screen = sweet_pa
 wr('src/gallium/targets/osmesa/osmesa_target.c', t)
 shutil.copy(os.path.join(shim, 'osmesa/sweet_screen.h'), os.path.join(mesa, 'src/gallium/targets/osmesa/sweet_screen.h'))
 sub_once('src/gallium/targets/osmesa/meson.build', "driver_swrast, idep_mesautil,", "driver_swrast, driver_panfrost, dep_libdrm, idep_mesautil,")
+# 4c. pan_bo.c's prototype of the unmapping
+s = rd('src/gallium/drivers/panfrost/pan_bo.c')
+i = s.index('#include')
+s = s[:i] + "#ifdef SWEET_IOS\n#include <stddef.h>\nint sweet_os_munmap(void *address, size_t size);\n#endif\n" + s[i:]
+wr('src/gallium/drivers/panfrost/pan_bo.c', s)
+
+# 4d. an imported buffer's size: a host-page import has no file to seek to the end of (the shim knows its size)
+sub_once('src/panfrost/lib/kmod/pan_kmod.c', "      size_t size = lseek(fd, 0, SEEK_END);\n",
+"""#ifdef SWEET_IOS
+      size_t size = (size_t)sweet_drm_fd_size(fd);
+      if (size == 0)
+         size = lseek(fd, 0, SEEK_END);
+#else
+      size_t size = lseek(fd, 0, SEEK_END);
+#endif
+""")
+s = rd('src/panfrost/lib/kmod/pan_kmod.c')
+i = s.index('#include')
+s = s[:i] + "#ifdef SWEET_IOS\n#include <stdint.h>\nuint64_t sweet_drm_fd_size(int fd);\n#endif\n" + s[i:]
+wr('src/panfrost/lib/kmod/pan_kmod.c', s)
+
+# 6. OpenGL ES contexts from OSMesa (tools/sweetgl/osmesa-es-profile.patch, from HakiOS): CoreAnimation's OpenGL ES
+#    renderer asks EAGL for API 3, and tools/sweetgl/gl_osmesa.c makes it an OSMesa context of the ES profile.
+import subprocess
+r = subprocess.run(['patch', '-p1', '-N', '-i', os.path.join(shim, '..', 'sweetgl', 'osmesa-es-profile.patch')],
+                   cwd=mesa, capture_output=True, text=True)
+if r.returncode != 0:
+    sys.exit("patch-mesa: osmesa-es-profile.patch: " + r.stdout + r.stderr)
+
+# 7. glEGLImageTargetTexture2DOES with an IOSurface's ID as the image (as HakiOS does it): the texture is the surface's
+#    own memory, imported page by page (SweetMali IMPORT_HOST). osmesa_surface_resource() is in the target below.
+sub_once('src/gallium/frontends/osmesa/osmesa.c', "extern struct pipe_screen *\nosmesa_create_screen(void);\n",
+"""extern struct pipe_screen *
+osmesa_create_screen(void);
+
+extern struct pipe_resource *
+osmesa_surface_resource(struct pipe_screen *screen, uint32_t surface);
+
+/* ios-sweet: there is no EGL here; what glEGLImageTargetTexture2DOES is given is an IOSurface's ID */
+static bool
+osmesa_st_get_egl_image(struct pipe_frontend_screen *fscreen, void *image, struct st_egl_image *out)
+{
+   out->texture = osmesa_surface_resource(fscreen->screen, (uint32_t)(uintptr_t)image);
+   if (!out->texture)
+      return false;
+   out->format = out->texture->format;
+   return true;
+}
+
+static bool
+osmesa_st_validate_egl_image(struct pipe_frontend_screen *fscreen, void *image)
+{
+   (void)fscreen;
+   return image != NULL;
+}
+""")
+sub_once('src/gallium/frontends/osmesa/osmesa.c', "      global_fscreen->get_egl_image = NULL;\n",
+"      global_fscreen->get_egl_image = osmesa_st_get_egl_image;\n      global_fscreen->validate_egl_image = osmesa_st_validate_egl_image;\n")
+
+t = rd('src/gallium/targets/osmesa/osmesa_target.c')
+anchor = "struct pipe_screen *\nosmesa_create_screen(void);\n"
+assert t.count(anchor) == 1, "osmesa_target.c: osmesa_create_screen prototype"
+t = t.replace(anchor, """#include "frontend/winsys_handle.h"
+#include "pipe/p_screen.h"
+#include "pipe/p_state.h"
+#include <unistd.h>
+
+#ifdef SWEET_IOS
+#include <IOSurface/IOSurfaceRef.h>
+int sweet_drm_import_host(void *address, uint64_t size);
+void sweet_drm_forget_fd(int fd);
+#endif
+
+struct pipe_resource *
+osmesa_surface_resource(struct pipe_screen *screen, uint32_t surface);
+
+/*
+ * ios-sweet: an IOSurface of this process as a texture to draw with and into, its own memory (no copy): one plane of
+ * 32-bit pixels, blue first, page-aligned; its pages imported into the GPU's address space (SweetMali IMPORT_HOST).
+ * NULL: not such a surface, or the screen is the software one; eagl.c then copies.
+ */
+struct pipe_resource *
+osmesa_surface_resource(struct pipe_screen *screen, uint32_t surface)
+{
+#ifdef SWEET_IOS
+   IOSurfaceRef s = IOSurfaceLookup(surface);
+   struct pipe_resource *resource = NULL;
+   if (s == NULL)
+      return NULL;
+   void *base = IOSurfaceGetBaseAddress(s);
+   size_t alloc = IOSurfaceGetAllocSize(s), size = (alloc + 16383) & ~(size_t)16383;
+   if (IOSurfaceGetPixelFormat(s) == 0x42475241 /* 'BGRA' */ && IOSurfaceGetPlaneCount(s) <= 1 && base != NULL &&
+       ((uintptr_t)base & 16383) == 0 && screen->resource_from_handle != NULL) {
+      int fd = sweet_drm_import_host(base, size);
+      if (fd >= 0) {
+         struct pipe_resource templ = {
+            .target = PIPE_TEXTURE_2D,
+            .format = PIPE_FORMAT_B8G8R8A8_UNORM,
+            .width0 = (unsigned)IOSurfaceGetWidth(s),
+            .height0 = (uint16_t)IOSurfaceGetHeight(s),
+            .depth0 = 1,
+            .array_size = 1,
+            .bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET,
+         };
+         struct winsys_handle handle = { .type = WINSYS_HANDLE_TYPE_FD };
+         handle.handle = (unsigned)fd;
+         handle.stride = (unsigned)IOSurfaceGetBytesPerRow(s);
+         handle.offset = 0;
+         handle.size = size;
+         resource = screen->resource_from_handle(screen, &templ, &handle, 0);
+         sweet_drm_forget_fd(fd);
+      }
+   }
+   CFRelease(s);
+   return resource;
+#else
+   (void)screen;
+   (void)surface;
+   return NULL;
+#endif
+}
+
+""" + anchor, 1)
+wr('src/gallium/targets/osmesa/osmesa_target.c', t)
+sub_once('src/gallium/targets/osmesa/meson.build', "driver_swrast, driver_panfrost, dep_libdrm, idep_mesautil,",
+         "driver_swrast, driver_panfrost, dep_libdrm, idep_mesautil,")
+
 print("patch-mesa: ok")

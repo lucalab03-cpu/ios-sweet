@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -49,6 +50,12 @@ __attribute__((constructor)) static void init(void)
 	c = fopen("/var/tmp/sweetinject.count", "w"); if (c) { fprintf(c, "%d\n", launches); fclose(c); }
 	_NSGetExecutablePath(path, &sz);
 	say("inject: loaded in pid %d uid %d exe %s (launch %d)\n", (int)getpid(), (int)getuid(), path, launches);
+	/* 2026-11-25: CoreAnimation on OpenGL ES (tools/sweetgl): backboardd-wrap set SWEET_GL; our EAGLContext comes in
+	 * here, before the window server makes its first context */
+	if (getenv("SWEET_GL") != NULL) {
+		void *gl = dlopen("/usr/local/lib/libsweet-gl.dylib", RTLD_NOW | RTLD_GLOBAL);
+		say("inject: libsweet-gl %s%s\n", gl ? "loaded" : "not loaded: ", gl ? "" : dlerror());
+	}
 	pthread_t t;
 	if (pthread_create(&t, NULL, probe, NULL) == 0) pthread_detach(t);
 }

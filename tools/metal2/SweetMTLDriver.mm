@@ -77,6 +77,12 @@ static bool allowed(void)
 	if (answer >= 0)
 		return answer;
 	const char *me = getprogname();
+	/* 2026-11-25: the window server with our OpenGL ES (backboardd-wrap set SWEET_GL=1 and inserted libsweet-gl):
+	 * no Metal device for it, so CoreAnimation takes its OpenGL ES renderer. */
+	if (getenv("SWEET_GL") != NULL && !strncmp(me, "backboardd", 10)) {
+		answer = 0;
+		return false;
+	}
 	FILE *f = fopen("/var/sweet/metal.allow", "r");
 	bool yes = false;
 	if (!f) {
