@@ -1153,3 +1153,23 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - payload-p = payload-o + this kernel, `sweetfb_fbcache=0 sweetquiet=20`.
 - drop-p: root.cmd runs sweetsym on backboardd's hottest shared-cache pcs (sym-o.in, slide 0x1b248000) and sweetfind for
   the poster extensions. Purpose: last data before the GPU fixes (blur shader translations, per-frame CPU cost, slot overlap).
+
+### 2026-11-25 01:05 — payload-p observed; the GPU bottleneck is cache maintenance (0151, 0152)
+- Fetch stale again: the old sweet-boot ran first, installed the new one, then was jetsam-killed writing the outbox.
+  The next boot runs the new one.
+- Presenter copy 13.4 ms of which source rows 1.65 ms: the reads were not the cost, the per-pixel work is (0152).
+- Swaps while animating: 71 in 10 s (~7 fps). backboardd up to ~50-70% of one CPU, about half in the kernel.
+- `PRF KT backboardd.orig` (0150): clean_mmu_dcache 38%, ml_set_interrupts_enabled 22% (samples deferred to the
+  interrupt re-enable, i.e. the set/way clean), CleanPoC_DcacheRegion 14%, SweetMaliUserClient::submit 7%.
+  Cause: every queued SUBMIT cleaned all imported pages (36 imports, 14.3 MB, two 5.9 MB surfaces), every wait
+  invalidated them; above c_bulksize_op that is a set/way clean of the local core only (also not SMP-correct).
+- User leaf 61% at mach_msg2_trap+8 (unslid 0x1c2611030): the IOKit calls into that kernel time.
+- Mali: GPU ~40% busy, slots never overlap, 823 MHz: the GPU waits for the CPU.
+- **0151**: mode bit 2 (`kSweetMode` 3): the client keeps its imported pages coherent; the kernel skips the per-SUBMIT
+  clean and the post-wait invalidate. Boot-arg `sweetmaliself=0` refuses it. PanVK's sweet.drm.c asks for mode 3 when
+  `SWEET_MALI_SELF_COHERENT=1` (falls back to 1 on an old kernel). SweetMTLDriver sets it unless
+  `/var/sweet/mali-kernel-clean` exists. The frontend's flushSurfaces now also cleans/invalidates (DC CIVAC by address,
+  at commit and at finish) the no-copy buffers, buffers over surfaces and textures on such buffers among the command's
+  resources.
+- **0152**: scaled blit without per-pixel branches (avg(p,p) == p; second index precomputed; vertical blend per row).
+- Fallbacks if the picture breaks: drop `/var/sweet/mali-kernel-clean` (one file) or boot-arg `sweetmaliself=0`.
