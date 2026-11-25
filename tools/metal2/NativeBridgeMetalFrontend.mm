@@ -1802,6 +1802,13 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load(),(unsigned long long)gFlushClamped.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
+ {
+  uint64_t z[11]={};nmb_split_reasons(z);
+  row("Z split%llu img%llu sto%llu loc%llu ref%llu sh%llu st%llu vw%llu dsp%llu bar%llu ord%llu",
+   (unsigned long long)z[0],(unsigned long long)z[1],(unsigned long long)z[2],(unsigned long long)z[3],(unsigned long long)z[4],
+   (unsigned long long)z[5],(unsigned long long)z[6],(unsigned long long)z[7],(unsigned long long)z[8],(unsigned long long)z[9],
+   (unsigned long long)z[10]);
+ }
  uint64_t work[10]={};
  if(gDevice && nmb_device_work_stats(gDevice,work)) {
   row("V vkpipe n=%llu total=%llums max=%llums waited=%llums failed=%llu",

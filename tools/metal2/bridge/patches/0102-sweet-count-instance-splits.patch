@@ -1,0 +1,55 @@
+diff --git a/crates/metal2vulkan-runtime/src/lib.rs b/crates/metal2vulkan-runtime/src/lib.rs
+index 4781491b2..829513b5f 100644
+--- a/crates/metal2vulkan-runtime/src/lib.rs
++++ b/crates/metal2vulkan-runtime/src/lib.rs
+@@ -23,6 +23,16 @@
+ // warnings-denied gates.
+ #![warn(missing_docs)]
+ 
++/// ios-sweet (2026-11-25): why render passes split into instances (`render.rs`, `next_instance`), counted for the
++/// Metal driver's telemetry: [new instances, images stand in, storage, locations, reformats, shadow, shader tests,
++/// views, dispatched, barrier, ordered].
++pub static SWEET_SPLITS: [std::sync::atomic::AtomicU64; 11] = [
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++    std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0),
++];
++
+ mod address;
+ mod address_map;
+ mod address_pool;
+diff --git a/crates/metal2vulkan-runtime/src/render.rs b/crates/metal2vulkan-runtime/src/render.rs
+index 119119d87..9bc0a82db 100644
+--- a/crates/metal2vulkan-runtime/src/render.rs
++++ b/crates/metal2vulkan-runtime/src/render.rs
+@@ -4584,6 +4584,29 @@ impl RenderCommandEncoder {
+             standing.push(Standing::Hidden(target));
+         }
+         let images = standing.iter().any(|s| !matches!(s, Standing::Planes(..)));
++        {
++            use std::sync::atomic::Ordering::Relaxed;
++            let reasons = [
++                images,
++                self.current.shape.storage != storage,
++                self.current.shape.locations != locations,
++                !Reformat::same(&self.current.reformats, reformats),
++                self.current.shadow != shadow,
++                self.current.shader_tests != shader_tests,
++                self.current.views != views,
++                self.dispatched,
++                self.barrier,
++                ordered,
++            ];
++            if reasons.iter().any(|r| *r) {
++                crate::SWEET_SPLITS[0].fetch_add(1, Relaxed);
++                for (i, r) in reasons.iter().enumerate() {
++                    if *r {
++                        crate::SWEET_SPLITS[i + 1].fetch_add(1, Relaxed);
++                    }
++                }
++            }
++        }
+         if !images
+             && self.current.shape.storage == storage
+             && self.current.shape.locations == locations

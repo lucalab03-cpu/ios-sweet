@@ -226,6 +226,22 @@ fn observe_message(message: &DebugMessage) {
     }
 }
 
+/// ios-sweet: why render passes split into instances (bridge patch 0102), eleven words: new instances, then the count
+/// of each reason (images stand in, storage, locations, reformats, shadow, shader tests, views, dispatched, barrier,
+/// ordered).
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_split_reasons(out: *mut u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: the caller's eleven words.
+    let out = unsafe { std::slice::from_raw_parts_mut(out, 11) };
+    for (i, v) in metal2vulkan_runtime::SWEET_SPLITS.iter().enumerate() {
+        out[i] = v.load(Relaxed);
+    }
+}
+
 /// The sink's counts into the caller's ten words: pipeline makings (count, total us, longest us, waited us, failed), messages (info,
 /// warning or worse), and the device's shader cache hits, misses and writes.
 #[unsafe(no_mangle)]
