@@ -1803,6 +1803,15 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
  {
+  // PanVK's batches by call site (sweet.drm.c sweet_drm_batch_sites): offsets in libvulkan_panfrost.dylib.
+  static int (*sites)(unsigned long long *,int)=[]{
+   void *image=dlopen("/usr/local/lib/libvulkan_panfrost.dylib",RTLD_NOLOAD|RTLD_LAZY);
+   return (int (*)(unsigned long long *,int))(image?dlsym(image,"sweet_drm_batch_sites"):nullptr);
+  }();
+  unsigned long long y[5*10]={};const int n=sites?sites(y,10):0;
+  for(int i=0;i<n;i++)row("Y%d %llx<%llx n%llu f%llu v%llu",i,y[5*i],y[5*i+1],y[5*i+2],y[5*i+3],y[5*i+4]);
+ }
+ {
   uint64_t z[11]={};nmb_split_reasons(z);
   row("Z split%llu img%llu sto%llu loc%llu ref%llu sh%llu st%llu vw%llu dsp%llu bar%llu ord%llu",
    (unsigned long long)z[0],(unsigned long long)z[1],(unsigned long long)z[2],(unsigned long long)z[3],(unsigned long long)z[4],

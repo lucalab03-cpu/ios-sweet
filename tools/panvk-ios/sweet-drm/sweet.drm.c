@@ -84,6 +84,64 @@ sweet_drm_submits(void)
 	return atomic_load_explicit(&sweet_submits, memory_order_relaxed);
 }
 
+/*
+ * PanVK's closed batches by call site (patch-panvk.py 3h): (caller, caller's caller) -> batches, with a fragment
+ * job, with vertex/tiler jobs. sweet_drm_batch_sites writes up to `max` sites, busiest first, five words each:
+ * the two return addresses as offsets in this image, then the three counts; it returns how many it wrote.
+ */
+#include <dlfcn.h>
+struct batch_site { uintptr_t a0, a1; unsigned long long n, frag, vtc; };
+static struct batch_site batch_sites[64];
+static pthread_mutex_t batch_lock = PTHREAD_MUTEX_INITIALIZER;
+__attribute__((visibility("default"))) void sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc);
+__attribute__((visibility("default"))) void
+sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc)
+{
+	pthread_mutex_lock(&batch_lock);
+	for (int i = 0; i < 64; i++) {
+		struct batch_site *b = &batch_sites[i];
+		if (b->n == 0 || (b->a0 == (uintptr_t)a0 && b->a1 == (uintptr_t)a1)) {
+			b->a0 = (uintptr_t)a0;
+			b->a1 = (uintptr_t)a1;
+			b->n++;
+			b->frag += frag != 0;
+			b->vtc += vtc != 0;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&batch_lock);
+}
+__attribute__((visibility("default"))) int sweet_drm_batch_sites(unsigned long long *out, int max);
+__attribute__((visibility("default"))) int
+sweet_drm_batch_sites(unsigned long long *out, int max)
+{
+	struct batch_site copy[64];
+	Dl_info info;
+	uintptr_t base = 0;
+	int n = 0;
+
+	if (dladdr((const void *)sweet_drm_batch_sites, &info) != 0)
+		base = (uintptr_t)info.dli_fbase;
+	pthread_mutex_lock(&batch_lock);
+	memcpy(copy, batch_sites, sizeof(copy));
+	pthread_mutex_unlock(&batch_lock);
+	for (; n < max; n++) {
+		int best = -1;
+		for (int i = 0; i < 64; i++)
+			if (copy[i].n != 0 && (best < 0 || copy[i].n > copy[best].n))
+				best = i;
+		if (best < 0)
+			break;
+		out[5 * n + 0] = copy[best].a0 - base;
+		out[5 * n + 1] = copy[best].a1 - base;
+		out[5 * n + 2] = copy[best].n;
+		out[5 * n + 3] = copy[best].frag;
+		out[5 * n + 4] = copy[best].vtc;
+		copy[best].n = 0;
+	}
+	return n;
+}
+
 /* A short trace of what Mesa asks of the GPU: lines on stderr and in /var/tmp/sweetdrm.log. */
 static atomic_int trace_lines;
 static void

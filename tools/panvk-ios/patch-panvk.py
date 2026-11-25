@@ -302,6 +302,33 @@ if s.count(old) != 1:
 wr('src/panfrost/vulkan/panvk_vX_physical_device.c', s.replace(old,
    "#ifdef SWEET_IOS\n      .rasterizationOrderColorAttachmentAccess = PAN_ARCH >= 10 || (PAN_ARCH >= 7 && !getenv(\"SWEET_NO_FBFETCH\")),\n#else\n" + old + "#endif\n"))
 
+# 3h. Where PanVK's job batches come from (2026-11-25: 2 chains for a one-pass commit, 24-63 for those of 4-11
+#     passes, about half a chain more per draw): every closed batch is counted by its caller and the caller's
+#     caller, with whether it has a fragment job and vertex/tiler jobs (sweet.drm.c: sweet_drm_note_batch; the
+#     Metal driver prints the busiest sites in its telemetry's Y rows, as offsets in this image).
+sub_once('src/panfrost/vulkan/jm/panvk_vX_cmd_buffer.c',
+"""   struct panvk_batch *batch = cmdbuf->cur_batch;
+
+   if (!batch)
+      return;
+
+   assert(batch);
+""",
+"""   struct panvk_batch *batch = cmdbuf->cur_batch;
+
+   if (!batch)
+      return;
+
+#ifdef SWEET_IOS
+   {
+      extern void sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc);
+      sweet_drm_note_batch(__builtin_return_address(0), __builtin_return_address(1),
+                           batch->fb.desc.gpu != 0, batch->vtc_jc.first_job != 0);
+   }
+#endif
+   assert(batch);
+""")
+
 # 4. iOS has no Vulkan loader: the driver itself exports vkGetInstanceProcAddr (the metal2vulkan bridge opens
 #    the driver as its loader, as ios-flame does with Turnip).
 s = rd('src/panfrost/vulkan/panvk_instance.c')
