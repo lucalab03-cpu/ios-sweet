@@ -1279,3 +1279,6 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   HakiOS kern_minimac.c -- likely PosterBoard's missing poster extensions). Boot-arg sweetamfidyld=0 = old behaviour.
 - Wrapper: GL path back on backboardd.orig via DYLD_INSERT_LIBRARIES (gl = count <= 2 && /var/sweet/gl).
 - Builds: xnu 45714408289, mesa-ios 45714410957.
+- Round y: bundle y (run 45716478753, kernel sha256 388bc46c...), `payload-s.bin` = payload-r's ADT and boot-args + this
+  kernel (sha256 445b2bee...), drop-y = bundle drop + /var/sweet/gl (noinject stays on the phone -> orig + DYLD_INSERT).
+  Look for: "SWEET AMFI: dyld policy asked (backboardd...)", sweetgl.log in backboardd.orig, "boot-arg state asked".
