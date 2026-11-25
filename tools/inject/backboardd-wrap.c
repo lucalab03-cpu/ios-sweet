@@ -36,9 +36,12 @@ int main(int argc, char **argv)
 	 * driver gives backboardd no device then, so CoreAnimation takes its OpenGL ES renderer). Two crashes in a row
 	 * (count above) end with the untouched program and no library at all.
 	 */
-	int gl = use_inj && access("/var/sweet/gl", F_OK) == 0 && access("/usr/local/lib/libsweet-gl.dylib", R_OK) == 0;
+	int gl = count <= 2 && access("/var/sweet/gl", F_OK) == 0 && access("/usr/local/lib/libsweet-gl.dylib", R_OK) == 0;
 	if (use_inj && access("/usr/lib/sweetinject.dylib", R_OK) == 0)
 		setenv("DYLD_INSERT_LIBRARIES", gl ? "/usr/lib/sweetinject.dylib:/usr/local/lib/libsweet-gl.dylib" : "/usr/lib/sweetinject.dylib", 1);
+	else if (gl)
+		/* round v: /var/sweet/noinject is on the phone, so the untouched program runs: the library goes in by dyld */
+		setenv("DYLD_INSERT_LIBRARIES", "/usr/local/lib/libsweet-gl.dylib", 1);
 	if (gl)
 		setenv("SWEET_GL", "1", 1);
 	if (gl && (f = fopen("/var/tmp/sweetwrap.log", "a")) != NULL) { fprintf(f, "wrap: OpenGL ES for CoreAnimation (libsweet-gl)\n"); fclose(f); }

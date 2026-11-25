@@ -79,7 +79,8 @@ static bool allowed(void)
 	const char *me = getprogname();
 	/* 2026-11-25: the window server with our OpenGL ES (backboardd-wrap set SWEET_GL=1 and inserted libsweet-gl):
 	 * no Metal device for it, so CoreAnimation takes its OpenGL ES renderer. */
-	if (getenv("SWEET_GL") != NULL && !strncmp(me, "backboardd", 10)) {
+	/* only where the library really came in (dyld may ignore DYLD_INSERT_LIBRARIES): else Metal, as before */
+	if (getenv("SWEET_GL") != NULL && !strncmp(me, "backboardd", 10) && dlsym(RTLD_DEFAULT, "redwood_gl_function_refused") != NULL) {
 		answer = 0;
 		return false;
 	}
