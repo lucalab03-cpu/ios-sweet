@@ -56,7 +56,13 @@ struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t schedul
 // PanVK's count of the job chains it sent (sweet.drm.c), looked up once: a commit's "ch" is how many were sent between
 // its commit and its completion (commits overlap little: each waits for the one before on the GPU).
 static unsigned long long gpuSubmits(void) {
- static unsigned long long (*fn)(void)=(unsigned long long (*)(void))dlsym(RTLD_DEFAULT,"sweet_drm_submits");
+ // The loader opens PanVK RTLD_LOCAL, so RTLD_DEFAULT does not see it (round r: ch0): ask its own image.
+ static unsigned long long (*fn)(void)=[]{
+  void *image=dlopen("/usr/local/lib/libvulkan_panfrost.dylib",RTLD_NOLOAD|RTLD_LAZY);
+  void *f=image?dlsym(image,"sweet_drm_submits"):nullptr;
+  if(!f)f=dlsym(RTLD_DEFAULT,"sweet_drm_submits");
+  return (unsigned long long (*)(void))f;
+ }();
  return fn?fn():0;
 }
 static CommitRecord gCommitRing[32];
@@ -274,6 +280,24 @@ static void hostBufferRange(std::vector<std::pair<uintptr_t,size_t>> &ranges,NBB
  void *contents=nmb_buffer_contents(buffer.handle);const size_t length=nmb_buffer_length(buffer.handle);
  if(contents && length)ranges.emplace_back(reinterpret_cast<uintptr_t>(contents),length);
 }
+// 2026-11-25 11:37 (payload-r): backboardd crashed in sys_dcache_flush from finish(), at the first address past a mapping
+// (far 0x10a304000, mapping 0x10a2e0000-0x10a304000): a range here ran past what is mapped. Only the mapped, readable
+// part of each range is cleaned now, region by region (vm_region_64), and a hole ends the range.
+static std::atomic<uint64_t> gFlushClamped;
+static void flushMapped(uintptr_t start,size_t length) {
+ const uintptr_t end=start+length;
+ uintptr_t at=start;
+ while(at<end) {
+  vm_address_t region=(vm_address_t)at;vm_size_t size=0;
+  vm_region_basic_info_data_64_t info;mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t object=MACH_PORT_NULL;
+  if(vm_region_64(mach_task_self(),&region,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object)!=KERN_SUCCESS){gFlushClamped++;return;}
+  if(object!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),object);
+  if((uintptr_t)region>at || !(info.protection&VM_PROT_READ)){gFlushClamped++;return;}
+  const uintptr_t stop=std::min<uintptr_t>(end,(uintptr_t)region+(uintptr_t)size);
+  sys_dcache_flush(reinterpret_cast<void *>(at),stop-at);
+  at=stop;
+ }
+}
 static void flushSurfaces(NSMutableSet *surfaces,NSMutableSet *owners) {
  if(!surfaces.count && !owners.count)return;
  std::vector<std::pair<uintptr_t,size_t>> ranges;
@@ -290,7 +314,7 @@ static void flushSurfaces(NSMutableSet *surfaces,NSMutableSet *owners) {
  gSurfaceFlushDuplicates+=(uint64_t)(ranges.end()-last);
  for(auto it=ranges.begin();it!=last;++it) {
   const uint64_t began=nowUs();
-  sys_dcache_flush(reinterpret_cast<void *>(it->first),it->second);
+  flushMapped(it->first,it->second);
   gSurfaceFlushBytes+=it->second;gTimeSurfaceFlush.add(began);
  }
 }
@@ -1773,9 +1797,9 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
  row("J completed wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeWaitCompleted.count.load(),ms(gTimeWaitCompleted.total.load()),ms(gTimeWaitCompleted.slowest.load()));
  row("J resource wait n=%llu total=%llums max=%llums",(unsigned long long)gTimeResourceWait.count.load(),ms(gTimeResourceWait.total.load()),ms(gTimeResourceWait.slowest.load()));
  row("J resource checks=%llu skipped=%llu",(unsigned long long)gResourceChecks.load(),(unsigned long long)gResourceSkipped.load());
- row("J surface cache n=%llu bytes=%llu dup=%llu us=%llu max=%llu",(unsigned long long)gTimeSurfaceFlush.count.load(),
+ row("J surface cache n=%llu bytes=%llu dup=%llu us=%llu max=%llu clamped=%llu",(unsigned long long)gTimeSurfaceFlush.count.load(),
   (unsigned long long)gSurfaceFlushBytes.load(),(unsigned long long)gSurfaceFlushDuplicates.load(),
-  (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load());
+  (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load(),(unsigned long long)gFlushClamped.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
  uint64_t work[10]={};
