@@ -4,22 +4,38 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: shell command run inside mesa-26.2.7 (its output goes to the log)
+        description: shell command run inside the Mesa tree (its output goes to the log)
         required: true
+      version:
+        description: Mesa version (26.2.7 patched for PanVK, or 25.0.7 patched for the Gallium build)
+        required: false
+        default: '26.2.7'
 jobs:
   show:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Mesa 26.2.7
+      - name: Mesa
+        env:
+          V: ${{ inputs.version }}
         run: |
-          curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-26.2.7.tar.xz
-          echo "04294f75d22e9f61cd1e050206bc48b3d39366e788f1803a3368e3d5a872ce18  mesa.tar.xz" | sha256sum -c
+          curl -sL --fail --retry 5 -o mesa.tar.xz https://archive.mesa3d.org/mesa-$V.tar.xz
+          case "$V" in
+            26.2.7) echo "04294f75d22e9f61cd1e050206bc48b3d39366e788f1803a3368e3d5a872ce18  mesa.tar.xz" | sha256sum -c ;;
+            25.0.7) echo "592272df3cf01e85e7db300c449df5061092574d099da275d19e97ef0510f8a6  mesa.tar.xz" | sha256sum -c ;;
+            *) echo "unknown version"; exit 1 ;;
+          esac
           tar xJf mesa.tar.xz
-          python3 -I tools/panvk-ios/patch-panvk.py "$PWD/mesa-26.2.7" "$PWD/tools/panvk-ios/sweet-drm" > /dev/null
+          mv mesa-$V mesa-tree
+          if [ "$V" = 26.2.7 ]; then
+            python3 -I tools/panvk-ios/patch-panvk.py "$PWD/mesa-tree" "$PWD/tools/panvk-ios/sweet-drm" > /dev/null
+          else
+            cp -r mesa-tree mesa-pristine
+            python3 -I tools/mesa-ios/patch-mesa.py "$PWD/mesa-tree" "$PWD/tools/mesa-ios" || true
+          fi
       - name: Show
         env:
           CMD: ${{ inputs.cmd }}
         run: |
-          cd mesa-26.2.7
+          cd mesa-tree
           bash -c "$CMD"
