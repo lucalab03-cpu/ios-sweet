@@ -1242,3 +1242,20 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   WindowServer CPU 77% -> 36%; a "surface keep cache" (CA re-wraps the same IOSurfaces every frame; keep the imports)
   took a dragged window 64-69 -> 116 fps. To do for both paths: cache osmesa_surface_resource imports by surface ID,
   and in the Metal frontend reuse textures/imports per surface.
+
+### 2026-11-25 23:40 — research: same-SoC and MediaTek siblings (hackios.appaiproxy.com device list)
+- **0xBEEBAD/hakios-mt6768** (Infinix Hot 20 X6826B, **MT6768 + Mali-G52 MC2, eMMC: our SoC**), HakiOS-based,
+  iOS 16.5. docs/metal-x6826b-plan.md: CoreAnimation through their Metal driver (AIR -> NIR -> Gallium panfrost,
+  no Vulkan) "92-96% of frames within 18 ms opening apps" at 720x1640 scale 2 (fbscale=2 fbfit=3: native panel
+  size, "without it the kernel scales every frame, 7 ms each"), mali_mhz=800; OpenGL ES path (camtl=0) "clean".
+  Correctness problems were in their async path (rwm_async=0 rwm_finish=1 fixed the "breakcore"). Also: system
+  wallpaper working (docs/x6826b-wallpaper.md: PosterBoard angels, mediaserverd, CollectionsPoster), CONNSYS Wi-Fi
+  plan for MT6768 (docs/wifi-x6826b.md, Russian), SCP sensor hub accelerometer. Kernel drivers under kernel/ (APSL).
+  => The Mali-G52 MC2 can hold ~60 fps for CoreAnimation; our gap is the stack (metal2vulkan shadows/copies),
+  supporting the GL path, and rendering at the panel's own size.
+- **open-mapple** (realme 8i, MT6781 / Mali-G57 MC2 Valhall JM): xnu_kernel_mediatek_common = xnu-8796.141.3 with
+  **ios-sweet's** and ios-viva's patch series, MediaTek Wi-Fi/Bluetooth/audio/haptics/battery/torch working in
+  Release 1 (iOS 16.7.16), cellular over CCCI in progress; mapple_gpu_mali (Metal on Panfrost, Valhall only;
+  Bifrost "early"). Reference for the MediaTek peripherals later.
+- Clones (local only): /home/claude/ext/{hakios-mt6768,xnu_kernel_mediatek_common,mapple_gpu_mali,
+  xnu_device_realme_spaced,jesvi,nullarc}.
