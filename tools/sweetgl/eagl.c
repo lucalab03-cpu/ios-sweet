@@ -391,9 +391,14 @@ static const char *eagl_slot_name(unsigned offset);
 static void census_report(void);
 static void clear_now(struct eagl *e);
 
+/* ios-sweet (round z): the last calls, for the crash recorder below */
+static volatile unsigned recent_calls[32], recent_at, in_call;
+
 static void
 eagl_enter(struct eagl *e, unsigned offset)
 {
+	recent_calls[recent_at++ % 32] = offset;
+	in_call = offset;
 	if (current != e) {
 		if (!redwood_gl_make_current(e->gl)) {
 			say("redwood-gl: the context cannot be made this thread's\n");
@@ -412,6 +417,7 @@ eagl_leave(struct eagl *e, unsigned offset)
 {
 	GLenum error;
 
+	in_call = 0;
 	if (check_errors && offset != 0x338 && (error = glGetError()) != 0) {
 		if (e->errors++ < 60) {
 			say("redwood-gl: %s: error %#x\n", eagl_slot_name(offset), error);
@@ -4076,6 +4082,102 @@ display_waits(void)
 	return waits;
 }
 
+/*
+ * ios-sweet (round z, 2026-11-26): the window server on our OpenGL ES died three times in a row, SIGSEGV in
+ * _platform_memmove at address 0x30, called from QuartzCore, right after its first shaders (round y). This writes
+ * down, before the signal goes on to kill it: the registers memmove was given (x0 dst, x1 src, x2 length), where
+ * the pc and the callers are (image + offset, by dladdr and the frame pointers, as HakiOS's say_the_fault does),
+ * and the last OpenGL ES calls CoreAnimation made through us, the one in progress first if any.
+ */
+#include <dlfcn.h>
+#include <signal.h>
+#include <sys/ucontext.h>
+
+static void
+where_is(const char *what, uintptr_t address)
+{
+	Dl_info d;
+
+	if (address != 0 && dladdr((const void *)address, &d) != 0 && d.dli_fname != NULL) {
+		const char *base = strrchr(d.dli_fname, '/');
+		say("redwood-gl:   %s %#lx = %s+%#lx (%s+%#lx)\n", what, address, base ? base + 1 : d.dli_fname,
+		    address - (uintptr_t)d.dli_fbase, d.dli_sname ? d.dli_sname : "?",
+		    d.dli_saddr ? address - (uintptr_t)d.dli_saddr : 0);
+	} else {
+		say("redwood-gl:   %s %#lx\n", what, address);
+	}
+}
+
+static void
+crash_recorder(int signal_number, siginfo_t *info, void *context_in)
+{
+	ucontext_t *uc = context_in;
+	char line[600];
+	size_t used = 0;
+
+	say("redwood-gl: CRASH signal %d at %p%s%s\n", signal_number, info ? info->si_addr : NULL,
+	    in_call ? ", inside our call " : "", in_call ? eagl_slot_name(in_call) : "");
+	if (uc != NULL && uc->uc_mcontext != NULL) {
+		uintptr_t fp = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+
+		say("redwood-gl:   x0 %#llx x1 %#llx x2 %#llx x3 %#llx x8 %#llx x19 %#llx x20 %#llx x21 %#llx x22 %#llx\n",
+		    uc->uc_mcontext->__ss.__x[0], uc->uc_mcontext->__ss.__x[1], uc->uc_mcontext->__ss.__x[2],
+		    uc->uc_mcontext->__ss.__x[3], uc->uc_mcontext->__ss.__x[8], uc->uc_mcontext->__ss.__x[19],
+		    uc->uc_mcontext->__ss.__x[20], uc->uc_mcontext->__ss.__x[21], uc->uc_mcontext->__ss.__x[22]);
+		where_is("pc", (uintptr_t)uc->uc_mcontext->__ss.__pc);
+		where_is("lr", (uintptr_t)uc->uc_mcontext->__ss.__lr);
+		for (unsigned i = 0; i < 12 && fp != 0 && (fp & 7) == 0; i++) {
+			uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+			char what[16];
+
+			if (ret == 0) {
+				break;
+			}
+			snprintf(what, sizeof(what), "#%u", i);
+			where_is(what, ret & 0x0000000fffffffffULL);
+			fp = next > fp ? next : 0;
+		}
+	}
+	for (unsigned i = 0; i < 32 && recent_at > i; i++) {
+		unsigned offset = recent_calls[(recent_at - 1 - i) % 32];
+		used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", eagl_slot_name(offset));
+		if (used >= sizeof(line) - 1) {
+			break;
+		}
+	}
+	say("redwood-gl:   the last calls, newest first:%s\n", line);
+	signal(signal_number, SIG_DFL);
+	raise(signal_number);
+}
+
+/* ios-sweet: more "boot-args" for this library from a file, so a run needs no new payload */
+static void
+more_arguments(char *arguments, size_t size)
+{
+	int fd = open("/var/sweet/glargs", O_RDONLY);
+	size_t used = strlen(arguments);
+	ssize_t n;
+
+	if (fd < 0 || used + 2 >= size) {
+		if (fd >= 0) {
+			close(fd);
+		}
+		return;
+	}
+	arguments[used++] = ' ';
+	n = read(fd, arguments + used, size - used - 1);
+	close(fd);
+	arguments[used + (n > 0 ? (size_t)n : 0)] = 0;
+	for (char *c = arguments + used; *c; c++) {
+		if (*c == '\n' || *c == '\t') {
+			*c = ' ';
+		}
+	}
+	if (n > 0) {
+		say("redwood-gl: arguments from /var/sweet/glargs:%s\n", arguments + used - 1);
+	}
+}
+
 __attribute__((constructor)) static void
 install(void)
 {
@@ -4094,8 +4196,8 @@ install(void)
 	};
 	Class class;
 	unsigned replaced = 0;
-	char arguments[1024] = "";
-	size_t size = sizeof(arguments) - 1;
+	char arguments[2048] = "";
+	size_t size = 1024;
 	const char *argument;
 
 	/* ios-sweet: the log file, and OpenGLES.framework loaded if QuartzCore has not brought it in yet */
@@ -4111,7 +4213,17 @@ install(void)
 	}
 	class = objc_getClass("EAGLContext");
 	/* the kernel's boot-args are where a run is told things */
+	{
+		struct sigaction action;
+
+		memset(&action, 0, sizeof(action));
+		action.sa_sigaction = crash_recorder;
+		action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+		sigaction(SIGSEGV, &action, NULL);
+		sigaction(SIGBUS, &action, NULL);
+	}
 	if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+		more_arguments(arguments, sizeof(arguments));
 		if ((argument = strstr(arguments, "gltrace=")) != NULL) {
 			trace_last = trace_first = (unsigned)strtoul(argument + 8, (char **)&argument, 10);
 			if (*argument == '-') {
