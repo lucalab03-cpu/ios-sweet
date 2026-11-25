@@ -1259,3 +1259,12 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   Bifrost "early"). Reference for the MediaTek peripherals later.
 - Clones (local only): /home/claude/ext/{hakios-mt6768,xnu_kernel_mediatek_common,mapple_gpu_mali,
   xnu_device_realme_spaced,jesvi,nullarc}.
+
+### 2026-11-25 23:55 — round w observed, round x
+- Round w: **gltest "OpenGL drew the triangle", drawtest all 4 OK** (new Mesa build with PanVK's shim: WC mappings).
+  The wrapper set SWEET_GL and DYLD_INSERT_LIBRARIES for backboardd.orig (log: "OpenGL ES for CoreAnimation"), but
+  no /var/tmp/sweetgl.log and backboardd asked mode 3 (Metal): dyld ignores DYLD_INSERT_LIBRARIES for the untouched
+  platform binary. The driver's dlsym check kept Metal on (no fall to software). (The 97-launch loop in
+  sweetwrap.log is an older boot.)
+- Round x (bundle 45713030773, mesa-ios 45711982053): with /var/sweet/gl the wrapper takes backboardd.inj (whose
+  sweetinject dependency dlopens libsweet-gl under SWEET_GL) whatever /var/sweet/noinject says.
