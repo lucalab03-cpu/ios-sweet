@@ -1228,3 +1228,17 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
     Crash fallback: third launch in 30 s -> backboardd.orig, Metal, no library. Off switch: delete /var/sweet/gl.
   - Coherency: the gallium client asks mode 1, so the kernel still cleans all imported pages per SUBMIT (correct,
     slow); mode 3 + eagl-side flushes is the next optimisation once pictures are right.
+
+### 2026-11-25 23:20 — round v observed, round w
+- Round v boot 1: drop installed, install-wrap replaced the wrapper and restarted backboardd; the wrapper chose
+  **orig** (`/var/sweet/noinject` is on the phone), so no GL: Metal as before. Lock screen up to 600 swaps/10 s.
+  The bottom-edge unlock swipe failed after that mid-boot restart; fine on the second boot.
+- gltest/drawtest logs in the fetch are stale (they are not in the phone's sweet-boot.list): round w runs them
+  from root.cmd.
+- Round w (bundle 45710198297; mesa-ios 45708238041, metal2 45708241948): the wrapper puts libsweet-gl in
+  DYLD_INSERT_LIBRARIES for the untouched program too; SweetMTLDriver refuses backboardd only under SWEET_GL **and**
+  when `redwood_gl_function_refused` resolves (the library really loaded), else Metal as before.
+- Research: nullarc (macOS on Radeon 780M, Metal on RADV): zero-copy IOSurfaces (linear images over the pages) took
+  WindowServer CPU 77% -> 36%; a "surface keep cache" (CA re-wraps the same IOSurfaces every frame; keep the imports)
+  took a dragged window 64-69 -> 116 fps. To do for both paths: cache osmesa_surface_resource imports by surface ID,
+  and in the Metal frontend reuse textures/imports per surface.
