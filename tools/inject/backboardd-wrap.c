@@ -27,10 +27,11 @@ int main(int argc, char **argv)
 	 * previous one in the same boot counts as a repeated crash. */
 	count = (boot == lastboot && now >= last && now - last < 30) ? count + 1 : 1;
 	s = fopen(STATE, "w"); if (s) { fprintf(s, "%d %ld %ld\n", count, now, boot); fclose(s); }
-	/* round x: dyld ignored DYLD_INSERT_LIBRARIES for the untouched program (round w: no sweetgl.log), so the GL path
-	 * takes backboardd.inj, whose sweetinject dependency dlopens libsweet-gl, whatever /var/sweet/noinject says */
+	/* round y: backboardd.inj lost its entitlements (round x: "backboardd.inj is not entitled" for the HID services,
+	 * abort, twice); kernel patch 0153 answers dyld's AMFI policy request, so the untouched program takes
+	 * DYLD_INSERT_LIBRARIES and the GL path goes there again (round w: dyld had ignored it) */
 	int gl_wanted = access("/var/sweet/gl", F_OK) == 0 && access("/usr/local/lib/libsweet-gl.dylib", R_OK) == 0;
-	int use_inj = count <= 2 && access(INJ, X_OK) == 0 && (gl_wanted || access("/var/sweet/noinject", F_OK) != 0);
+	int use_inj = count <= 2 && access(INJ, X_OK) == 0 && access("/var/sweet/noinject", F_OK) != 0;
 	FILE *f = fopen("/var/tmp/sweetwrap.log", "a");
 	if (f) { fprintf(f, "wrap: pid %d start, launch %d, using %s\n", (int)getpid(), count, use_inj ? "inj" : "orig"); fclose(f); }
 	/*
@@ -39,9 +40,11 @@ int main(int argc, char **argv)
 	 * driver gives backboardd no device then, so CoreAnimation takes its OpenGL ES renderer). Two crashes in a row
 	 * (count above) end with the untouched program and no library at all.
 	 */
-	int gl = use_inj && gl_wanted;
+	int gl = count <= 2 && gl_wanted;
 	if (use_inj && access("/usr/lib/sweetinject.dylib", R_OK) == 0)
 		setenv("DYLD_INSERT_LIBRARIES", gl ? "/usr/lib/sweetinject.dylib:/usr/local/lib/libsweet-gl.dylib" : "/usr/lib/sweetinject.dylib", 1);
+	else if (gl)
+		setenv("DYLD_INSERT_LIBRARIES", "/usr/local/lib/libsweet-gl.dylib", 1);
 	if (gl)
 		setenv("SWEET_GL", "1", 1);
 	if (gl && (f = fopen("/var/tmp/sweetwrap.log", "a")) != NULL) { fprintf(f, "wrap: OpenGL ES for CoreAnimation (libsweet-gl)\n"); fclose(f); }
