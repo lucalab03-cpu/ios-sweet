@@ -40,6 +40,11 @@
 
 #include "xf86drm.h"
 
+/* OpenGL ES self-coherency (below, at the host imports) */
+static int gl_self_coherent;
+static void hosts_flush(void);
+static void host_forget(uint32_t handle);
+
 typedef mach_port_t io_object_t, io_service_t, io_connect_t;
 extern const mach_port_t kIOMasterPortDefault;
 extern void *IOServiceMatching(const char *name);
@@ -219,7 +224,8 @@ choose_sync(void)
 	 * without 0151 refuses mode 3, and the request is repeated with mode 1.
 	 */
 	const char *self = getenv("SWEET_MALI_SELF_COHERENT");
-	if (self != NULL && strcmp(self, "1") == 0) {
+	const char *gl = getenv("SWEET_GL_SELF_COHERENT");
+	if ((self != NULL && strcmp(self, "1") == 0) || (gl != NULL && strcmp(gl, "1") == 0)) {
 		m.mode = 3;
 		error = call(SWEET_MODE_NR, &m, sizeof(m));
 		if (error != 0 || (m.result & 1) == 0) {
@@ -232,6 +238,10 @@ choose_sync(void)
 		error = call(SWEET_MODE_NR, &m, sizeof(m));
 	}
 	kernel_sync = error == 0 && (m.result & 1) != 0;
+	gl_self_coherent = (m.result & 2) != 0 && gl != NULL && strcmp(gl, "1") == 0;
+	if (gl_self_coherent) {
+		trace("sweetdrm: OpenGL ES: this process cleans its host imports before each SUBMIT");
+	}
 	trace("sweetdrm: %s%s (mode request %u -> err %d, result %u)", kernel_sync ? "queued SUBMITs, the kernel's syncobjs" :
 	    "every chain run to its end in SUBMIT, syncobjs in this process",
 	    (m.result & 2) != 0 ? ", imported pages kept coherent by this process" : "", m.mode, error, m.result);
@@ -863,6 +873,12 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (number == 0x42) {
 		memcpy(before, arg, IOCPARM_LEN(request) < sizeof(before) ? IOCPARM_LEN(request) : sizeof(before));
 	}
+	if (gl_self_coherent && number == PANFROST_SUBMIT_NR) {
+		hosts_flush();
+	}
+	if (gl_self_coherent && number == 0x09) {
+		host_forget(*(const uint32_t *)arg);
+	}
 	if (number == PANFROST_WAIT_BO_NR && kernel_sync) {
 		/* struct drm_panfrost_wait_bo: u32 handle, pad; s64 timeout_ns, absolute -- SweetMali takes a time from now */
 		struct { uint32_t handle, pad; int64_t timeout_ns; } *w = arg, k;
@@ -1102,6 +1118,102 @@ drmGetNodeTypeFromFd(int fd)
  */
 #define SWEET_IMPORT_HOST_NR 0x4e
 #define IMPORTS 256
+
+/*
+ * 2026-11-26, the OpenGL ES library in the window server (libsweet-gl, Mesa Gallium Panfrost over this shim): mode 3
+ * for it too. Round z's profile of backboardd on OpenGL ES: 60% of its time in the kernel, most of that cleaning
+ * every imported page around every SUBMIT (clean_mmu_dcache, FlushPoC, CleanPoC) -- the cost 0151 took off the Metal
+ * driver. With SWEET_GL_SELF_COHERENT=1 (set by libsweet-gl) this process does it instead, by address (DC CIVAC
+ * reaches every core's caches): before a SUBMIT, every live host import is cleaned and invalidated -- the small ones
+ * (glyph masks, icons, < 1 MB) at every SUBMIT, the big ones (window-sized surfaces, the frame's target) once a frame
+ * (sweet_drm_frame_mark(), called by libsweet-gl when a frame has been handed on).
+ */
+#include <libkern/OSCacheControl.h>
+#define HOSTS 512
+#define HOST_BIG (1u << 20)
+static struct { uint32_t handle; void *address; uint64_t size; unsigned gen; } hosts[HOSTS];
+static unsigned host_gen = 1, host_count;
+static pthread_mutex_t host_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t host_flushed_bytes, host_flushes;
+
+void
+sweet_drm_frame_mark(void)
+{
+	pthread_mutex_lock(&host_lock);
+	host_gen++;
+	pthread_mutex_unlock(&host_lock);
+}
+
+/* bytes cleaned by this process before SUBMITs, and how many SUBMITs (for libsweet-gl's frame lines) */
+void
+sweet_drm_host_flush_stats(unsigned long long *bytes, unsigned long long *submits)
+{
+	pthread_mutex_lock(&host_lock);
+	*bytes = host_flushed_bytes;
+	*submits = host_flushes;
+	pthread_mutex_unlock(&host_lock);
+}
+
+static void
+host_note(uint32_t handle, void *address, uint64_t size)
+{
+	pthread_mutex_lock(&host_lock);
+	for (unsigned i = 0; i < HOSTS; i++) {
+		if (hosts[i].address == NULL) {
+			hosts[i].handle = handle;
+			hosts[i].address = address;
+			hosts[i].size = size;
+			hosts[i].gen = 0;
+			host_count++;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&host_lock);
+}
+
+static void
+host_forget(uint32_t handle)
+{
+	pthread_mutex_lock(&host_lock);
+	for (unsigned i = 0; i < HOSTS && host_count != 0; i++) {
+		if (hosts[i].address != NULL && hosts[i].handle == handle) {
+			hosts[i].address = NULL;
+			host_count--;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&host_lock);
+}
+
+static void
+hosts_flush(void)
+{
+	pthread_mutex_lock(&host_lock);
+	host_flushes++;
+	for (unsigned i = 0, seen = 0; i < HOSTS && seen < host_count; i++) {
+		if (hosts[i].address == NULL) {
+			continue;
+		}
+		seen++;
+		if (hosts[i].size >= HOST_BIG && hosts[i].gen == host_gen) {
+			continue;
+		}
+		/* the same range imported again (a surface made a texture every frame): once */
+		int again = 0;
+		for (unsigned j = 0; j < i && hosts[i].size >= HOST_BIG; j++) {
+			if (hosts[j].address == hosts[i].address && hosts[j].gen == host_gen) {
+				again = 1;
+				break;
+			}
+		}
+		hosts[i].gen = host_gen;
+		if (!again) {
+			sys_dcache_flush(hosts[i].address, (size_t)hosts[i].size);
+			host_flushed_bytes += hosts[i].size;
+		}
+	}
+	pthread_mutex_unlock(&host_lock);
+}
 static struct { int fd; uint32_t handle; uint64_t size; } imports[IMPORTS];
 static pthread_mutex_t import_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1115,6 +1227,9 @@ sweet_drm_import_host(void *address, uint64_t size)
 	if (error != 0) {
 		errno = error;
 		return -1;
+	}
+	if (gl_self_coherent) {
+		host_note(r.handle, address, size);
 	}
 	int f = open("/dev/null", O_RDONLY | O_CLOEXEC);
 	pthread_mutex_lock(&import_lock);

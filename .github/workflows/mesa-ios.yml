@@ -58,6 +58,7 @@ jobs:
           # the gl* functions it exports, for mkeagl.py
           nm -gU out/usr/local/lib/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ {print substr($3, 2)}' | sort -u > obj/exported-gl.txt
           wc -l obj/exported-gl.txt
+          nm -gU out/usr/local/lib/libOSMesa.8.dylib | grep -E 'sweet_drm_(frame_mark|import_host)' || echo "::warning::libOSMesa does not export sweet_drm_frame_mark"
           grep -c "glEGLImageTargetTexture2DOES" obj/exported-gl.txt || echo "::warning::no glEGLImageTargetTexture2DOES export"
           python3 tools/sweetgl/mkeagl.py tools/sweetgl/eagl_slots.txt mesa-25.0.7/src/mapi/glapi/registry/gl.xml \
             obj/exported-gl.txt tools/sweetgl/eagl.c > obj/eagl_gen.h

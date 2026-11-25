@@ -1041,6 +1041,7 @@ frame_begin(struct eagl *e)
  * library has been waited for already.
  */
 static void frame_functions(struct eagl *e);
+static void (*sweet_frame_mark)(void);   /* ios-sweet: sweet_drm_frame_mark() of the GPU shim inside libOSMesa */
 static void
 frame_end(struct eagl *e, bool finished)
 {
@@ -1090,6 +1091,9 @@ frame_end(struct eagl *e, bool finished)
 	}
 	if (!e->in_frame) {
 		return;
+	}
+	if (sweet_frame_mark != NULL) {
+		sweet_frame_mark();     /* ios-sweet: the shim cleans the big host imports again at the next frame's first SUBMIT */
 	}
 	after = now_us();
 	e->in_frame = false;
@@ -4213,6 +4217,20 @@ install(void)
 	}
 	class = objc_getClass("EAGLContext");
 	/* the kernel's boot-args are where a run is told things */
+	/*
+	 * ios-sweet (round z+1): the GPU shim keeps this process's imported pages coherent itself (kernel mode 3, as
+	 * the Metal driver does since 0151): the kernel stops cleaning all of them around every SUBMIT, the cost that
+	 * was 60% of the window server's time in round z. /var/sweet/gl-kernel-clean: the kernel keeps doing it.
+	 */
+	if (access("/var/sweet/gl-kernel-clean", F_OK) != 0) {
+		setenv("SWEET_GL_SELF_COHERENT", "1", 1);
+		sweet_frame_mark = (void (*)(void))dlsym(RTLD_DEFAULT, "sweet_drm_frame_mark");
+		say("redwood-gl: imported pages kept coherent here, not by the kernel (frame mark %s)\n",
+		    sweet_frame_mark != NULL ? "found" : "MISSING");
+		if (sweet_frame_mark == NULL) {
+			unsetenv("SWEET_GL_SELF_COHERENT");
+		}
+	}
 	{
 		struct sigaction action;
 
