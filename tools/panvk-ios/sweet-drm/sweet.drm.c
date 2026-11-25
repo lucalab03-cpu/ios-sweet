@@ -75,6 +75,15 @@ extern int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t 
 /* 1 once SweetMali took this process into queued mode: the syncobjs are the kernel's. */
 static int kernel_sync;
 
+/* SUBMITs made (job chains sent to the GPU): read by the Metal driver for its telemetry's per-commit chain counts. */
+static atomic_ullong sweet_submits;
+__attribute__((visibility("default"))) unsigned long long sweet_drm_submits(void);
+__attribute__((visibility("default"))) unsigned long long
+sweet_drm_submits(void)
+{
+	return atomic_load_explicit(&sweet_submits, memory_order_relaxed);
+}
+
 /* A short trace of what Mesa asks of the GPU: lines on stderr and in /var/tmp/sweetdrm.log. */
 static atomic_int trace_lines;
 static void
@@ -819,6 +828,10 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	 * Without queued mode the job chain has run to its end: its out_sync is signalled here (struct
 	 * drm_panfrost_submit: u32 at 20). In queued mode the kernel signals it when the chain ends.
 	 */
+	if (number == PANFROST_SUBMIT_NR) {
+		/* chains sent, for the Metal driver's per-commit telemetry (sweet_drm_submits, looked up with dlsym) */
+		atomic_fetch_add_explicit(&sweet_submits, 1, memory_order_relaxed);
+	}
 	if (number == PANFROST_SUBMIT_NR && !kernel_sync) {
 		uint32_t out = ((const uint32_t *)arg)[5];
 		if (out != 0) {

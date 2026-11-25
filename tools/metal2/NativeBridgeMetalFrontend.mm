@@ -51,7 +51,14 @@ static std::atomic<uint64_t> gResourceChecks,gResourceSkipped;
 static Timed gTimeSurfaceFlush;
 static std::atomic<uint64_t> gSurfaceFlushBytes,gSurfaceFlushDuplicates;
 struct EncodedWork {uint32_t passes,draws,dispatches,blits;uint64_t pixels;};
-struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};};
+struct CommitRecord {uint64_t committedUs=0,callbackUs=0,ageUs=0;int64_t scheduledUs=-1;uint32_t index=0;EncodedWork work={};
+ uint64_t submitsAtCommit=0;uint32_t chains=0;};
+// PanVK's count of the job chains it sent (sweet.drm.c), looked up once: a commit's "ch" is how many were sent between
+// its commit and its completion (commits overlap little: each waits for the one before on the GPU).
+static unsigned long long gpuSubmits(void) {
+ static unsigned long long (*fn)(void)=(unsigned long long (*)(void))dlsym(RTLD_DEFAULT,"sweet_drm_submits");
+ return fn?fn():0;
+}
 static CommitRecord gCommitRing[32];
 static std::mutex gCommitLock;
 static std::mutex gProblemLock;
@@ -943,7 +950,7 @@ static void scheduled(void *context);
   // Assign once under the same lock as publication. A concurrent commit cannot reuse this index.
   const uint32_t index=(uint32_t)(gCommits.fetch_add(1)+1);self.commitIndex=index;
   CommitRecord &r=gCommitRing[index%32];
-  r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;
+  r={};r.index=index;r.committedUs=self.committedUs;r.ageUs=self.committedUs-createdUs;r.work=encodedWork;r.submitsAtCommit=gpuSubmits();
  }
  dispatch_group_enter(_handlers);
  dispatch_group_enter(_schedulingHandlers);
@@ -988,7 +995,7 @@ static void completed(void *context) {
   uint64_t seen=gTimeEncodeToCommit.slowest.load();while(took>seen && !gTimeEncodeToCommit.slowest.compare_exchange_weak(seen,took)){}
   std::lock_guard<std::mutex> lock(gCommitLock);
   CommitRecord &r=gCommitRing[commandBuffer.commitIndex%32];
-  if(r.index==commandBuffer.commitIndex)r.callbackUs=took;
+  if(r.index==commandBuffer.commitIndex){r.callbackUs=took;r.chains=(uint32_t)(gpuSubmits()-r.submitsAtCommit);}
  }
  [commandBuffer finish];
 }
@@ -1557,9 +1564,24 @@ static char sweetMemoryOwnerKey;
 static std::unordered_map<SEL,uint64_t> gAnswers;
 static NSUInteger countAnswer(id,SEL cmd) {return (NSUInteger)gAnswers.at(cmd);}
 static BOOL flagAnswer(id,SEL cmd) {return gAnswers.at(cmd)!=0;}
+// 2026-11-25: Metal asks these for every texture it makes (MTLPixelFormatGetInfoForDevice,
+// MTLGetTextureLevelInfoForDeviceWithOptions -> supportsFamily:, pixel format queries), and the runtime rebuilt its
+// family audit and format table for each: ~20% of backboardd's user time while animating. The device's answers never
+// change, so each (selector, argument) is asked once and kept, refusals (0) included.
+struct AnswerKey {SEL sel;NSUInteger arg;bool operator==(const AnswerKey &o) const {return sel==o.sel && arg==o.arg;}};
+struct AnswerKeyHash {size_t operator()(const AnswerKey &k) const {return std::hash<const void *>()((const void *)k.sel)^(k.arg*0x9e3779b97f4a7c15ull);}};
+static std::unordered_map<AnswerKey,uint64_t,AnswerKeyHash> gArgAnswers;
+static std::mutex gArgAnswerLock;
 static uint64_t askAnswer(SEL cmd,NSUInteger arg) {
+ {
+  std::lock_guard<std::mutex> lock(gArgAnswerLock);
+  auto it=gArgAnswers.find(AnswerKey{cmd,arg});
+  if(it!=gArgAnswers.end())return it->second;
+ }
  uint64_t value=0;
- if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());return 0;}
+ if(!nmb_device_answer(gDevice,sel_getName(cmd),arg,&value)){NBLOG(@"native-metal: %s(%lu): %@",sel_getName(cmd),(unsigned long)arg,lastError());value=0;}
+ std::lock_guard<std::mutex> lock(gArgAnswerLock);
+ gArgAnswers[AnswerKey{cmd,arg}]=value;
  return value;
 }
 static NSUInteger countArgAnswer(id,SEL cmd,NSUInteger arg) {return (NSUInteger)askAnswer(cmd,arg);}
@@ -1778,8 +1800,8 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   for(uint32_t k=0;k<20 && k<newest;k++) {
    const CommitRecord &r=gCommitRing[(newest-k)%32];
    if(r.index!=newest-k)continue;
-   row("K%u t=%llu.%03llus rp%u dr%u kpx%llu cs%u bl%u ctc=%lluus",r.index,(unsigned long long)(r.committedUs/1000000),(unsigned long long)((r.committedUs/1000)%1000),
-    r.work.passes,r.work.draws,(unsigned long long)(r.work.pixels>>10),r.work.dispatches,r.work.blits,(unsigned long long)r.callbackUs);
+   row("K%u t=%llu.%03llus rp%u dr%u kpx%llu cs%u bl%u ch%u ctc=%lluus",r.index,(unsigned long long)(r.committedUs/1000000),(unsigned long long)((r.committedUs/1000)%1000),
+    r.work.passes,r.work.draws,(unsigned long long)(r.work.pixels>>10),r.work.dispatches,r.work.blits,r.chains,(unsigned long long)r.callbackUs);
    if(k<4)row("E%u age=%lluus scheduled=%lldus",r.index,(unsigned long long)r.ageUs,(long long)r.scheduledUs);
   }
  }
