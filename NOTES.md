@@ -1268,3 +1268,14 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   sweetwrap.log is an older boot.)
 - Round x (bundle 45713030773, mesa-ios 45711982053): with /var/sweet/gl the wrapper takes backboardd.inj (whose
   sweetinject dependency dlopens libsweet-gl under SWEET_GL) whatever /var/sweet/noinject says.
+
+### 2026-11-26 00:00 — round x observed; 0153 (AMFI policy) for round y
+- Round x: libsweet-gl loaded into backboardd.inj (sweetgl.log: 8 of 8 EAGLContext methods replaced), but
+  backboardd.inj aborted twice: "IOHIDEventServiceUserClient: backboardd.inj is not entitled" (touch and buttons
+  user clients refused) -- the .inj copy's entitlements are not honoured now. Third launch: orig, Metal.
+- **0153** (bsd/kern/sweet_amfi.c): a MAC policy named "AMFI" answering __mac_syscall("AMFI") 0x5a (dyld policy:
+  0xff, everything allowed -> DYLD_INSERT_LIBRARIES works on platform binaries) and 0x60 (boot-arg state 0x86 "not
+  enforcing": ExtensionKit then reads the extension-point table; without it every app extension is refused, per
+  HakiOS kern_minimac.c -- likely PosterBoard's missing poster extensions). Boot-arg sweetamfidyld=0 = old behaviour.
+- Wrapper: GL path back on backboardd.orig via DYLD_INSERT_LIBRARIES (gl = count <= 2 && /var/sweet/gl).
+- Builds: xnu 45714408289, mesa-ios 45714410957.
