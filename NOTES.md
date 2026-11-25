@@ -1190,3 +1190,23 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - 0152 made the blit slower (17.3 ms vs 13.4): removed.
 - Round r: kernel without 0152, PanVK exporting `sweet_drm_submits`, frontend K rows with `ch` (chains sent between
   commit and completion), drop with sym-q.in (shared-cache pcs not named yet, slide 0x4fa08000).
+
+### 2026-11-25 22:30 — rounds s/t observed; plan: CoreAnimation on GL (HakiOS approach)
+- Round s: no crash (flushMapped). `Z split0`: metal2vulkan never splits passes. `ch` per commit: rp1 dr7 -> 2 chains,
+  rp4 dr45 -> 37, rp11 dr88 -> 63: about half a chain more per draw.
+- Round t (PanVK batches by caller): ~1050 render passes (end_subpass), ~1050 `copy_draw` (vk_meta image copies by a
+  draw, ended by CmdEndRendering), ~2140 compute dispatches (cmd_dispatch <- CmdDispatchBase), 111 clear_color_image,
+  19 blits. So each Metal pass costs the pass + an image copy + 2-3 dispatches. Suspect: metal2vulkan's IOSurface
+  textures rendered through a kept/shadow image with copy in + merge back (linear_attachment.rs, linear_merge.rs,
+  shadow.rs). Round u (bundle 45703207591): call sites four deep + the runtime's nonzero work counts in
+  /var/tmp/sweetm2v-counts.backboardd.orig.txt, to name the path before fixing it.
+- **HakiOS / Jesvi-iOS** (github.com/jesvi-eulah/Jesvi-iOS, MIT except the kernel; S20 Exynos 990, iOS 16.5):
+  backboardd's CoreAnimation draws with its **OpenGL ES renderer** (CA::OGL::GLESContext), not Metal, on Mesa
+  Panfrost through OSMesa (ES profile patch) and their `userland/src/eagl.c` (EAGLContext replacement:
+  initWithAPI, getMacroContextPrivate dispatch table from eagl_slots.txt, texImageIOSurface / attachImage zero-copy
+  via glEGLImageTargetTexture2DOES with the IOSurface ID, imported by their kernel). Metal is off system-wide; CA on
+  Metal in backboardd crashed for them. ~75 fps median at 1080x2400 on Mali-G77 MC11.
+  Plan after round u: (1) our Mesa 25.0.7 OSMesa build with GLES (their osmesa-es-profile.patch) and EGLImage from
+  an IOSurface through SweetMali IMPORT_HOST; fix drawtest (all pixels 0); (2) eagl.c ported to 16.7.16 (25 QuartzCore
+  constants in inject.c to re-find: resolve on device via C++ typeinfo names / vtables instead of fixed addresses);
+  (3) backboardd off the metal.allow list so CA picks GL. Apple binaries stay out of git.
