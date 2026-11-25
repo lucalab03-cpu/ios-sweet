@@ -4222,6 +4222,13 @@ install(void)
 	 * the Metal driver does since 0151): the kernel stops cleaning all of them around every SUBMIT, the cost that
 	 * was 60% of the window server's time in round z. /var/sweet/gl-kernel-clean: the kernel keeps doing it.
 	 */
+	/*
+	 * ios-sweet: no deep (wide colour) framebuffers for CoreAnimation: round z, every draw into a 'b3a8' or 'w30r'
+	 * surface was refused ("-attachImage: ... an IOSurface of 'b3a8': not done", then glDrawElements 0x506), so
+	 * what those layers hold was never drawn. pixel3-ios (same 20H392) turns it off the same way.
+	 */
+	CFPreferencesSetAppValue(CFSTR("CAEnableDeepFramebuffer"), kCFBooleanFalse, kCFPreferencesCurrentApplication);
+	say("redwood-gl: CAEnableDeepFramebuffer = NO\n");
 	if (access("/var/sweet/gl-kernel-clean", F_OK) != 0) {
 		setenv("SWEET_GL_SELF_COHERENT", "1", 1);
 		sweet_frame_mark = (void (*)(void))dlsym(RTLD_DEFAULT, "sweet_drm_frame_mark");
