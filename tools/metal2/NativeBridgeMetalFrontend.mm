@@ -1802,14 +1802,21 @@ extern "C" size_t native_bridge_metal_telemetry(char *out,size_t size) {
   (unsigned long long)gTimeSurfaceFlush.total.load(),(unsigned long long)gTimeSurfaceFlush.slowest.load(),(unsigned long long)gFlushClamped.load());
  // The runtime's VkPipeline makings (the creation log, METAL2VULKAN_LOG_PIPELINES; they happen at draws, not at the state's creation) and
  // its shader cache: where the driver's compile time goes.
+ if(gDevice) {
+  // The runtime's work counts (shadows, kept backings, copies, merges...), nonzero ones: in their own file, too long for rows.
+  static char counts[16384];
+  nmb_device_work_counts(gDevice,counts,sizeof counts);
+  char path[128];snprintf(path,sizeof path,"/var/tmp/sweetm2v-counts.%s.txt",getprogname());
+  if(FILE *f=fopen(path,"w")){fputs(counts,f);fputc('\n',f);fclose(f);}
+ }
  {
   // PanVK's batches by call site (sweet.drm.c sweet_drm_batch_sites): offsets in libvulkan_panfrost.dylib.
   static int (*sites)(unsigned long long *,int)=[]{
    void *image=dlopen("/usr/local/lib/libvulkan_panfrost.dylib",RTLD_NOLOAD|RTLD_LAZY);
    return (int (*)(unsigned long long *,int))(image?dlsym(image,"sweet_drm_batch_sites"):nullptr);
   }();
-  unsigned long long y[5*10]={};const int n=sites?sites(y,10):0;
-  for(int i=0;i<n;i++)row("Y%d %llx<%llx n%llu f%llu v%llu",i,y[5*i],y[5*i+1],y[5*i+2],y[5*i+3],y[5*i+4]);
+  unsigned long long y[7*12]={};const int n=sites?sites(y,12):0;
+  for(int i=0;i<n;i++)row("Y%d %llx<%llx<%llx<%llx n%llu f%llu v%llu",i,y[7*i],y[7*i+1],y[7*i+2],y[7*i+3],y[7*i+4],y[7*i+5],y[7*i+6]);
  }
  {
   uint64_t z[11]={};nmb_split_reasons(z);

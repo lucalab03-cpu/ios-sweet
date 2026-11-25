@@ -90,19 +90,28 @@ sweet_drm_submits(void)
  * the two return addresses as offsets in this image, then the three counts; it returns how many it wrote.
  */
 #include <dlfcn.h>
-struct batch_site { uintptr_t a0, a1; unsigned long long n, frag, vtc; };
+#define BATCH_DEPTH 4
+struct batch_site { uintptr_t a[BATCH_DEPTH]; unsigned long long n, frag, vtc; };
 static struct batch_site batch_sites[64];
 static pthread_mutex_t batch_lock = PTHREAD_MUTEX_INITIALIZER;
 __attribute__((visibility("default"))) void sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc);
-__attribute__((visibility("default"))) void
+__attribute__((visibility("default"))) __attribute__((noinline)) void
 sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc)
 {
+	uintptr_t a[BATCH_DEPTH] = { (uintptr_t)a0, (uintptr_t)a1 };
+	/* two more callers up the frame-pointer chain (Darwin arm64 keeps it): fp -> [saved fp, return address] */
+	uintptr_t *fp = (uintptr_t *)__builtin_frame_address(0);
+	for (int d = 0; d < 3 && fp != NULL && ((uintptr_t)fp & 7) == 0; d++)
+		fp = (uintptr_t *)fp[0];            /* note_batch's -> close_batch's -> its caller's -> ... */
+	for (int k = 2; k < BATCH_DEPTH && fp != NULL && ((uintptr_t)fp & 7) == 0; k++) {
+		a[k] = fp[1];
+		fp = (uintptr_t *)fp[0];
+	}
 	pthread_mutex_lock(&batch_lock);
 	for (int i = 0; i < 64; i++) {
 		struct batch_site *b = &batch_sites[i];
-		if (b->n == 0 || (b->a0 == (uintptr_t)a0 && b->a1 == (uintptr_t)a1)) {
-			b->a0 = (uintptr_t)a0;
-			b->a1 = (uintptr_t)a1;
+		if (b->n == 0 || memcmp(b->a, a, sizeof(a)) == 0) {
+			memcpy(b->a, a, sizeof(a));
 			b->n++;
 			b->frag += frag != 0;
 			b->vtc += vtc != 0;
@@ -111,6 +120,7 @@ sweet_drm_note_batch(void *a0, void *a1, int frag, int vtc)
 	}
 	pthread_mutex_unlock(&batch_lock);
 }
+/* Up to `max` sites, busiest first, seven words each: four return addresses as offsets in this image, then counts. */
 __attribute__((visibility("default"))) int sweet_drm_batch_sites(unsigned long long *out, int max);
 __attribute__((visibility("default"))) int
 sweet_drm_batch_sites(unsigned long long *out, int max)
@@ -132,11 +142,11 @@ sweet_drm_batch_sites(unsigned long long *out, int max)
 				best = i;
 		if (best < 0)
 			break;
-		out[5 * n + 0] = copy[best].a0 - base;
-		out[5 * n + 1] = copy[best].a1 - base;
-		out[5 * n + 2] = copy[best].n;
-		out[5 * n + 3] = copy[best].frag;
-		out[5 * n + 4] = copy[best].vtc;
+		for (int k = 0; k < BATCH_DEPTH; k++)
+			out[7 * n + k] = copy[best].a[k] >= base ? copy[best].a[k] - base : 0;
+		out[7 * n + 4] = copy[best].n;
+		out[7 * n + 5] = copy[best].frag;
+		out[7 * n + 6] = copy[best].vtc;
 		copy[best].n = 0;
 	}
 	return n;

@@ -226,6 +226,35 @@ fn observe_message(message: &DebugMessage) {
     }
 }
 
+/// ios-sweet: the runtime's work counts (`Device::work_counts`), the fields that are not zero, as
+/// `name=value` words, into the caller's `size` bytes; the text's full length.
+#[unsafe(no_mangle)]
+pub extern "C" fn nmb_device_work_counts(device: *const NmbDevice, out: *mut c_char, size: usize) -> usize {
+    guard(0, || {
+        let d = &get(device)?.0;
+        let debug = format!("{:?}", d.work_counts());
+        let body = debug.split_once('{').map_or(debug.as_str(), |(_, b)| b).trim_end_matches('}');
+        let mut text = String::new();
+        for field in body.split(", ") {
+            if let Some((name, value)) = field.split_once(": ") {
+                let value = value.trim();
+                if value != "0" && value != "false" {
+                    text += &format!("{}={} ", name.trim(), value);
+                }
+            }
+        }
+        if !out.is_null() && size > 0 {
+            let n = text.len().min(size - 1);
+            // SAFETY: `out` holds `size` bytes (the caller's contract).
+            unsafe {
+                std::ptr::copy_nonoverlapping(text.as_ptr(), out.cast::<u8>(), n);
+                *out.add(n) = 0;
+            }
+        }
+        Ok(text.len())
+    })
+}
+
 /// ios-sweet: why render passes split into instances (bridge patch 0102), eleven words: new instances, then the count
 /// of each reason (images stand in, storage, locations, reformats, shadow, shader tests, views, dispatched, barrier,
 /// ordered).
