@@ -1210,3 +1210,21 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   an IOSurface through SweetMali IMPORT_HOST; fix drawtest (all pixels 0); (2) eagl.c ported to 16.7.16 (25 QuartzCore
   constants in inject.c to re-find: resolve on device via C++ typeinfo names / vtables instead of fixed addresses);
   (3) backboardd off the metal.allow list so CA picks GL. Apple binaries stay out of git.
+
+### 2026-11-25 23:00 — round u observed; round v = CoreAnimation on OpenGL ES (all three steps)
+- Round u: `shadowed_textures=24 shadow_copies=501` over 512 render passes; PanVK sites:
+  vk_meta_copy_buffer_to_image <- CmdCopyBufferToImage2 (365 by a draw + 146 by compute) = metal2vulkan's shadow
+  copies of textures over buffers that no linear image aliases (shadow.rs). Reason not logged yet (Degradation text).
+- Round v (bundle sweet-bundle-v, run 45707092114: xnu 45591283592, panvk 45701349534, metal2 45705381416,
+  pbwrap 45509676296, mesa-ios 45705376136):
+  - mesa-ios: Mesa 25.0.7 OSMesa, gles2 on, PanVK's shim (WC mappings, queued mode, IMPORT_HOST), HakiOS's
+    osmesa-es-profile.patch, EGLImage = IOSurface ID -> osmesa_surface_resource (IOSurfaceLookup, BGRA, page-aligned
+    base, sweet_drm_import_host, resource_from_handle with the surface's row pitch); glEGLImageTargetTexture2DOES is
+    not exported but reached through OSMesaGetProcAddress. mkeagl: 409 entries (356 passed on, 30 by hand, 23 none).
+  - tools/sweetgl: HakiOS eagl.c/gl_osmesa.c/redwood_gl.h/eagl_slots.txt/mkeagl.py (MIT, NOTICE); log
+    /var/tmp/sweetgl.log; dlopens OpenGLES.framework if EAGLContext is missing.
+  - backboardd-wrap: with /var/sweet/gl (and the inj path) sets SWEET_GL=1 and adds libsweet-gl to
+    DYLD_INSERT_LIBRARIES; sweetinject dlopens it under SWEET_GL; SweetMTLDriver refuses backboardd under SWEET_GL.
+    Crash fallback: third launch in 30 s -> backboardd.orig, Metal, no library. Off switch: delete /var/sweet/gl.
+  - Coherency: the gallium client asks mode 1, so the kernel still cleans all imported pages per SUBMIT (correct,
+    slow); mode 3 + eagl-side flushes is the next optimisation once pictures are right.
