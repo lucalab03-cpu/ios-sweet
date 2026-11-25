@@ -1295,3 +1295,18 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   free), IOSurfaceAddress creates likewise (app icons were going to be blank). Boot-arg sweetsurfwrap=0 = refuse.
 - eagl.c: crash recorder (registers, dladdr callers, last 32 GL calls) and /var/sweet/glargs (extra switches).
 - Builds: xnu 45719688793, mesa-ios 45719030800, bundle z 45721118706.
+
+### 2026-11-26 01:00 — round z observed (GL holds); round aa (GL mode 3, no deep framebuffer, glwait=0)
+- Round z (payload-t, 0154): **no backboardd crash**; backboardd.orig on OpenGL ES for the whole boot; 35 wraps
+  ("wraps the caller's memory"), selector-6 client images (glyph masks A008, gradients RGhA, icons BGRA).
+  User: faster, a moment of 60 fps; lock screen now shows a red striped wallpaper (was black).
+- Numbers: 164-201 swaps/10 s (~16-20 fps), FB copy 13.6 ms a swap; GL frames 17-20 ms for ~14 draws (5-6 ms
+  waiting in glFinish). backboardd 70% of a CPU, **60% of it kernel**: clean_mmu_dcache 37%, ml_set_interrupts 15%,
+  FlushPoC 11%, CleanPoC 7% -- the per-SUBMIT clean of every imported page (Gallium asked mode 1).
+- 'b3a8'/'w30r' (deep) offscreen targets refused by eagl ("not done") -> glDrawElements 0x506.
+- Round aa (mesa 45724681348, bundle 45725249245, drop-aa, payload stays payload-t):
+  - sweet-drm: SWEET_GL_SELF_COHERENT=1 -> mode 3; host imports tracked (handle/address/size, dropped at GEM_CLOSE),
+    sys_dcache_flush'ed before each SUBMIT: < 1 MB every SUBMIT, >= 1 MB once a frame (sweet_drm_frame_mark() from
+    eagl frame_end). Kill: /var/sweet/gl-kernel-clean.
+  - eagl: CAEnableDeepFramebuffer = NO (pixel3-ios does the same).
+  - /var/sweet/glargs = "glwait=0" (SweetFB 0140 already waits for the frame's GPU chains). Delete to restore.
