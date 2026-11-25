@@ -1136,7 +1136,8 @@ static unsigned host_gen = 1, host_count;
 static pthread_mutex_t host_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t host_flushed_bytes, host_flushes;
 
-void
+__attribute__((visibility("default"))) void sweet_drm_frame_mark(void);
+__attribute__((visibility("default"))) void
 sweet_drm_frame_mark(void)
 {
 	pthread_mutex_lock(&host_lock);
@@ -1145,7 +1146,8 @@ sweet_drm_frame_mark(void)
 }
 
 /* bytes cleaned by this process before SUBMITs, and how many SUBMITs (for libsweet-gl's frame lines) */
-void
+__attribute__((visibility("default"))) void sweet_drm_host_flush_stats(unsigned long long *bytes, unsigned long long *submits);
+__attribute__((visibility("default"))) void
 sweet_drm_host_flush_stats(unsigned long long *bytes, unsigned long long *submits)
 {
 	pthread_mutex_lock(&host_lock);
