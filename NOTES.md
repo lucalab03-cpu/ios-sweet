@@ -1173,3 +1173,20 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   resources.
 - **0152**: scaled blit without per-pixel branches (avg(p,p) == p; second index precomputed; vertical blend per row).
 - Fallbacks if the picture breaks: drop `/var/sweet/mali-kernel-clean` (one file) or boot-arg `sweetmaliself=0`.
+
+### 2026-11-25 11:20 — payload-q observed (0151 works), round r
+- User: more fluid, no glitches, still far from 60. `a client asks for mode 3: ... no cleaning here`.
+- backboardd kernel: no cache maintenance left; mach_msg2_trap leaf 2738 -> 579 samples. Residue: msdc_dma_xfer
+  (eMMC DMA busy-wait) and ccsha256 (code-page validation), and ml_set_interrupts around them.
+- Swaps 92 in 10 s while animating (~9 fps). Telemetry: simple commits (rp1 dr8) complete in 3.6 ms; heavy ones (rp8
+  dr150, blur) 50-60 ms; rp1 dr70 31 ms. ~39 GPU chains per frame (~19 batches) for ~3 Metal passes: the runtime splits
+  Metal passes into render-pass instances (metal2vulkan render.rs `next_instance`; barriers between instances), each a
+  full fragment job. Next: find the split reasons (round r counts chains per commit: `ch` in the K rows).
+- metal2vulkan: framebuffer fetch needs rasterizationOrderColorAttachmentAccess or pixel interlock; PanVK has neither,
+  so those pipelines are refused (likely among QuartzCore's 4 kernels / 8 pairs that fail).
+- backboardd user time: ~20% in device answers (MTLPixelFormatGetInfoForDevice / MTLGetTextureLevelInfo... ->
+  askAnswer -> supports_family/families::audit/format_answers, rebuilt each call). Round r memoizes them per
+  (selector, argument).
+- 0152 made the blit slower (17.3 ms vs 13.4): removed.
+- Round r: kernel without 0152, PanVK exporting `sweet_drm_submits`, frontend K rows with `ch` (chains sent between
+  commit and completion), drop with sym-q.in (shared-cache pcs not named yet, slide 0x4fa08000).
