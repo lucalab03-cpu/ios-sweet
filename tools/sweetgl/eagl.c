@@ -44,7 +44,7 @@
  * "gl:"; with each draw what it is made of -- the texture, the first corners -- and after it a
  * pixel or two of the framebuffer; gltrace_lit=1: and how much of the framebuffer is not black);
  * gltrace_at=SECONDS does so for the first frame that long after the window server started,
- * gltrace_draws=N for the first frame after one of N draws, gltrace_function=N[,K] for the frame
+ * gltrace_draws=N for the first frame after one of N or more draws (ios-sweet: was exactly N), gltrace_function=N[,K] for the frame
  * after the Kth draw CoreAnimation makes of its function N with no program, gltrace_frames=N for
  * N frames from any of them on; gltrace_place=X0,Y0,X1,Y1 writes down, of those frames, only the draws whose corners
  * reach into that rectangle, a line each (lines "gl-at:"; writing everything down is slow, and a
@@ -1179,7 +1179,7 @@ frame_begin(struct eagl *e)
 	e->in_frame = true;
 	e->began = now_us();
 	eagl_tracing = e->frames + 1 >= trace_first && e->frames + 1 <= trace_last;
-	if ((trace_at != 0 && e->began >= trace_at) || (trace_draws != 0 && e->last_draws == trace_draws) || trace_function_met) {
+	if ((trace_at != 0 && e->began >= trace_at) || (trace_draws != 0 && e->last_draws >= trace_draws) || trace_function_met) {
 		trace_left = trace_frames;      /* (once) */
 		trace_at = 0;
 		trace_draws = 0;
