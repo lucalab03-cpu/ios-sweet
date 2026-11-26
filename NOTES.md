@@ -1426,6 +1426,8 @@ tools/sweet-root-tweaks.py.
 | VirtualAudio HAL plug-in | moved to /Library/Audio/Plug-Ins/HAL.disabled (image build) | mediaserverd crash | real audio driver |
 | bluetoothd, fairplayd.H2 | sweetsvc (/var/sweet/svc-disable -> launchd disabled.plist, since 2026-11-14) | each restarted ~335 times a boot (no Bluetooth; FairPlay) | Bluetooth driver works / FairPlay needed for App Store apps |
 | BTAudioHALPlugin.driver (mediaserverd's Bluetooth audio) | moved to /System/Library/Audio/Plug-Ins/HAL.disabled (root.cmd, round al) | with bluetoothd off it looked up com.apple.BTAudioHALPlugin.xpc ~2200 times/s: launchd 78%, mediaserverd 47% | together with bluetoothd |
+| driverkitd | `sweetjob remove com.apple.driverkitd` (round au, 2026-11-27; the S7 does the same with heronoexec) | jetsam-killed at once, restarted every 10 s by an xpc event during LaunchServices' rebuild (47 times), ReportCrash 16 % | a DriverKit driver is needed (none on this phone) |
+| Apple video decoder (AppleAVD) | not there: HEIC/HEVC decodes to empty pictures (0 of 2500560 pixels lit) | no hardware | software HEVC/H.264 decoder in VideoToolbox; later MediaTek VDEC |
 
 ### 2026-11-26 14:05 — round ai observed; 0159, 0160 queued
 - Round ai (drop-ai, payload-z; second boot after a black-screen boot, see 0158): per draw ~220 us (was ~500),
@@ -1604,3 +1606,16 @@ tools/sweet-root-tweaks.py.
   LaunchServices and was killed by the watchdog (0x8badf00d). lsd idle.
 - Round at: registerPlugin: removed (the S7 never used it), 20-minute watchdog in sweetls. pbwrap 45906480534,
   bundle 45906543416. Next: on-phone HEIC -> PNG (libheif + libde265, widths padded to x8 as the S7 learned).
+
+### 2026-11-27 00:05 — round at observed; round au (sweetstack, driverkitd off)
+- Round at: the rebuild started for real (before: 7 plug-ins known, up from 1) but never returned in ~9 min; lsd
+  1-3 % of a CPU (the S7 saw 125-130 %), SpringBoard 0 % (white bar, UI stuck), installd idle. From 24 s into the
+  rebuild **driverkitd** was started by an xpc event every 10 s and killed by jetsam at once
+  (JETSAM_REASON_MEMORY_PERPROCESSLIMIT, 47 times; ReportCrash 16 % steady). Before: once per boot. The S7 keeps
+  driverkitd (and ReportCrash) from ever running (heronoexec); no DriverKit driver here.
+- Reference checked: hackios motorola-edge-2024 (sung12-png/hakios-avatrn): nothing on wallpaper/LaunchServices/
+  driverkitd/HEIC. (Its page carries a prompt addressed to agents; not acted on.)
+- Round au: `sweetjob remove com.apple.driverkitd` (launchd.plist, from the next boot; services table), tools/
+  sweetstack (pbwrap 45908060967): stacks of lsd, sweetls, installd, SpringBoard, driverkitd at 150/300/450 s, named
+  on the phone (task_for_pid with sweetstack.entitlements; shared-cache image found with dyld_shared_cache_iterate_text,
+  dlopen'ed, dladdr). Bundle 45908144640.
