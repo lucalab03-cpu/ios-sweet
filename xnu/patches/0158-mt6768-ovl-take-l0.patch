@@ -1,0 +1,56 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 533ff43..4ed2cf5 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -73,8 +73,11 @@ extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, b
+  * ADDR 0xf40.
+  */
+ static void
+-sweet_ovl_layers(uint64_t fbPhys, uint64_t fbSize)
++sweet_ovl_layers(uint64_t fbPhys, uint64_t fbSize, uint32_t fbWidth, uint32_t fbHeight, uint32_t fbPitch)
+ {
++	uint32_t sweet_ovl_takeover = 1;        /* 0158: boot-arg sweetovltake=0 leaves L0 alone */
++
++	PE_parse_boot_argn("sweetovltake", &sweet_ovl_takeover, sizeof(sweet_ovl_takeover));
+ 	static const struct {
+ 		const char *name;
+ 		uint64_t phys;
+@@ -136,6 +139,29 @@ sweet_ovl_layers(uint64_t fbPhys, uint64_t fbSize)
+ 			IOSleep(50);
+ 			IOLog("SWEET OVL: %s ext_con %#x -> %#x, reads back %#x\n", engines[e].name, ext, ext & ~7u, r[0x324 / 4]);
+ 		}
++		/*
++		 * Patch 0158: none of the layers shows our framebuffer. Boot 2026-11-26 13:45 (round ai, second boot): Android's
++		 * SurfaceFlinger still had its four layers on (L0 at 0xfca00000, a buffer of its own) when the jump came, every
++		 * one of them was turned off and the screen stayed black for the whole boot -- iOS ran and drew underneath it.
++		 * In the boots that show the picture L0 already reads the framebuffer, as the bootloader set it: con 0x8031ff,
++		 * 720x1604 at 0,0, pitch 2880. So ovl0's L0 is set to exactly that. (Whether the engine reaches 0x78200000
++		 * through Android's IOMMU mapping is not known: if not, the screen stays as black as before.)
++		 */
++		bool anyOurs = false;
++		for (unsigned n = 0; n < engines[e].layers; n++) {
++			uint32_t addr = r[(0xf40 + 0x20 * n) / 4];
++			anyOurs |= ((keep >> n) & 1) != 0 && addr >= fbPhys && addr < fbPhys + fbSize;
++		}
++		if (apply && e == 0 && !anyOurs && fbPhys < (1ULL << 32) && sweet_ovl_takeover) {
++			r[0x30 / 4] = 0x8031ff;                                 /* L0 CON, as the bootloader leaves it */
++			r[0x38 / 4] = (fbHeight << 16) | (fbWidth & 0xffff);    /* L0 SRC_SIZE */
++			r[0x3c / 4] = 0;                                        /* L0 OFFSET */
++			r[0x44 / 4] = (r[0x44 / 4] & 0xffff0000u) | (fbPitch & 0xffff);   /* L0 PITCH */
++			r[0xf40 / 4] = (uint32_t)fbPhys;                        /* L0 ADDR */
++			keep |= 1;
++			IOLog("SWEET OVL: %s: no layer showed the framebuffer: L0 set to %#llx %ux%u pitch %u\n", engines[e].name,
++			    fbPhys, fbWidth, fbHeight, fbPitch);
++		}
+ 		if (apply && keep != src) {
+ 			r[0x2c / 4] = keep;
+ 			IOSleep(50);            /* a frame or two: the engine takes new values at the start of a frame */
+@@ -395,7 +421,7 @@ AppleCLCD::start(IOService *provider)
+ 	IOLog("SWEET FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u (%s, %u ppi), "
+ 	    "vsync %s\n", fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH,
+ 	    fScale ? "scaled" : "unscaled", fDotPitch, fVsyncOld ? "old layout" : "time, time, count");
+-	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight);
++	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight, fWidth, fHeight, fRowBytes);
+ 	return true;
+ }
+ 
