@@ -1389,3 +1389,15 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   hw.memsize. User: "a bit better" (decide on numbers). HANDOFF.md added; daily midnight task updates it.
 - Builds: xnu 45806130887, metal2 45805702530, bundle ag 45808280794; payload-y (payload-t boot-args + this kernel),
   drop-ag (glargs glwait=0 glblit=0).
+
+### 2026-11-26 12:30 — round ag observed (0157 works, Settings fixed); round ah = measurement only
+- Round ag: no crash at all (Preferences fine). All swaps GPU-scaled, copy ~1.37 ms, 110-180 swaps/10 s.
+  Profile vs af: pan_kmod_bo_alloc 329 -> 28 samples, panfrost_bo_create 992 -> 517, bo_cache_fetch gone: the BO
+  cache now hits. Left in backboardd: drmIoctl/u_vbuf/draw validation, eagl surface_changed (checksum of non-shared
+  IOSurfaces each frame, ~9% of backboardd's leaf samples), kernel SweetMaliUserClient::submit 21% of its kernel time.
+  Display thread ~1200-1450 samples/10 s at 160-180 swaps (~7-8 ms CPU a frame on that thread, sampling 2 ms).
+- **System-wide CPU hogs in every round:** launchd[1] ~110-114% of a CPU, vmd ~89% (visual voicemail daemon,
+  telephony without CommCenter?), mediaserverd ~44%, logd ~25%. Not respawn loops (223 xpcproxy execs, mostly once).
+- Round ah: payload-z = payload-y + `sweetprof=backboardd.orig,launchd,vmd` (NTARGETS is 3); drop-ah = only
+  glargs `glwait=0 glblit=0 glstats=1` (frame line every 20 frames, summary every 200). Goal: where launchd and vmd
+  spin, and steady-state GL frame cost.
