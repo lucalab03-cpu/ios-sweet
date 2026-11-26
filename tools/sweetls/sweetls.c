@@ -23,6 +23,9 @@
  * 1 -> 515 plug-ins, widgets and wallpapers back). Now signed with sweetls.entitlements; the migrator runs again
  * (new marker ls-migrator2.done); the posters are registered through LSRegisterURL or, when it is not exported,
  * -[LSApplicationWorkspace registerPlugin:]; the entitlements lsd will see are checked first (csops).
+ * Round at: registerPlugin: is gone again: it started installd and never came back (round as: Settings then hung on
+ * LaunchServices and was killed, 0x8badf00d; the rebuild was never reached). The S7 only ever used LSRegisterURL.
+ * A watchdog ends sweetls after 20 minutes, with a line in the log, so nothing waits on it for good.
  * Also: whether ImageIO draws the stock wallpaper's HEIC (the S7 found 0 lit pixels: no HEVC decoder without
  * Apple's hardware), in a child, so the answer is there whatever happens.
  */
@@ -255,12 +258,26 @@ heic_test_in_child(const char *path)
 }
 
 static void
+watchdog(int sig)
+{
+	static const char line[] = "sweetls: still not done after 20 minutes: ended\n";
+
+	(void)sig;
+	if (log_file != NULL) {
+		write(fileno(log_file), line, sizeof(line) - 1);
+	}
+	_exit(3);
+}
+
+static void
 work(void)
 {
 	time_t start = time(NULL);
 
 	own_entitlements();
 	heic_test_in_child(HEIC_TEST);
+	signal(SIGALRM, watchdog);
+	alarm(1200);
 	sleep(60);
 	dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", RTLD_NOW);
 	dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW);
@@ -292,29 +309,18 @@ work(void)
 		if (lsregister == NULL && cs != NULL) {
 			lsregister = (int (*)(id, unsigned char))dlsym(cs, "LSRegisterURL");
 		}
-		say("sweetls: LSRegisterURL %s\n", lsregister != NULL ? "found" : "not there; registerPlugin: instead");
-		for (size_t i = 0; i < sizeof(posters) / sizeof(posters[0]); i++) {
+		say("sweetls: LSRegisterURL %s\n", lsregister != NULL ? "found" : "not there: left out (the rebuild finds them)");
+		for (size_t i = 0; lsregister != NULL && i < sizeof(posters) / sizeof(posters[0]); i++) {
 			id url = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"),
 			    nsstring(posters[i]));
 			time_t t = time(NULL);
+			int status = lsregister(url, 1);
 
-			if (lsregister != NULL) {
-				int status = lsregister(url, 1);
-
-				say("sweetls: LSRegisterURL %s: %d, %ld s\n", posters[i], status, (long)(time(NULL) - t));
-				ran = 1;
-			} else if (workspace != NULL && ((BOOL (*)(id, SEL, SEL))objc_msgSend)(workspace,
-			    sel_registerName("respondsToSelector:"), sel_registerName("registerPlugin:"))) {
-				BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, sel_registerName("registerPlugin:"), url);
-
-				say("sweetls: registerPlugin %s: %d, %ld s\n", posters[i], ok, (long)(time(NULL) - t));
-				ran = 1;
-			}
+			say("sweetls: LSRegisterURL %s: %d, %ld s\n", posters[i], status, (long)(time(NULL) - t));
+			ran = 1;
 		}
 		if (ran) {
 			mark("/var/sweet/ls-posters.done");
-		} else {
-			say("sweetls: no way to register the posters\n");
 		}
 	}
 	if (setgid(501) != 0 || setuid(501) != 0) {
