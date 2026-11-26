@@ -1401,3 +1401,16 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - Round ah: payload-z = payload-y + `sweetprof=backboardd.orig,launchd,vmd` (NTARGETS is 3); drop-ah = only
   glargs `glwait=0 glblit=0 glstats=1` (frame line every 20 frames, summary every 200). Goal: where launchd and vmd
   spin, and steady-state GL frame cost.
+
+### 2026-11-26 12:55 — round ah observed (measurement); round ai
+- Steady-state GL frames (glstats=1): cost grows with draws, ~0.5 ms of CPU per draw (16 draws ~10 ms, 80 ~40 ms,
+  153 ~100 ms); flush/wait/copy-out together ~1.5 ms. Inclusive profile: drmIoctl, panfrost_draw_vbo, u_vbuf,
+  batch_submit/get_batch_for_fbo/pool_init (new batch per FBO switch), bo_mmap + make_unevictable (MADVISE).
+- Mesa 25.0.7 pan_bo.c: panfrost_bo_unreference munmaps before panfrost_bo_cache_put, so every cache reuse maps
+  again (IOConnectMapMemory64 here); cache_put/fetch also MADVISE (kernel only answers retained=1).
+- launchd[1] 108-113% of a CPU (2/3 kernel; leaf __workq_kernreturn, kevent_id, mach_msg, write/open: workqueue
+  churn), vmd 80-86% = /System/Library/PrivateFrameworks/VisualVoicemail.framework/vmd (kernel: footprint queries).
+- Round ai (mesa 45812695902, pbwrap 45812700208, bundle 45813502411; payload stays payload-z):
+  patch-mesa.py 4f (cached BOs keep their mapping, unmapped in panfrost_bo_free); sweet-drm answers MADVISE (0x48)
+  itself; tools/sweetjob (list/remove launchd.plist jobs, keeps launchd.plist.sweetbak). root.cmd: sweetsym on
+  launchd/vmd pcs (tools/pbwrap/sym-ah.in), sweetjob list, sweetjob remove VisualVoicemail.framework/vmd.
