@@ -1643,3 +1643,12 @@ tools/sweet-root-tweaks.py.
   ICC kept, ImageIO check after, PosterBoard + CollectionsPoster ended to redraw). heic 45910940696.
   **payload-af** = payload-ae + sweetnull=AegirPoster,lskdd,CollectionsPoster, sweetscan=AegirPoster,MobileSMS,
   MobileSlideShow, sweetenv removed (563 chars).
+- Round av observed: **sweetheic 16/16 PNG** in 24 s (libheif: Background 2427437 of 2507808 lit), ImageIO check
+  after: type public.png, 2427437 lit (was 0). PosterBoard ended and restarted. All poster extensions now run
+  (Collections, Gradient, Emoji, Pride, Unity, PhotosPosterProvider, Legacy); user: gallery visible, only "Colors"
+  (GradientPoster) can be set, the rest black. **AegirPoster**: NSInvalidArgumentException "-[__NSArrayM
+  insertObject:atIndex:]: object cannot be nil" right after its PRPosterRootViewController (likely no Metal device
+  for it: Metal phase). New crash loops now that extensions are known: KonaSynthesizer/MacinTalkAUSP/
+  SiriTTSSynthesizer (sig 6) and **assetsd** (sig 6, Photos' library daemon: Photos poster and app).
+- Round aw (no new tools, drop-aw = root.cmd only, payload-af): PosterBoard store/caches reset again (snapshots made
+  while the pictures were unreadable), then `sweetheic convert-bg /Library/Wallpaper /Library` = all 96 (user).
