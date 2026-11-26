@@ -1578,3 +1578,20 @@ tools/sweet-root-tweaks.py.
 - payload-ad = payload-ac + kernel 0162/0163, boot-args: sweetscan out, sweetprof=backboardd.orig,
   sweetnull=PosterBoard,CollectionsPoster, sweetenv=PosterBoard|CollectionsPoster:OS_ACTIVITY_DT_MODE=YES (572 chars).
   drop-ar = bundle sweet-bundle-ar tools + root.cmd (sweetjob env ... DYLD_INSERT_LIBRARIES= to undo aq, sweetls).
+
+### 2026-11-26 23:40 — round ar observed; round as (sweetls entitlements)
+- Round ar: AMFI service registered ("AppleMobileFileIntegrity registered"), nobody asked selector 6; 0x60 answered
+  since 0153 (lsd asked). sweetls: 1 plug-in known before and after; migrator "performMigration 1, 0 s";
+  **"LSRegisterURL not there"**; **"database rebuilt: 0, 0 s"**. Photos: wallpaper gallery grey, switcher only
+  "Add New Wallpaper" cards, black lock screen; the left vertical glitch strip visible in the switcher.
+- Cause (references first): the S7's hero-run is signed with hero-run.entitlements
+  (com.apple.lsapplicationworkspace.rebuildappdatabases, com.apple.private.coreservices.canmaplsdatabase, ...);
+  ours had none, so lsd refused at once. S7 after the rebuild: "database rebuilt: 1", 1 -> 515 plug-ins, widgets and
+  wallpapers back (HEROLTE_PROGRESS 2026-11-01); the first rebuild keeps lsd at 125-130 % ~3 min.
+- Next on the S7's path: stock wallpaper HEIC decodes to 0 lit pixels without Apple's HEVC hardware; they made the 16
+  375w-812h pictures PNG (sips, widths padded to x8) in a private CI release. **Our repo is public**: Apple's pictures
+  cannot go into an artifact here, so a conversion must happen on the phone (software HEIC decoder: libheif +
+  libde265, which would also serve Photos). sweetls now tests the decode first (Clownfish Background.HEIC).
+- Round as: sweetls signed with tools/sweetls/sweetls.entitlements, checks its own entitlements (csops 7), migrator
+  again (ls-migrator2.done), LSRegisterURL via the CoreServices handle or -[LSApplicationWorkspace registerPlugin:],
+  HEIC test in a child, PosterBoard ended 20 s after a successful rebuild. root.cmd: apply + sweetls. Payload as ar.
