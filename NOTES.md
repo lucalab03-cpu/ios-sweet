@@ -1321,3 +1321,13 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - 'b3a8'/'w30r' offscreen targets still "not done": CAEnableDeepFramebuffer only concerns the display's own
   framebuffer (already BGRA here). Those layers need eagl to draw them into a texture of its own.
 - drop-ab: /var/sweet/glargs = glwait=1 (back to glFinish at frame end).
+
+### 2026-11-26 01:30 — round ab: the backboardd crash is a Mesa 25.0.7 bug; round ac
+- Round ab (glwait=1) crashed the same way: SIGSEGV in pan_preload_fb_part, under QuartzCore's own glFenceSync
+  (slot 0x1860 -> _mesa_fence_sync -> panfrost_flush -> submit_batch -> jm_preload_fb_v7), so not glwait.
+- Disassembly: pan_pool_alloc_aligned(pool, 0x20, 0x20) (two ATTRIBUTE_BUFFERs) then `str q0, [x0, #0x100]`:
+  pan_fb_preload.c `pan_cast_and_pack(varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER), ...)` -- the macro casts
+  its argument without parentheses, so the padding descriptor went 16 descriptors (0x100 bytes) on. It silently
+  overwrote pool memory (GPU descriptors) and faulted when the allocation ended a buffer. patch-mesa.py 4e adds
+  the parentheses. (26.2.7 has the same line; PanVK does not use pan_fb_preload.c.)
+- Round ac: mesa 45727595311, bundle 45728286940, glargs back to glwait=0.
