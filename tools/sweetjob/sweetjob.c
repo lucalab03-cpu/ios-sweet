@@ -3,6 +3,7 @@
  *
  *   sweetjob list                 every job: label and program
  *   sweetjob remove PATTERN...    remove the jobs whose Label is PATTERN or whose program path contains it
+ *   sweetjob env LABEL KEY=VALUE  EnvironmentVariables KEY=VALUE for the job (VALUE empty: KEY taken out)
  *   sweetjob log LABEL FILE       the job's os_log also goes to FILE: EnvironmentVariables OS_ACTIVITY_DT_MODE=YES
  *                                 (libtrace then writes every message to stderr too) and StandardErrorPath FILE
  *                                 (2026-11-26: PosterBoard runs but launches no poster at all; what it says is the
@@ -99,11 +100,12 @@ main(int argc, char **argv)
 	bool list = argc == 2 && strcmp(argv[1], "list") == 0;
 	bool remove = argc >= 3 && strcmp(argv[1], "remove") == 0;
 	bool logging = argc == 4 && strcmp(argv[1], "log") == 0;
+	bool envset = argc == 4 && strcmp(argv[1], "env") == 0 && strchr(argv[3], '=') != NULL;
 	CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
 	CFErrorRef error = NULL;
 	struct stat st;
 
-	if (!list && !remove && !logging) {
+	if (!list && !remove && !logging && !envset) {
 		fprintf(stderr, "usage: sweetjob list | sweetjob remove PATTERN... | sweetjob log LABEL FILE\n");
 		return 2;
 	}
@@ -142,6 +144,38 @@ main(int argc, char **argv)
 		if (list) {
 			printf("%s\t%s\n", label, program);
 			continue;
+		}
+		if (envset && strcmp(label, argv[2]) == 0) {
+			CFMutableDictionaryRef job = (CFMutableDictionaryRef)values[i];
+			CFTypeRef env = CFDictionaryGetValue(job, CFSTR("EnvironmentVariables"));
+			char keytext[256];
+			const char *eq = strchr(argv[3], '=');
+
+			snprintf(keytext, sizeof(keytext), "%.*s", (int)(eq - argv[3]), argv[3]);
+			CFStringRef key = CFStringCreateWithCString(NULL, keytext, kCFStringEncodingUTF8);
+			CFStringRef value = CFStringCreateWithCString(NULL, eq + 1, kCFStringEncodingUTF8);
+			CFTypeRef had = env != NULL && CFGetTypeID(env) == CFDictionaryGetTypeID() ? CFDictionaryGetValue(env, key) : NULL;
+
+			if ((eq[1] == 0 && had == NULL) || (had != NULL && CFEqual(had, value))) {
+				printf("sweetjob: %s already has %s\n", label, argv[3]);
+				return 0;
+			}
+			if (env == NULL || CFGetTypeID(env) != CFDictionaryGetTypeID()) {
+				CFMutableDictionaryRef fresh = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+				    &kCFTypeDictionaryValueCallBacks);
+				CFDictionarySetValue(job, CFSTR("EnvironmentVariables"), fresh);
+				CFRelease(fresh);
+				env = CFDictionaryGetValue(job, CFSTR("EnvironmentVariables"));
+			}
+			if (eq[1] == 0) {
+				CFDictionaryRemoveValue((CFMutableDictionaryRef)env, key);
+			} else {
+				CFDictionarySetValue((CFMutableDictionaryRef)env, key, value);
+			}
+			printf("sweetjob: %s (%s): environment %s\n", label, program, argv[3]);
+			logging = true;         /* (written the same way) */
+			removed++;
+			break;
 		}
 		if (logging) {
 			CFMutableDictionaryRef job = (CFMutableDictionaryRef)values[i];
