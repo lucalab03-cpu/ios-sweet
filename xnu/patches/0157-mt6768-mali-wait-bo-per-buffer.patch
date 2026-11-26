@@ -1,0 +1,31 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index 599d05f..11b8338 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -971,15 +971,23 @@ IOReturn
+ SweetMaliUserClient::waitBO(struct sweet_panfrost_wait_bo * request)
+ {
+ 	uint64_t fences[2], deadline;
++	struct sweet_mali_buffer * b = buffer(request->handle);
+ 
+-	if (buffer(request->handle) == NULL) {
++	if (b == NULL) {
+ 		return kIOReturnNotFound;
+ 	}
+ 	if (!fAsync) {
+ 		return kIOReturnSuccess;
+ 	}
+-	fences[0] = fLast[0];
+-	fences[1] = fLast[1];
++	/*
++	 * Patch 0157: the chains that named this buffer, as GEM_CLOSE waits for (freeBuffer), not every chain of the
++	 * client. Mesa's buffer cache asks WAIT_BO with no time to wait whether a cached buffer is idle; with the client's
++	 * newest chains as the answer every cached buffer looked busy while the GPU had anything to do, so every batch
++	 * made and mapped new buffers (round af: panfrost_bo_create, bo_mmap and drmIoctl among the window server's
++	 * heaviest paths). A client that ever sent a SUBMIT naming no buffers (fUnnamed) still waits for all its chains.
++	 */
++	fences[0] = fUnnamed ? fLast[0] : b->used[0];
++	fences[1] = fUnnamed ? fLast[1] : b->used[1];
+ 	if (!sweet_mali_fence_done(fences[0]) || !sweet_mali_fence_done(fences[1])) {
+ 		uint64_t started = mach_absolute_time(), second;
+ 
