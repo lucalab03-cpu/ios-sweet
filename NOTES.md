@@ -1595,3 +1595,12 @@ tools/sweet-root-tweaks.py.
 - Round as: sweetls signed with tools/sweetls/sweetls.entitlements, checks its own entitlements (csops 7), migrator
   again (ls-migrator2.done), LSRegisterURL via the CoreServices handle or -[LSApplicationWorkspace registerPlugin:],
   HEIC test in a child, PosterBoard ended 20 s after a successful rebuild. root.cmd: apply + sweetls. Payload as ar.
+
+### 2026-11-26 23:55 — round as observed; round at
+- Round as: sweetls' own entitlements OK (csops: 622 bytes, rebuildappdatabases + canmaplsdatabase). **HEIC test:
+  public.heic 1380x1812, 0 of 2500560 pixels lit** (as on the S7: the stock wallpapers must become PNG, on the phone
+  since the repo is public). Then `-[LSApplicationWorkspace registerPlugin:]` (my fallback for the missing
+  LSRegisterURL) spawned installd (14:36:13) and never returned; the rebuild was never reached; Settings hung on
+  LaunchServices and was killed by the watchdog (0x8badf00d). lsd idle.
+- Round at: registerPlugin: removed (the S7 never used it), 20-minute watchdog in sweetls. pbwrap 45906480534,
+  bundle 45906543416. Next: on-phone HEIC -> PNG (libheif + libde265, widths padded to x8 as the S7 learned).
