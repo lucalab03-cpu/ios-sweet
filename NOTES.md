@@ -1343,3 +1343,11 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   panel shows the centre 720x1604 with a plain row memcpy (15 columns cut each side, 10 rows top/bottom). Touch maps
   the panel onto the whole presented display (native default), so up to 15 px off at the edges: to fix in SweetHID if
   this stays. Same kernel, drop-ac stays; one boot. Revert: payload-t.
+
+### 2026-11-26 10:45 — payload-u observed; 0155 (fast scaled blit); bundle ad
+- payload-u (750x1624 one-to-one): copy **~1 ms** a swap (was 13.6 ms), no crash, backboardd on GL; but the
+  user saw only black with the home indicator (lock screen without poster/clock; 4-9 swaps per 10 s). Not chased:
+  back to 828x1792.
+- **0155** (commit 9da97a7): scaled_blit builds each panel row branch-free in a cached buffer (the neighbour index
+  at + blend, avg(a,a) == a) and memcpy's it into the panel. xnu 45792012972, bundle ad 45794247403 (mesa as ac).
+- Next: payload-v = payload-t's boot-args (828x1792 scaled) + this kernel; drop-ac stays on the phone.
