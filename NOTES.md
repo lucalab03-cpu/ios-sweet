@@ -1490,3 +1490,21 @@ tools/sweet-root-tweaks.py.
   one eighth a frame) + root.cmd (HAL plug-in, cat disabled.plist), glargs + glcensus=1.
 - Round al bundle is **sweet-bundle-al2** (45871665500: pbwrap 45871550324 = sweet-boot outbox.list tail 1 MB); root.cmd
   also runs sweetjob list and sweetfind (poster data under /private/var/mobile/Library, files in /Library/Wallpaper).
+
+### 2026-11-26 19:40 — round al observed; round am (wallpaper: screen class + PosterBoard's own log; CC trace)
+- Round al (payload-ac, drop-al): **launchd 78% -> 0-9%, mediaserverd 47% -> 0%**; idle CPUs 2-12% busy (were
+  50-80%). No app crash (MobileSMS stayed up). GL census (glcensus=1): no draw refused or left undrawn, so the
+  Control Center glyphs are not a missing CoreAnimation function.
+- disabled.plist: ours = bluetoothd, fairplayd.H2; the rest (bootpd, dhcp6d, magicswitchd.companion, relevanced,
+  otpaird, ftp-proxy false) are iOS's own defaults. Jobs present: nanoregistryd, nanoprefsyncd.2, mediaremoted,
+  PaperBoard, PosterBoard.
+- Wallpaper: /Library/Wallpaper has iOS 16's wallpapers (7400 WWDC_2022, Clownfish...) for **375w-812h, 393w-852h,
+  430w-932h @3x only**; our screen is 414x896 @2x -> WallpaperKit "no compatible wallpaper" (a22-5g run 256). Also:
+  launchd.log (whole boot, 653 KB) shows PosterBoard spawned once and **no poster extension launched at all**, and
+  PosterBoard runs its own binary (pbwrap was taken out in round k for its entitlements), so sweetposter is not in it.
+- Round am: tools/sweetwk (watches NSUserDefaults getters while -[NSUserDefaults
+  wk_ignoreLogicalScreenClassForWallpaperBundle] runs, sets a screen/ignore key to true for mobile+root in global and
+  WallpaperKit/PosterBoard/SpringBoard/CollectionsPoster domains, re-checks in a new process); `sweetjob log LABEL FILE`
+  (OS_ACTIVITY_DT_MODE=YES + StandardErrorPath in launchd.plist) for PosterBoard and PaperBoard -> /var/tmp/sweetlog-*.
+  eagl: gltrace_draws fires at >= N. glargs: gltrace_draws=130 gltrace_frames=40 gltrace_place=100,330,260,520
+  (around the first connectivity toggle, 828x1792 px) gltrace_look=1 gltrace_shaders=1; user opens CC first.
