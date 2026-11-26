@@ -1535,3 +1535,16 @@ tools/sweet-root-tweaks.py.
   pixel3-ios blueeagl.c: vtable 0x1d5b2f6e8, +0x378 function_supported 0x1884b2164, +0x388 function_uniform
   0x1884b21ac, shader table 0x1d5b48a10; entries checked before writing; log /var/tmp/sweetca.log; glhooks=0 off,
   glsb3=1 gives function 40 a shader). mesa 45878203042. root.cmd: no SpringBoard restart any more.
+
+### 2026-11-26 21:50 — round ao observed (hooks work); round ap (PosterBoard store reset)
+- Round ao (drop-ao, payload-ac), user: lock screen black **without the red gradient**, "seems a stable 60 fps".
+  sweetca.log: "QuartzCore 20H392: function_supported watched, function_uniform watched". eagl now knows the
+  functions: 20 c4p x87, 28 ds8 x51, 45 vcm x250 (vibrant colour matrix), 53 hom x11 drawn with its programs; 61 edr /
+  66 lub not drawn (neutral numbers, as on the S7). backboardd restarted once by sweetroot (glargs newer), home fine.
+  GL: 10.3 ms a frame average after 200 frames (19 draws). The red was the plain-drawn vibrancy (as the S7 port said).
+- PosterBoard[246] SIGTRAP; heap strings: "Invalid condition not satisfying: !_stateLock_switcherConfiguration"
+  (first-time setup over an existing switcher configuration: the store half made since the early boots).
+- Round ap = small bundle sweet-tools-ap (45885408846, pbwrap 45885301465 only) + root.cmd: `sweetwk posterreset`
+  once (marker /var/sweet/posterreset.done; store/caches/savedState renamed .sweetbak-DATE, prefs saved to
+  /var/sweet/PosterBoard-prefs.sweetbak-DATE.plist and removed) and `restart PosterBoard /var/sweet/posterreset.done`.
+  No glargs in the drop, so backboardd is not restarted.
