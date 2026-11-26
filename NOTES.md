@@ -1560,3 +1560,7 @@ tools/sweet-root-tweaks.py.
 - PosterBoard's stderr file stays empty even across its assertion crash: OS_ACTIVITY_DT_MODE from launchd gives
   nothing here (a22-5g sets it in-process and reads a pipe). Next for the wallpaper: kernel sampler
   (sweetsample=PosterBoard,SpringBoard) or an in-process log catcher.
+- Round aq (wallpaper): tools/sweetlogcatch (dylib, OS_ACTIVITY_DT_MODE set in-process + stderr to a pipe -> 
+  /var/tmp/sweetlog-PROGRAM.txt; SpringBoard filtered to poster/wallpaper lines), `sweetjob env LABEL KEY=VALUE`;
+  root.cmd puts DYLD_INSERT_LIBRARIES=/usr/local/bin/sweetlogcatch.dylib on com.apple.PosterBoard and
+  com.apple.SpringBoard (launchd.plist: from the next boot -> two boots). pbwrap 45886592351.
