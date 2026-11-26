@@ -1520,3 +1520,18 @@ tools/sweet-root-tweaks.py.
 - Round an: `sweetwk retarget 375w-812h 414w-896h@2x~iphone` (Wallpaper.plist logicalScreenClass, .sweetbak kept;
   the Galaxy S7 port does this for 480w-853h@3x), sweetroot `restart NAME FILE` (PosterBoard, SpringBoard once after
   the retarget; backboardd.orig when glargs is newer: one boot per drop), glargs trace without gltrace_look + glcensus.
+
+### 2026-11-26 21:00 — round an observed; round ao (CoreAnimation function hooks)
+- Round an, boot 1: sweetwk retargeted 9 Wallpaper.plist (375w-812h -> 414w-896h@2x~iphone); restarts of SpringBoard
+  then backboardd left the home gesture dead until the next boot (boot 2 fine, no restarts). Boot 2: still no poster
+  extension launched (launchd.log), PosterBoard's stderr file empty (OS_ACTIVITY_DT_MODE from launchd does nothing).
+- CC trace (frames 141-180, no crash): the four connectivity buttons are white circles (program 5, colour 1 1 1 1) in
+  offscreen groups, composited onto the display with **program 0** (a draw with no program), then the glyph (program
+  9, white) on top: white on white. eagl never logged "a draw with no program is CoreAnimation's function N": its
+  ca_context is never set -- **our sweetgl never had HakiOS inject.c's GLContext::function_uniform hook**, so every
+  function-drawn effect (vibrancy, colour matrix) is drawn as a plain picture. The S7 port says the same bug made the
+  lock screen's vibrancy gradient "a red veil over the wallpaper".
+- Round ao: tools/sweetgl/ca_hooks.c (from wardevsa/ios-a5xelte herolte, MIT; addresses for QuartzCore 20H392 =
+  pixel3-ios blueeagl.c: vtable 0x1d5b2f6e8, +0x378 function_supported 0x1884b2164, +0x388 function_uniform
+  0x1884b21ac, shader table 0x1d5b48a10; entries checked before writing; log /var/tmp/sweetca.log; glhooks=0 off,
+  glsb3=1 gives function 40 a shader). mesa 45878203042. root.cmd: no SpringBoard restart any more.
