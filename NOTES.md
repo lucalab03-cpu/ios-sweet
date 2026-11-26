@@ -1459,3 +1459,7 @@ tools/sweet-root-tweaks.py.
 - sweetaccel-d no longer started (tools/pbwrap/sweet-boot.list, also in drop-ak): idle since 0160 but 9-15% of a CPU
   (SweetAccelControl selector 0 waits in 1 ms polls). Not an iOS service: nothing to switch back on unless
   sweetacceld=1 is used.
+- Round ak files: bundle 45869180085 (xnu 45867350313, mesa 45867353845, pbwrap 45867357678, panvk 45701349534,
+  metal2 45805702530); payload-ab = payload-aa's boot-args + new kernel (0161 verified: sweet_prof_cpu 440 -> 1192
+  bytes) + ADT gamut sRGB (sha256 364680e3...); drop-ak.zip sha256 1ae35972... (bundle drop + var/sweet root.cmd,
+  glargs, gl, sym-aj.in, outbox.list + usr/local/etc/sweet-boot.list).
