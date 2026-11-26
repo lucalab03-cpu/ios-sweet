@@ -249,6 +249,8 @@ struct image {
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
 	GLsizei width, height;
+	IOSurfaceRef shadow;            /* ios-sweet 0156: the frame scaled to the panel by the GPU, for the display to copy */
+	GLuint shadow_texture;          /* ... that surface's memory as a texture */
 };
 
 struct eagl {
@@ -541,6 +543,8 @@ image_of(struct eagl *e, GLuint texture)
 	return NULL;
 }
 
+static void shadow_drop(struct image *image);
+
 static struct image *
 image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 {
@@ -556,6 +560,7 @@ image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 		if (image->mirror != 0) {
 			glDeleteTextures(1, &image->mirror);
 		}
+		shadow_drop(image);
 		CFRelease(image->surface);
 	}
 	memset(image, 0, sizeof(*image));
@@ -573,6 +578,7 @@ image_forget(struct eagl *e, GLuint texture)
 		if (image->mirror != 0) {
 			glDeleteTextures(1, &image->mirror);
 		}
+		shadow_drop(image);
 		CFRelease(image->surface);
 		*image = e->images[--e->image_count];
 	}
@@ -770,6 +776,123 @@ surface_to_texture(struct eagl *e, struct image *image)
 }
 
 /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
+/*
+ * ios-sweet, kernel patch 0156: the display scaled every 828x1792 frame down to the 720x1604 panel on the CPU, 13.6 ms
+ * a frame, where a one-to-one copy takes ~1 ms. So a frame of a surface the display shows is drawn once more here,
+ * scaled by the GPU with a linear filter, into a panel-sized surface of ours (its shadow), and the kernel is told
+ * (sysctl sweetmali.fbshadow), after which it copies the shadow one to one. The kernel says which surfaces the
+ * display has been swapping and the sizes; /var/sweet/gl-noshadow or boot-arg sweetfbshadow=0 turns this off.
+ */
+static uint32_t shadow_info[8];         /* panel w, h, presented w, h, surfaces swapped (the kernel's) */
+static int shadow_on = -1;
+static unsigned shadows_made;
+
+static void
+shadow_drop(struct image *image)
+{
+	if (image->shadow != NULL) {
+		uint32_t pair[2] = { IOSurfaceGetID(image->surface), 0 };
+
+		(void)sysctlbyname("sweetmali.fbshadow", NULL, NULL, pair, sizeof(pair));
+		if (image->shadow_texture != 0) {
+			glDeleteTextures(1, &image->shadow_texture);
+		}
+		CFRelease(image->shadow);
+		image->shadow = NULL;
+		image->shadow_texture = 0;
+	}
+}
+
+static void
+shadow_look(void)
+{
+	size_t size = sizeof(shadow_info);
+
+	if (shadow_on < 0) {
+		shadow_on = access("/var/sweet/gl-noshadow", F_OK) != 0;
+	}
+	if (!shadow_on || sysctlbyname("sweetmali.fbshadow", shadow_info, &size, NULL, 0) != 0 || size < sizeof(shadow_info)) {
+		shadow_info[0] = 0;
+	}
+}
+
+static IOSurfaceRef
+shadow_surface(uint32_t width, uint32_t height)
+{
+	int32_t w = (int32_t)width, h = (int32_t)height, bpe = 4, row = (int32_t)width * 4, format = 0x42475241; /* 'BGRA' */
+	const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfaceBytesPerRow,
+		kIOSurfacePixelFormat };
+	const void *values[5];
+	CFDictionaryRef properties;
+	IOSurfaceRef surface;
+
+	values[0] = CFNumberCreate(NULL, kCFNumberSInt32Type, &w);
+	values[1] = CFNumberCreate(NULL, kCFNumberSInt32Type, &h);
+	values[2] = CFNumberCreate(NULL, kCFNumberSInt32Type, &bpe);
+	values[3] = CFNumberCreate(NULL, kCFNumberSInt32Type, &row);
+	values[4] = CFNumberCreate(NULL, kCFNumberSInt32Type, &format);
+	properties = CFDictionaryCreate(NULL, keys, values, 5, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	for (int i = 0; i < 5; i++) {
+		CFRelease(values[i]);
+	}
+	surface = IOSurfaceCreate(properties);
+	CFRelease(properties);
+	return surface;
+}
+
+static void
+shadow_draw(struct eagl *e, struct image *image)
+{
+	uint32_t id = IOSurfaceGetID(image->surface), pw = shadow_info[0], ph = shadow_info[1];
+	bool swapped = false;
+	GLint read = 0, draw = 0, bound = 0;
+
+	if (pw == 0 || (uint32_t)image->width != shadow_info[2] || (uint32_t)image->height != shadow_info[3]) {
+		return;
+	}
+	for (int i = 4; i < 8; i++) {
+		swapped |= shadow_info[i] == id;
+	}
+	if (!swapped) {
+		return;
+	}
+	if (image->shadow == NULL) {
+		image->shadow = shadow_surface(pw, ph);
+		if (image->shadow == NULL) {
+			return;
+		}
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+		glGenTextures(1, &image->shadow_texture);
+		glBindTexture(GL_TEXTURE_2D, image->shadow_texture);
+		if (!redwood_gl_surface_texture(e->gl, IOSurfaceGetID(image->shadow))) {
+			glDeleteTextures(1, &image->shadow_texture);
+			image->shadow_texture = 0;
+		}
+		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+		if (shadows_made++ < 8) {
+			say("redwood-gl: surface %u (%d x %d) gets a panel-sized shadow, surface %u (%u x %u)%s\n", id, image->width,
+			    image->height, IOSurfaceGetID(image->shadow), pw, ph, image->shadow_texture != 0 ? "" : ": NOT a texture");
+		}
+	}
+	if (image->shadow_texture == 0) {
+		return;
+	}
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->shadow_texture, 0);
+	glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? (GLint)ph : 0, (GLint)pw,
+	    image->invert ? 0 : (GLint)ph, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	{
+		uint32_t pair[2] = { id, IOSurfaceGetID(image->shadow) };
+		(void)sysctlbyname("sweetmali.fbshadow", NULL, NULL, pair, sizeof(pair));
+	}
+}
+
 static void
 target_to_surface(struct eagl *e, struct image *image)
 {
@@ -798,6 +921,7 @@ target_to_surface(struct eagl *e, struct image *image)
 		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+		shadow_draw(e, image);  /* ios-sweet 0156 */
 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
 			IOSurfaceUnlock(surface, 0, NULL);
 		}
@@ -1050,6 +1174,7 @@ frame_end(struct eagl *e, bool finished)
 	unsigned copied = 0, in_place = 0;
 
 	clear_now(e);
+	shadow_look();          /* ios-sweet 0156: which surfaces the display swaps, and the panel's size */
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {

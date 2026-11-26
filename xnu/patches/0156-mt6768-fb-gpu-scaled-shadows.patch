@@ -1,0 +1,205 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+index 806b253..d73a65f 100644
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -1444,4 +1444,127 @@ sweet_mali_init(void)
+ 		printf("SWEET MALI: kernel_thread_start failed\n");
+ 	}
+ }
++
++/*
++ * Patch 0156: frames scaled to the panel by the GPU. The panel copy (SweetFramebuffer.cpp) scales the presented
++ * 828x1792 surface down to the 720x1604 panel on the CPU: 13.6 ms a frame, while a one-to-one copy takes ~1 ms
++ * (payload-u, 2026-11-26). libsweet-gl draws every frame of a surface the display shows once more, scaled by the
++ * GPU (linear filter), into a panel-sized surface of its own -- its "shadow" -- and tells the kernel here which one
++ * belongs to which, after each such draw. The display copies the shadow one to one when the swapped surface has one
++ * that was drawn since its last swap, and scales the surface itself otherwise.
++ *
++ * sysctl sweetmali.fbshadow: write { uint32 src, uint32 dst } (dst 0: forget src); read { uint32 panel w, h,
++ * presented w, h, the last four surfaces swapped }. Boot-arg sweetfbshadow=0: never used.
++ */
++#define SWEET_FB_SHADOWS 8
++static struct {
++	uint32_t src, dst;
++	bool fresh;
++} fb_shadows[SWEET_FB_SHADOWS];
++static uint32_t fb_shadow_info[8];              /* panel w, h, presented w, h, swapped[4] */
++static uint32_t fb_swapped_at;
++static int fb_shadow_on = -1;
++static LCK_MTX_DECLARE(fb_shadow_lock, &mali_lock_group);
++
++static bool
++fb_shadow_enabled(void)
++{
++	if (fb_shadow_on < 0) {
++		int v = 1;
++		(void)PE_parse_boot_argn("sweetfbshadow", &v, sizeof(v));
++		fb_shadow_on = v != 0;
++	}
++	return fb_shadow_on != 0;
++}
++
++/* SweetFramebuffer.cpp: the panel's and the presented size, once */
++void
++sweet_fb_shadow_dims(uint32_t pw, uint32_t ph, uint32_t lw, uint32_t lh)
++{
++	lck_mtx_lock(&fb_shadow_lock);
++	fb_shadow_info[0] = pw;
++	fb_shadow_info[1] = ph;
++	fb_shadow_info[2] = lw;
++	fb_shadow_info[3] = lh;
++	lck_mtx_unlock(&fb_shadow_lock);
++}
++
++/*
++ * SweetFramebuffer.cpp, at a swap of surface src: its shadow if one was drawn since the last swap (taken: the next
++ * swap needs a new draw), else 0. The swap is noted either way (the library draws shadows only for surfaces swapped).
++ */
++uint32_t
++sweet_fb_shadow_take(uint32_t src)
++{
++	uint32_t dst = 0;
++	bool seen = false;
++
++	if (!fb_shadow_enabled() || src == 0) {
++		return 0;
++	}
++	lck_mtx_lock(&fb_shadow_lock);
++	for (int i = 0; i < SWEET_FB_SHADOWS; i++) {
++		if (fb_shadows[i].src == src && fb_shadows[i].dst != 0) {
++			if (fb_shadows[i].fresh) {
++				dst = fb_shadows[i].dst;
++				fb_shadows[i].fresh = false;
++			}
++			break;
++		}
++	}
++	for (int i = 0; i < 4; i++) {
++		seen |= fb_shadow_info[4 + i] == src;
++	}
++	if (!seen) {
++		fb_shadow_info[4 + (fb_swapped_at++ & 3)] = src;
++	}
++	lck_mtx_unlock(&fb_shadow_lock);
++	return dst;
++}
++
++static int
++sysctl_fbshadow SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	uint32_t info[8], pair[2];
++	int error;
++
++	lck_mtx_lock(&fb_shadow_lock);
++	memcpy(info, fb_shadow_info, sizeof(info));
++	lck_mtx_unlock(&fb_shadow_lock);
++	if (!fb_shadow_enabled()) {
++		info[0] = info[1] = 0;
++	}
++	error = SYSCTL_OUT(req, info, sizeof(info));
++	if (error != 0 || req->newptr == USER_ADDR_NULL) {
++		return error;
++	}
++	if (req->newlen != sizeof(pair)) {
++		return EINVAL;
++	}
++	error = SYSCTL_IN(req, pair, sizeof(pair));
++	if (error != 0) {
++		return error;
++	}
++	lck_mtx_lock(&fb_shadow_lock);
++	int slot = -1, empty = -1;
++	for (int i = 0; i < SWEET_FB_SHADOWS; i++) {
++		if (fb_shadows[i].src == pair[0] && fb_shadows[i].dst != 0) {
++			slot = i;
++		} else if (fb_shadows[i].dst == 0 && empty < 0) {
++			empty = i;
++		}
++	}
++	if (slot < 0) {
++		slot = empty >= 0 ? empty : (int)(pair[0] % SWEET_FB_SHADOWS);
++	}
++	fb_shadows[slot].src = pair[0];
++	fb_shadows[slot].dst = pair[1];
++	fb_shadows[slot].fresh = pair[1] != 0;
++	lck_mtx_unlock(&fb_shadow_lock);
++	return 0;
++}
++SYSCTL_PROC(_sweetmali, OID_AUTO, fbshadow, CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, NULL, 0,
++    sysctl_fbshadow, "S", "panel shadows of presented surfaces (patch 0156)");
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 533ff43..8297936 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -46,6 +46,10 @@ extern "C" processor_t thread_bind(processor_t processor);
+ extern "C" int ml_get_max_cpu_number(void);
+ static uint64_t sweet_fb_rowread_us;       /* 0149: time spent reading source rows, for the stats */
+ extern "C" bool sweet_mali_fences_wait(const uint64_t *fences, uint32_t count, bool all, uint64_t deadline, uint32_t *first);
++/* bsd/dev/sweet_mali.c: panel-sized shadows of presented surfaces, drawn by the GPU (patch 0156) */
++extern "C" void sweet_fb_shadow_dims(uint32_t pw, uint32_t ph, uint32_t lw, uint32_t lh);
++extern "C" uint32_t sweet_fb_shadow_take(uint32_t src);
++static uint32_t sweet_fb_shadow_used, sweet_fb_shadow_scaled;
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -319,6 +323,9 @@ AppleCLCD::start(IOService *provider)
+ 	int crop = 0;
+ 	PE_parse_boot_argn("sweetfb_crop", &crop, sizeof(crop));
+ 	fScale = (!native && !crop && (fLogicalW != fWidth || fLogicalH != fHeight) && fWidth <= 2048);
++	if (fScale) {
++		sweet_fb_shadow_dims(fWidth, fHeight, fLogicalW, fLogicalH);   /* 0156 */
++	}
+ 	if (fScale) {
+ 		fOffX = fOffY = 0;
+ 	}
+@@ -557,10 +564,13 @@ AppleCLCD::stats(void)
+ 		return;
+ 	}
+ 	IOLog("SWEET FB: in %llu ms: %llu swaps, %llu frames shown (%llu replaced by a newer one), copy %llu us average "
+-	    "%llu longest (source rows read %llu us), GPU wait %llu us average\n", ns / 1000000, fStatSwaps, fStatCopies,
++	    "%llu longest (source rows read %llu us), GPU wait %llu us average; GPU-scaled %u, scaled here %u\n", ns / 1000000,
++	    fStatSwaps, fStatCopies,
+ 	    fStatDropped, fStatCopies ? fStatCopyUs / fStatCopies : 0, fStatCopyMax,
+-	    fStatCopies ? sweet_fb_rowread_us / fStatCopies : 0, fStatCopies ? fStatWaitUs / fStatCopies : 0);
++	    fStatCopies ? sweet_fb_rowread_us / fStatCopies : 0, fStatCopies ? fStatWaitUs / fStatCopies : 0,
++	    sweet_fb_shadow_used, sweet_fb_shadow_scaled);
+ 	sweet_fb_rowread_us = 0;
++	sweet_fb_shadow_used = sweet_fb_shadow_scaled = 0;
+ 	fStatT0 = now;
+ 	fStatSwaps = fStatCopies = fStatDropped = fStatCopyUs = fStatCopyMax = fStatWaitUs = 0;
+ }
+@@ -897,7 +907,30 @@ AppleCLCD::present(const uint8_t *rec)
+ 			dx = dy = 0;
+ 		}
+ 		if (fScale) {
+-			scaled_blit(s, src, bpe, sx, sy, dx, dy, w, h);
++			/*
++			 * Patch 0156: a panel-sized copy of this frame drawn by the GPU (libsweet-gl): copied one to one, ~1 ms
++			 * instead of 13.6 ms of scaling here. Only for a whole-screen layer at the origin.
++			 */
++			uint32_t shadowID = sweet_fb_shadow_take(id);
++			SweetSurface *p = shadowID != 0 && sx == 0 && sy == 0 && dx == 0 && dy == 0 &&
++			    w == (int32_t)fLogicalW && h == (int32_t)fLogicalH ? sweet_surface_copy(shadowID) : NULL;
++			uintptr_t psrc = p != NULL ? p->kernelAddress() : 0;
++			if (p != NULL && psrc != 0 && p->width == fWidth && p->height == fHeight && p->elementWidth == 1 &&
++			    p->elementHeight == 1 && (p->bytesPerElement == 4 || p->bytesPerElement == 0) && p->memory != NULL &&
++			    (uint64_t)p->offset + (uint64_t)p->bytesPerRow * (fHeight - 1) + (uint64_t)fWidth * 4 <= p->memory->getLength()) {
++				for (uint32_t y = 0; y < fHeight; y++) {
++					memcpy((void *)(fPixels + (uint64_t)y * fRowBytes),
++					    (const void *)(psrc + p->offset + (uint64_t)y * p->bytesPerRow), (size_t)fWidth * 4);
++				}
++				flushPanel(0, fHeight);
++				if (sweet_fb_shadow_used++ == 0) {
++					IOLog("SWEET FB: frames come scaled by the GPU (surface %u for %u), copied one to one\n", shadowID, id);
++				}
++			} else {
++				sweet_fb_shadow_scaled++;
++				scaled_blit(s, src, bpe, sx, sy, dx, dy, w, h);
++			}
++			OSSafeReleaseNULL(p);
+ 			s->release();
+ 			continue;
+ 		}
