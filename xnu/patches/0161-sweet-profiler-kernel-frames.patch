@@ -1,0 +1,112 @@
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -1056,6 +1056,7 @@
+ 	int32_t pid;
+ 	uint16_t flags;                 /* 1 sampled, 2 user mode, 4 idle, 8 kernel thread */
+ 	uint16_t cpu;
++	uint64_t kfr[6];                /* 0161: interrupted in the kernel, its lr and return addresses (unslid) */
+ };
+ void sweet_prof_cpu(void *arg);
+ int sweet_prof_walk(void *task, uint64_t fp, uint64_t *out, int max);
+@@ -1063,6 +1064,31 @@
+ void sweet_prof_task_ref(void *task, int add);
+ extern void bsd_getthreadname(void *uth, char *buffer);
+ 
++/*
++ * 0161: the kernel frames under an interrupted kernel pc: the saved lr, then the return addresses of the fp chain,
++ * as long as fp stays inside the thread's kernel stack (an fp elsewhere, the interrupt stack for one, ends it).
++ * The profiler's cross-call is only taken where interrupts are enabled again, so time spent with them masked shows
++ * as one pc in ml_set_interrupts_enabled (80% of launchd's kernel time, round aj); these frames say who masked them.
++ */
++static void
++sweet_prof_kframes(thread_t th, arm_saved_state_t *st, uint64_t *out, int max)
++{
++	vm_offset_t lo = th->kernel_stack, hi = lo + kernel_stack_size;
++	uint64_t fp = get_saved_state_fp(st);
++	int n = 0;
++
++	out[n++] = VM_KERNEL_UNSLIDE(get_saved_state_lr(st));
++	while (n < max && lo != 0 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0) {
++		const uint64_t *frame = (const uint64_t *)fp;
++
++		out[n++] = VM_KERNEL_UNSLIDE(frame[1]);
++		if (frame[0] <= fp) {
++			break;
++		}
++		fp = frame[0];
++	}
++}
++
+ void
+ sweet_prof_cpu(void *arg)
+ {
+@@ -1082,6 +1108,7 @@
+ 	h->task = task;
+ 	h->pid = 0;
+ 	h->pc = h->lr = h->fp = h->kpc = 0;
++	bzero(h->kfr, sizeof(h->kfr));
+ 	if (th == current_processor()->idle_thread) {
+ 		h->flags = 1 | 4;
+ 		return;
+@@ -1089,6 +1116,7 @@
+ 	user = st != NULL && is_saved_state64(st) && PSR64_IS_USER(get_saved_state_cpsr(st));
+ 	if (!user && st != NULL && is_saved_state64(st)) {
+ 		h->kpc = VM_KERNEL_UNSLIDE(get_saved_state_pc(st));
++		sweet_prof_kframes(th, st, h->kfr, (int)(sizeof(h->kfr) / sizeof(h->kfr[0])));
+ 	}
+ 	if (task == kernel_task || task == TASK_NULL) {
+ 		h->flags = 1 | 8;
+--- a/bsd/dev/sweet_prof.c
++++ b/bsd/dev/sweet_prof.c
+@@ -51,6 +51,7 @@
+ 	int32_t pid;
+ 	uint16_t flags;                 /* PH_* */
+ 	uint16_t cpu;
++	uint64_t kfr[6];                /* 0161: kernel lr and return addresses under kpc (osfmk/kern/exception.c) */
+ };
+ #define PH_SAMPLED      1
+ #define PH_USER         2
+@@ -82,6 +83,7 @@
+ 	uint32_t cpu[PROF_CPUS];
+ 	struct count tids[NTIDS];
+ 	struct count leaf[TABLE], caller[TABLE], kern[TABLE];   /* kern: 0150, its own kernel pcs */
++	struct count kcaller[TABLE];    /* 0161: the kernel return addresses under them, once per sample */
+ 	uint64_t images_sig;
+ };
+ 
+@@ -354,6 +356,7 @@
+ 		print_counts("L", t->name, t->leaf, TABLE, 48, true);
+ 		print_counts("C", t->name, t->caller, TABLE, 48, true);
+ 		print_counts("KT", t->name, t->kern, TABLE, 24, true);
++		print_counts("KC", t->name, t->kcaller, TABLE, 48, true);
+ 	}
+ 	print_counts("K", "kernel", kpcs, TABLE, 32, true);
+ 	if (kpc_lost) {
+@@ -369,6 +372,7 @@
+ 		bzero(t->leaf, sizeof(t->leaf));
+ 		bzero(t->caller, sizeof(t->caller));
+ 		bzero(t->kern, sizeof(t->kern));
++		bzero(t->kcaller, sizeof(t->kcaller));
+ 	}
+ 	bzero(kpcs, sizeof(kpcs));
+ 	bzero(pids, sizeof(pids));
+@@ -410,6 +414,19 @@
+ 		if (!(h->flags & PH_USER) && h->kpc != 0 && !bump(t->kern, TABLE, h->kpc)) {
+ 			t->lost++;
+ 		}
++		for (int f = 0; !(h->flags & PH_USER) && f < (int)(sizeof(h->kfr) / sizeof(h->kfr[0])); f++) {
++			bool again = false;
++
++			if (h->kfr[f] == 0) {
++				continue;
++			}
++			for (int g = 0; g < f; g++) {
++				again |= h->kfr[g] == h->kfr[f];
++			}
++			if (!again && !bump(t->kcaller, TABLE, h->kfr[f])) {
++				t->lost++;
++			}
++		}
+ 		if (h->pc == 0) {
+ 			return;
+ 		}

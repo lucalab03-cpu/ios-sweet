@@ -250,6 +250,7 @@ struct image {
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
 	GLsizei width, height;
+	bool private_target;            /* ios-sweet: a wide-colour surface drawn into a texture of ours only (see my_attachImage) */
 	IOSurfaceRef shadow;            /* ios-sweet 0156: the frame scaled to the panel by the GPU, for the display to copy */
 	GLuint shadow_texture;          /* ... that surface's memory as a texture */
 };
@@ -362,6 +363,7 @@ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
  * Boot-arg glblit=0: the surface's memory, as before.
  */
 static int blit_targets = 1;
+static int wide_targets = 1;            /* ios-sweet: 'b3a8'/'w30r' targets drawn into textures of ours (glwide=0: refused) */
 /*
  * A frame that is handed to the display must have been drawn. The display's driver waits for
  * the GPU itself before it puts a surface on the panel, on a thread of its own, and says so in
@@ -908,6 +910,9 @@ target_to_surface(struct eagl *e, struct image *image)
 	uint8_t *base;
 
 	image->drawn = false;
+	if (image->private_target) {
+		return;                 /* ios-sweet: what is drawn stays in the texture (wide-colour surfaces) */
+	}
 	if (image->mirror != 0) {
 		GLint read = 0, draw = 0;
 
@@ -1215,7 +1220,7 @@ frame_end(struct eagl *e, bool finished)
 	waited = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn) {
-			copied += !e->images[i].shared;
+			copied += !e->images[i].shared && !e->images[i].private_target;
 			target_to_surface(e, &e->images[i]);
 			if (shown_texture != 0) {
 				show_texture(e, &e->images[i]);
@@ -4128,6 +4133,36 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	clear_now(e);
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
 	pixels = IOSurfaceGetPixelFormat(surface);
+	/*
+	 * ios-sweet (2026-11-26): wide-colour targets. CoreAnimation draws some layers offscreen into 'b3a8' (BGRA10_XR:
+	 * 30-bit colour and 8-bit opacity in two planes) and 'w30r' (BGR10_XR) surfaces, then shows them from the same
+	 * texture. They were refused here ("not done"), every draw into them failed (glDrawElements 0x506, 326 of them in
+	 * round aj) and what they hold was missing on screen (Control Center's toggles had no glyphs, the home screen no
+	 * wallpaper). The texture is given storage of its own in 8-bit RGBA instead: what CoreAnimation draws into it, it
+	 * finds there when it draws with it. Nothing is copied into the surface (a reader of the surface itself sees what
+	 * it held before) and colours beyond sRGB are clamped. Off with glwide=0 in /var/sweet/glargs.
+	 */
+	if (wide_targets && target == GL_TEXTURE_2D && texture != 0 && (pixels == 0x62336138 || pixels == 0x77333072) &&
+	    (image = image_new(e, (GLuint)texture, surface)) != NULL) {
+		static unsigned wide_said;
+
+		image->target = true;
+		image->private_target = true;
+		image->to = GL_TEXTURE_2D;
+		image->invert = inverted;
+		image->width = (GLsizei)IOSurfaceGetWidth(surface);
+		image->height = (GLsizei)IOSurfaceGetHeight(surface);
+		image->internal = image->format = GL_RGBA;
+		image->type = GL_UNSIGNED_BYTE;
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image->width, image->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		if (wide_said++ < 8) {
+			say("redwood-gl: -attachImage: texture %d is IOSurface %u ('%.4s' %d x %d): drawn into a texture of ours "
+			    "(8-bit RGBA), not copied back\n", texture, IOSurfaceGetID(surface),
+			    (const char *)&(uint32_t){ __builtin_bswap32(pixels) }, image->width, image->height);
+		}
+		eagl_leave(e, 0x970);
+		return YES;
+	}
 	if (target != GL_TEXTURE_2D || texture == 0 || (pixels != 'BGRA' && pixels != 0) ||
 	    IOSurfaceGetBytesPerElement(surface) != 4 || IOSurfaceGetPlaneCount(surface) != 0 ||
 	    (image = image_new(e, (GLuint)texture, surface)) == NULL) {
@@ -4464,6 +4499,7 @@ install(void)
 		}
 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
 		blit_targets = strstr(arguments, "glblit=0") == NULL;
+		wide_targets = strstr(arguments, "glwide=0") == NULL;
 		sync_frames = strstr(arguments, "glsync=0") == NULL;
 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
 			wait_for_frames = 0;

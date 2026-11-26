@@ -1437,3 +1437,22 @@ tools/sweet-root-tweaks.py.
   time (~1600 SUBMITs/s) -> **0159** list of imported indices. sweetaccel-d: every accelerator request forwarded with
   a 1 ms poll (backboardd selector 0x21 ~1500 times a fetch) -> **0160** answered in the kernel as the daemon did
   (boot-arg sweetacceld=1 forwards again).
+
+### 2026-11-26 18:30 — round aj observed; round ak (sRGB display, wide-colour targets, kernel frames, live launchd log)
+- Round aj (payload-aa = 0158+0159+0160, drop-aj): 0159 works (SweetMaliUserClient::submit gone from backboardd's
+  kernel profile); up to 424 swaps/10 s; ~215 us a draw, 16.6-18 ms a frame at 76-81 draws; panel copy ~1.3 ms, all
+  GPU-scaled. 0158 not exercised (L0 already ours). launchd 77-78%, mediaserverd 44-47%, sweetaccel-d 9-15%.
+- launchd's and mediaserverd's kernel time is ~80% one pc in ml_set_interrupts_enabled_with_debug. Checked: NOT the
+  serial console (sweetfb_noconsole=1 mutes _cnputs after the first swap; kprintf masks interrupts but nothing in
+  steady state calls it). The profiler's cross-call is taken only where interrupts come back on, so all masked time
+  (scheduler, waitq, IPC under splsched) lands there -> **0161**: the profiler keeps the interrupted kernel lr and fp
+  chain (PRF KC lines), to see who masks them.
+- Control Center (photo): connectivity toggles blank, Focus glyph missing; sweetgl.log: 167 x 'b3a8' + 10 x 'w30r'
+  attachImage "not done", 326 glDrawElements 0x506. Root cause found in Jesvi-iOS (xnuloader/loader.c): the iPhone X
+  /product "artwork-display-gamut" = P3 makes iOS treat the screen as extended colour (BGRA10_XR targets, WebKit
+  tiles). Round ak: payload ADT /product:artwork-display-gamut = sRGB (tools/repayload.py --adt-str), MobileGestalt
+  cache moved aside (root.cmd, original kept as .sweetbak); eagl.c also draws any remaining 'b3a8'/'w30r' target into
+  a private RGBA8 texture (not copied back; glwide=0 refuses them as before).
+- MobileSMS/MobileSlideShow sig 6, same stack (to name: tools/pbwrap/sym-aj.in, slide 0xad90000); an older MobileSMS
+  report: SIGSEGV in CI::GLContext::GLContext (CoreImage's icon compositor took the OpenGL ES path in the app).
+- sweet-boot: /var/sweet/outbox.list names files whose last 256 KB go to the outbox every 10 s (launchd.log live).

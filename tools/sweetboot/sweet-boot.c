@@ -162,6 +162,50 @@ write_outbox(void)
 		}
 	}
 	closedir(d);
+	/*
+	 * 2026-11-26: files elsewhere, named one absolute path a line in /var/sweet/outbox.list, give their last 256 KB
+	 * the same way (what launchd keeps writing to its log, seen as it is now and not as a copy made at boot).
+	 */
+	FILE *list = fopen("/var/sweet/outbox.list", "r");
+	char want[300];
+
+	while (list != NULL && fgets(want, sizeof(want), list) != NULL) {
+		want[strcspn(want, "\r\n")] = 0;
+		if (want[0] != '/') {
+			continue;
+		}
+		int in = open(want, O_RDONLY);
+
+		if (in < 0) {
+			continue;
+		}
+		if (sizeof(buf) - fill < 400) {
+			OUT_FLUSH();
+		}
+		off_t size = lseek(in, 0, SEEK_END);
+		off_t at = size > (off_t)(256 << 10) ? size - (off_t)(256 << 10) : 0;
+
+		fill += (size_t)snprintf(buf + fill, sizeof(buf) - fill, "\n===== %s (last %lld of %lld bytes) =====\n", want,
+		    (long long)(size - at), (long long)size);
+		for (;;) {
+			if (fill == sizeof(buf)) {
+				OUT_FLUSH();
+			}
+			ssize_t got = pread(in, buf + fill, sizeof(buf) - fill, at);
+			if (got <= 0) {
+				break;
+			}
+			fill += (size_t)got;
+			at += got;
+		}
+		close(in);
+		if (pos + fill > OUTBOX_MAX - (64 << 10)) {
+			break;
+		}
+	}
+	if (list != NULL) {
+		fclose(list);
+	}
 	OUT_FLUSH();
 #undef OUT_FLUSH
 	/* zero the next block so a shorter outbox does not show an older tail, then the header */
