@@ -1488,3 +1488,5 @@ tools/sweet-root-tweaks.py.
 - Control Center glyphs: glcensus=1 this round (draws CoreAnimation makes with no program that are not drawn).
 - Round al: payload-ac (payload-ab + sweetscan), drop-al = bundle sweet-bundle-al (mesa 45870264243: surface_changed
   one eighth a frame) + root.cmd (HAL plug-in, cat disabled.plist), glargs + glcensus=1.
+- Round al bundle is **sweet-bundle-al2** (45871665500: pbwrap 45871550324 = sweet-boot outbox.list tail 1 MB); root.cmd
+  also runs sweetjob list and sweetfind (poster data under /private/var/mobile/Library, files in /Library/Wallpaper).
