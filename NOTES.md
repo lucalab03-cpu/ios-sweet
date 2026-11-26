@@ -1363,3 +1363,18 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   size: IOSurface 720x1604 BGRA of ours as a texture, glBlitFramebuffer GL_LINEAR, then the pair to the kernel.
   /var/sweet/gl-noshadow off.
 - Builds: xnu 45797255780, mesa 45798671264, bundle ae 45799954487.
+
+### 2026-11-26 11:50 — round ae observed (0156 works); round af; Mapple link found
+- Round ae: "SWEET FB: frames come scaled by the GPU (surface 8 for 2), copied one to one"; copy **1.4 ms** when
+  GPU-scaled; 182 of 249 swaps GPU-scaled, 67 scaled in the kernel (swaps with no new draw -> shadow not "fresh").
+  No crash. User photo (Spotlight + keyboard): correct orientation; fine diagonal hatching on light blurred
+  materials (likely CA's material noise/dither texture at the wrong scale; same as the "red striped" lock screen).
+- Round af (xnu 45801521190, mesa 45801525175, bundle 45803857455): the last shadow serves swaps without a new draw;
+  eagl draws shadows for in-place targets too; glargs `glwait=0 glblit=0` (CA draws straight into the surfaces,
+  no private texture + 6 MB blit a frame).
+- **Mapple link** (open-mapple: xnu_kernel_mediatek_common bsd/dev/usb_link.c APSL, mapple_build/tools/mapple-link.py
+  MIT, mapple_userland/tools/mappled MIT): MUSB peripheral by polling, vendor-class link with live log, push/pull,
+  run (mappled), on MT6781. MT6768 (live.dts): same MUSB at 0x11200000 (mt6768-usb20, 16 eps), T-PHY
+  generic-tphy-v1 at 0x11cc0000 with u2 port at 0x11cc0800 (MT6781: 0x11ca0000 + 0x300). Proposed to the user as
+  a parallel port (needs pyusb + libusb on the PC). Clones in /home/claude/ext/{mapple_build,mapple_userland,
+  xnu_kernel_mediatek_mt6781}.
