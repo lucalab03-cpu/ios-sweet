@@ -16,6 +16,15 @@
  * system's own extensions, PosterBoard found no provider and the wallpaper stayed black. The Galaxy S7 port
  * (wardevsa/ios-a5xelte, herolte, gpu/eagl/test/hero-run.c, MIT) rebuilds it from the phone with these calls; this
  * program does the same. The first rebuild keeps lsd busy for a few minutes (SpringBoard waits for it on the S7).
+ *
+ * Round as (2026-11-26): round ar's rebuild answered NO at once and the migrator in 0 s: sweetls was signed with no
+ * entitlements, and lsd refuses both without com.apple.lsapplicationworkspace.rebuildappdatabases and
+ * com.apple.private.coreservices.canmaplsdatabase (the S7's hero-run.entitlements has them; S7: "database rebuilt: 1",
+ * 1 -> 515 plug-ins, widgets and wallpapers back). Now signed with sweetls.entitlements; the migrator runs again
+ * (new marker ls-migrator2.done); the posters are registered through LSRegisterURL or, when it is not exported,
+ * -[LSApplicationWorkspace registerPlugin:]; the entitlements lsd will see are checked first (csops).
+ * Also: whether ImageIO draws the stock wallpaper's HEIC (the S7 found 0 lit pixels: no HEVC decoder without
+ * Apple's hardware), in a child, so the answer is there whatever happens.
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <objc/message.h>
@@ -28,6 +37,14 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <sys/sysctl.h>
+#include <signal.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+
+int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#define SWEET_CS_OPS_ENTITLEMENTS_BLOB 7
 
 static FILE *log_file;
 
@@ -108,6 +125,11 @@ census(const char *when, id workspace)
 	size_t count = plugins != NULL ? ((size_t (*)(id, SEL))objc_msgSend)(plugins, sel_registerName("count")) : 0;
 
 	say("sweetls: %s (uid %d): %zu plug-ins known\n", when, getuid(), count);
+	for (size_t i = 0; i < count && i < 3; i++) {
+		id plugin = ((id (*)(id, SEL, size_t))objc_msgSend)(plugins, sel_registerName("objectAtIndex:"), i);
+
+		say("sweetls:   e.g. %s\n", text_of(send0(plugin, "pluginIdentifier")));
+	}
 	for (size_t i = 0; records != NULL && i < sizeof(poster_ids) / sizeof(poster_ids[0]); i++) {
 		id error = NULL;
 		id record = ((id (*)(id, SEL, id, id *))objc_msgSend)(send0((id)records, "alloc"),
@@ -134,18 +156,118 @@ census(const char *when, id workspace)
 	}
 }
 
+/* After a rebuild PosterBoard still holds what it found at its start: it is ended, and launchd starts it again. */
+static void
+end_all(const char *name)
+{
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+	struct kinfo_proc *procs = NULL;
+	size_t size = 0;
+
+	if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || (procs = malloc(size + 16 * sizeof(*procs))) == NULL) {
+		return;
+	}
+	size += 16 * sizeof(*procs);
+	if (sysctl(mib, 4, procs, &size, NULL, 0) == 0) {
+		for (size_t i = 0; i < size / sizeof(*procs); i++) {
+			struct extern_proc *p = &procs[i].kp_proc;
+
+			if (strncmp(p->p_comm, name, sizeof(p->p_comm)) == 0) {
+				say("sweetls: %s[%d] ended: %d\n", name, p->p_pid, kill(p->p_pid, SIGTERM));
+			}
+		}
+	}
+	free(procs);
+}
+
+/* The entitlements the kernel gives this process (what lsd sees through its audit token). */
+static void
+own_entitlements(void)
+{
+	static unsigned char blob[8192];
+	int r = csops(getpid(), SWEET_CS_OPS_ENTITLEMENTS_BLOB, blob, sizeof(blob));
+	unsigned len = r == 0 ? ((unsigned)blob[4] << 24 | blob[5] << 16 | blob[6] << 8 | blob[7]) : 0;
+
+	if (len > sizeof(blob)) {
+		len = sizeof(blob);
+	}
+	say("sweetls: own entitlements: csops %d, %u bytes, rebuildappdatabases %s, canmaplsdatabase %s\n", r, len,
+	    len > 8 && memmem(blob, len, "rebuildappdatabases", 19) != NULL ? "yes" : "NO",
+	    len > 8 && memmem(blob, len, "canmaplsdatabase", 16) != NULL ? "yes" : "NO");
+}
+
+#define HEIC_TEST "/Library/Wallpaper/Collections/Clownfish~iphone.wallpaperCollection/Wallpapers/" \
+	"7420.Clownfish-375w-812h@3x~iphone.wallpaper/7420.Clownfish_Background-375w-812h@3x~iphone.ca/assets/Background.HEIC"
+
+/* ImageIO opens the picture and draws it into memory: how many of its pixels are not black. */
+static void
+heic_test(const char *path)
+{
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+	CGImageSourceRef source = url != NULL ? CGImageSourceCreateWithURL(url, NULL) : NULL;
+	CFStringRef type = source != NULL ? CGImageSourceGetType(source) : NULL;
+	char type_text[64] = "(none)";
+	time_t t = time(NULL);
+
+	if (type != NULL) {
+		CFStringGetCString(type, type_text, sizeof(type_text), kCFStringEncodingUTF8);
+	}
+	CGImageRef image = source != NULL ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+	size_t w = image != NULL ? CGImageGetWidth(image) : 0, h = image != NULL ? CGImageGetHeight(image) : 0;
+
+	say("sweetls: HEIC test: type %s, image %zux%zu\n", type_text, w, h);
+	if (image == NULL || w == 0 || h == 0) {
+		return;
+	}
+	unsigned char *pixels = calloc(w * h, 4);
+	CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+	CGContextRef context = pixels != NULL ? CGBitmapContextCreate(pixels, w, h, 8, w * 4, space,
+	    kCGImageAlphaPremultipliedLast) : NULL;
+
+	if (context == NULL) {
+		say("sweetls: HEIC test: no bitmap\n");
+		return;
+	}
+	CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+	size_t lit = 0;
+
+	for (size_t i = 0; i < w * h; i++) {
+		lit += (pixels[i * 4] | pixels[i * 4 + 1] | pixels[i * 4 + 2]) != 0;
+	}
+	say("sweetls: HEIC test: %zu of %zu pixels lit, %ld s (0 = no HEVC decoder: the pictures must become PNG)\n",
+	    lit, w * h, (long)(time(NULL) - t));
+}
+
+static void
+heic_test_in_child(const char *path)
+{
+	pid_t child = fork();
+	int status = 0;
+
+	if (child == 0) {
+		alarm(90);
+		heic_test(path);
+		_exit(0);
+	}
+	if (child > 0 && waitpid(child, &status, 0) == child && !(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+		say("sweetls: HEIC test: the child ended badly (status 0x%x)\n", status);
+	}
+}
+
 static void
 work(void)
 {
 	time_t start = time(NULL);
 
+	own_entitlements();
+	heic_test_in_child(HEIC_TEST);
 	sleep(60);
 	dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", RTLD_NOW);
 	dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW);
 	id workspace = send0((id)objc_getClass("LSApplicationWorkspace"), "defaultWorkspace");
 
 	census("before", workspace);
-	if (once("/var/sweet/ls-migrator.done")) {
+	if (once("/var/sweet/ls-migrator2.done")) {
 		id bundle = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("NSBundle"), sel_registerName("bundleWithPath:"),
 		    nsstring("/System/Library/DataClassMigrators/00LaunchServicesMigrator.migrator"));
 		BOOL loaded = bundle != NULL && ((BOOL (*)(id, SEL))objc_msgSend)(bundle, sel_registerName("load"));
@@ -159,23 +281,40 @@ work(void)
 			    sel_registerName("performMigration"));
 
 			say("sweetls: LaunchServices migrator: performMigration %d, %ld s\n", done, (long)(time(NULL) - t));
-			mark("/var/sweet/ls-migrator.done");
+			mark("/var/sweet/ls-migrator2.done");
 		}
 	}
 	if (once("/var/sweet/ls-posters.done")) {
+		void *cs = dlopen("/System/Library/Frameworks/CoreServices.framework/CoreServices", RTLD_NOW);
 		int (*lsregister)(id, unsigned char) = (int (*)(id, unsigned char))dlsym(RTLD_DEFAULT, "LSRegisterURL");
+		int ran = 0;
 
-		for (size_t i = 0; lsregister != NULL && i < sizeof(posters) / sizeof(posters[0]); i++) {
+		if (lsregister == NULL && cs != NULL) {
+			lsregister = (int (*)(id, unsigned char))dlsym(cs, "LSRegisterURL");
+		}
+		say("sweetls: LSRegisterURL %s\n", lsregister != NULL ? "found" : "not there; registerPlugin: instead");
+		for (size_t i = 0; i < sizeof(posters) / sizeof(posters[0]); i++) {
 			id url = ((id (*)(id, SEL, id))objc_msgSend)((id)objc_getClass("NSURL"), sel_registerName("fileURLWithPath:"),
 			    nsstring(posters[i]));
 			time_t t = time(NULL);
-			int status = lsregister(url, 1);
 
-			say("sweetls: LSRegisterURL %s: %d, %ld s\n", posters[i], status, (long)(time(NULL) - t));
+			if (lsregister != NULL) {
+				int status = lsregister(url, 1);
+
+				say("sweetls: LSRegisterURL %s: %d, %ld s\n", posters[i], status, (long)(time(NULL) - t));
+				ran = 1;
+			} else if (workspace != NULL && ((BOOL (*)(id, SEL, SEL))objc_msgSend)(workspace,
+			    sel_registerName("respondsToSelector:"), sel_registerName("registerPlugin:"))) {
+				BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(workspace, sel_registerName("registerPlugin:"), url);
+
+				say("sweetls: registerPlugin %s: %d, %ld s\n", posters[i], ok, (long)(time(NULL) - t));
+				ran = 1;
+			}
 		}
-		say("sweetls: LSRegisterURL %s\n", lsregister != NULL ? "done" : "not there");
-		if (lsregister != NULL) {
+		if (ran) {
 			mark("/var/sweet/ls-posters.done");
+		} else {
+			say("sweetls: no way to register the posters\n");
 		}
 	}
 	if (setgid(501) != 0 || setuid(501) != 0) {
@@ -198,6 +337,8 @@ work(void)
 			if (fd >= 0) {
 				close(fd);
 			}
+			sleep(20);
+			end_all("PosterBoard");
 		}
 	}
 	census("after", workspace);

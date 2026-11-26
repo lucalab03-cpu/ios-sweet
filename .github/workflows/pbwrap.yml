@@ -31,7 +31,7 @@ jobs:
               -Wl,-not_for_dyld_shared_cache -install_name /usr/local/bin/sweetlogcatch.dylib \
               tools/sweetlogcatch/sweetlogcatch.c -o sweetlogcatch.dylib
           # LaunchServices told of the system's bundles and poster extensions (wallpaper, 2026-11-26)
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetls/sweetls.c -framework CoreFoundation -lobjc -o sweetls
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetls/sweetls.c -framework CoreFoundation -framework CoreGraphics -framework ImageIO -lobjc -o sweetls
           # sweet-boot with the streamed outbox (jetsam killed the one with a 32 MB buffer, 2026-11-24)
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 tools/sweetboot/sweet-boot.c -o sweet-boot
           # install-wrap with --patch/--verify (2026-11-16): the copy on the phone came from inject.yml before them
@@ -49,6 +49,9 @@ jobs:
           otool -s __DATA_CONST __interpose sweetposter.dylib
           nm -u sweetposter.dylib | sort
           codesign -s - --force sweetroot pbwrap install-wrap sweetsym sweetents sweetbusy sweetfind sweetjob sweetwk sweetls sweet-boot sweetposter.dylib sweetlogcatch.dylib
+          # lsd refuses the rebuild without these (round ar: "database rebuilt: 0, 0 s"; S7 hero-run.entitlements)
+          codesign -s - --force --entitlements tools/sweetls/sweetls.entitlements sweetls
+          codesign -d --entitlements - sweetls
           mkdir -p drop/usr/local/bin drop/usr/local/libexec drop/usr/lib drop/usr/local/etc drop/var/sweet
           cp sweetroot install-wrap sweetsym sweetents sweetbusy sweetfind sweetjob sweetwk sweetls sweet-boot sweetlogcatch.dylib drop/usr/local/bin/
           cp pbwrap drop/usr/local/libexec/
