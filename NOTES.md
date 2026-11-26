@@ -1424,6 +1424,8 @@ tools/sweet-root-tweaks.py.
 | com.apple.CommCenter (cellular) | removed from launchd.plist at image build (sweet-root-tweaks.py) | no modem driver: crash loop, Setup blocked | modem/CCCI driver works (Open Mapple is doing MT6781's) |
 | VisualVoicemail vmd | `sweetjob remove VisualVoicemail.framework/vmd` (round ai, 2026-11-26) | no telephony: ~0.9 of a CPU spinning, launchd 110% -> 80% without it | cellular works |
 | VirtualAudio HAL plug-in | moved to /Library/Audio/Plug-Ins/HAL.disabled (image build) | mediaserverd crash | real audio driver |
+| bluetoothd, fairplayd.H2 | sweetsvc (/var/sweet/svc-disable -> launchd disabled.plist, since 2026-11-14) | each restarted ~335 times a boot (no Bluetooth; FairPlay) | Bluetooth driver works / FairPlay needed for App Store apps |
+| BTAudioHALPlugin.driver (mediaserverd's Bluetooth audio) | moved to /System/Library/Audio/Plug-Ins/HAL.disabled (root.cmd, round al) | with bluetoothd off it looked up com.apple.BTAudioHALPlugin.xpc ~2200 times/s: launchd 78%, mediaserverd 47% | together with bluetoothd |
 
 ### 2026-11-26 14:05 — round ai observed; 0159, 0160 queued
 - Round ai (drop-ai, payload-z; second boot after a black-screen boot, see 0158): per draw ~220 us (was ~500),
@@ -1469,3 +1471,20 @@ tools/sweet-root-tweaks.py.
   eagl lineage; surface_changed 12.5% -> 0.9% by one eighth of the rows a frame (taken into our eagl, built for round
   al: glsums=1 = old way); 'b3a8' kept and converted 10-bit XR <-> BGRA into/out of both planes (if sRGB does not
   remove b3a8, that is the complete version of our private-texture fallback); iOS 26 Metal on Mali Midgard in progress.
+
+### 2026-11-26 19:10 — round ak observed; round al (Bluetooth audio lookup storm, CA census, Messages/Photos scan)
+- Round ak (payload-ab, drop-ak), user: home wallpaper still black, lock screen red-to-black gradient, Control Center
+  toggles without glyphs once fully open (glyphs visible while it is being pulled down). GL log of the boot: no
+  'b3a8'/'w30r' any more (sRGB worked for that), 0 GL errors: the glyphs are a different problem.
+- **launchd/mediaserverd CPU found** (live launchd.log): 148392 "failed lookup: name = com.apple.BTAudioHALPlugin.xpc,
+  requestor = mediaserverd" in 68 s (~2200/s; bluetoothd is disabled by sweetsvc). 0161's kernel frames agree: launchd
+  in kevent/workq/mach_msg receive, mediaserverd in mach_msg send. Round al moves BTAudioHALPlugin.driver aside.
+- Messages/Photos (sweetsym): uncaught ObjC exceptions (abort from terminate; Messages from a MobileIcons dispatch block,
+  Photos rethrown in the main run loop); reason not known -> sweetscan gets MobileSMS,MobileSlideShow (payload-ac).
+- Wallpaper leads: a22-5g docs/x6826b-wallpaper.md (MT6768): gradient-only = CollectionsPoster without mediaserverd's
+  HEIC decode (VTTileDecompressionSession); mediaserverd also needs nanoregistryd/nanoprefsyncd/mediaremoted, and its
+  AppleCVAPhoto asks Metal for a library at a nil URL. S7 port: HEIC decode came out empty there, wallpapers converted to
+  PNG under the same names. First see what mediaserverd does without the lookup storm.
+- Control Center glyphs: glcensus=1 this round (draws CoreAnimation makes with no program that are not drawn).
+- Round al: payload-ac (payload-ab + sweetscan), drop-al = bundle sweet-bundle-al (mesa 45870264243: surface_changed
+  one eighth a frame) + root.cmd (HAL plug-in, cat disabled.plist), glargs + glcensus=1.
