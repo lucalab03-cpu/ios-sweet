@@ -1378,3 +1378,14 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   generic-tphy-v1 at 0x11cc0000 with u2 port at 0x11cc0800 (MT6781: 0x11ca0000 + 0x300). Proposed to the user as
   a parallel port (needs pyusb + libusb on the PC). Clones in /home/claude/ext/{mapple_build,mapple_userland,
   xnu_kernel_mediatek_mt6781}.
+
+### 2026-11-26 12:20 — round af observed; round ag (0157 WAIT_BO per buffer, metal2 sharedMemorySize)
+- Round af (payload-x, drop-af, glargs glwait=0 glblit=0): 199/201 and 149/149 swaps GPU-scaled, copy ~1.4 ms; no
+  backboardd crash; Preferences sig 6: "-[NativeBridgeMetalDevice sharedMemorySize]: unrecognized selector".
+  Profile: panfrost_bo_create / pan_kmod_bo_alloc / panfrost_bo_mmap / drmIoctl heavy; Mesa 25.0.7 pan_bo.c
+  panfrost_bo_cache_fetch asks WAIT_BO(timeout 0) per cached BO and the kernel answered with the client's newest
+  chains -> every cached BO busy while the GPU worked -> new BO + mmap per batch.
+- **0157** (SweetMali.cpp waitBO): fences = fUnnamed ? fLast : b->used (as freeBuffer). metal2: sharedMemorySize =
+  hw.memsize. User: "a bit better" (decide on numbers). HANDOFF.md added; daily midnight task updates it.
+- Builds: xnu 45806130887, metal2 45805702530, bundle ag 45808280794; payload-y (payload-t boot-args + this kernel),
+  drop-ag (glargs glwait=0 glblit=0).
