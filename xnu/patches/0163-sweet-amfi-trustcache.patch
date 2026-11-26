@@ -1,0 +1,148 @@
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -406,6 +406,25 @@
+ 		}
+ 		return copyout(&state, arg, sizeof(state));
+ 	}
++	/*
++	 * ios-sweet 0163: 0x5f, "is this cdhash in a trust cache?" ({u8 cdhash[20]; u32 pad; u64 result}; yes = 0 returned
++	 * with result != 0), Security's question for ad-hoc signed code (from pixel3-ios 0164, same iOS 20H392). There is
++	 * no trust cache here and every binary of the root runs as a platform binary: yes.
++	 */
++	if (call == 0x5f) {
++		uint64_t result = 1;
++		static int told;
++
++		if (arg == USER_ADDR_NULL) {
++			return EINVAL;
++		}
++		if (told++ < 4) {
++			char name[32];
++			proc_name(proc_pid(p), name, sizeof(name));
++			printf("SWEET AMFI: trust cache asked (%s): yes\n", name);
++		}
++		return copyout(&result, arg + 0x18, sizeof(result));
++	}
+ 	if (call != SWEET_AMFI_CHECK_DYLD_POLICY) {
+ 		return ENOPOLICY;
+ 	}
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -53,6 +53,11 @@
+     "     'IOMatchCategory' = AppleKeyStore;"
+     "   },"
+     "   {"
++    "     'IOClass'         = AppleMobileFileIntegrity;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = AppleMobileFileIntegrity;"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -18,6 +18,7 @@
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetMali.cpp                                       optional iokitcpp
+ iokit/Kernel/arm/SweetAccel.cpp                                      optional iokitcpp
++iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetAMFI.cpp
+@@ -0,0 +1,93 @@
++/*
++ * ios-sweet 0163 (2026-11-26): a built-in AppleMobileFileIntegrity IOService answering the trust-cache question.
++ *
++ * From pixel3-ios (xnu/patches/0164-blueline-amfi-trustcache.patch, BlueAMFI.cpp, iOS 16.7.16 20H392 like ours).
++ * libmis (TrustCacheOnly) and ExtensionFoundation open IOServiceMatching("AppleMobileFileIntegrity") (type 0) and
++ * call selector 6 with the cdhash as the structure input: 0 = in a trust cache. ExtensionFoundation does so for
++ * /System/Library/xpc/extensions.plist.sig before it reads the table of extension points; with no such service
++ * ("Unable to find AMFI") LaunchServices kept no records of the system's own extensions, and PosterBoard found no
++ * poster provider (CollectionsPoster, LegacyPoster): on the Pixel 3 that was the black wallpaper, and the same
++ * PosterBoard assertion as ours came before it. Every binary of the root runs as a platform binary here, so every
++ * cdhash is in. Other selectors are logged and unsupported.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <sys/proc.h>
++
++#define SWEET_AMFI_SEL_TRUSTCACHE       6
++
++class AppleMobileFileIntegrity : public IOService {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrity);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrity, IOService);
++
++bool
++AppleMobileFileIntegrity::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "AppleMobileFileIntegrityUserClient");
++	registerService();
++	IOLog("SWEET AMFI: AppleMobileFileIntegrity registered (every cdhash trusted)\n");
++	return true;
++}
++
++class AppleMobileFileIntegrityUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleMobileFileIntegrityUserClient);
++
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleMobileFileIntegrityUserClient, IOUserClient);
++
++IOReturn
++AppleMobileFileIntegrityUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++AppleMobileFileIntegrityUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args, IOExternalMethodDispatch *dispatch __unused,
++    OSObject *target __unused, void *reference __unused)
++{
++	static uint32_t logged, unsupported;
++	char name[20];
++
++	if (selector == SWEET_AMFI_SEL_TRUSTCACHE) {
++		uint32_t len = args->structureInputDescriptor != NULL ?
++		    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
++		if (len < 20) {
++			return kIOReturnBadArgument;
++		}
++		if (logged < 8) {
++			logged++;
++			proc_selfname(name, sizeof(name));
++			IOLog("SWEET AMFI: %s asks whether a %u-byte cdhash is in a trust cache: yes\n", name, len);
++		}
++		return kIOReturnSuccess;
++	}
++	if (unsupported < 16) {
++		unsupported++;
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET AMFI: %s selector %u (%u scalars in, %u bytes in) unsupported\n",
++		    name, selector, args->scalarInputCount, args->structureInputSize);
++	}
++	return kIOReturnUnsupported;
++}
++#endif
