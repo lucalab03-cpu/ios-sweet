@@ -109,6 +109,38 @@ sub_once('src/gallium/drivers/panfrost/pan_fb_preload.c',
 "      pan_cast_and_pack(varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER),\n",
 "      pan_cast_and_pack(((uint8_t *)varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER)),\n")
 
+# 4f. (2026-11-26) a cached buffer keeps its processor mapping. Mesa unmaps a buffer when its last reference goes, before
+#     it enters the buffer cache, and maps it again when the cache hands it out: on Linux an mmap; here an
+#     IOConnectMapMemory64 and an IOConnectUnmapMemory64 into the kernel each time (round ah: panfrost_bo_mmap and
+#     sweet_os_mmap among backboardd's heaviest paths once 0157 let the cache hit). Unmapped now only when the buffer is
+#     freed (panfrost_bo_free: cache eviction, or not cacheable).
+sub_once('src/gallium/drivers/panfrost/pan_bo.c',
+"""      /* When the reference count goes to zero, we need to cleanup */
+      panfrost_bo_munmap(bo);
+""",
+"""      /* When the reference count goes to zero, we need to cleanup */
+#ifndef SWEET_IOS
+      panfrost_bo_munmap(bo);
+#endif
+""")
+sub_once('src/gallium/drivers/panfrost/pan_bo.c',
+"""   struct pan_kmod_bo *kmod_bo = bo->kmod_bo;
+   struct pan_kmod_vm *vm = bo->dev->kmod.vm;
+   uint64_t gpu_va = bo->ptr.gpu;
+""",
+"""#ifdef SWEET_IOS
+   panfrost_bo_munmap(bo);      /* (kept while cached: 4f) */
+#endif
+   struct pan_kmod_bo *kmod_bo = bo->kmod_bo;
+   struct pan_kmod_vm *vm = bo->dev->kmod.vm;
+   uint64_t gpu_va = bo->ptr.gpu;
+""")
+s_bo = rd('src/gallium/drivers/panfrost/pan_bo.c')
+i = s_bo.index('\npanfrost_bo_free(struct panfrost_bo *bo)')
+j = s_bo.rindex('\n', 0, i)          # the line before: the return type
+s_bo = s_bo[:j] + "\n#ifdef SWEET_IOS\nstatic void panfrost_bo_munmap(struct panfrost_bo *bo);\n#endif" + s_bo[j:]
+wr('src/gallium/drivers/panfrost/pan_bo.c', s_bo)
+
 # 5. the osmesa target: panfrost's screen, software rendering as the fallback
 shutil.copy(os.path.join(shim, "osmesa/sweet_winsys.c"), os.path.join(mesa, "src/gallium/targets/osmesa/sweet_winsys.c"))
 t = rd('src/gallium/targets/osmesa/osmesa_target.c')

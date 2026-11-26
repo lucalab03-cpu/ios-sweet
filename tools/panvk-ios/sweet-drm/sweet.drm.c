@@ -873,6 +873,15 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (number == 0x42) {
 		memcpy(before, arg, IOCPARM_LEN(request) < sizeof(before) ? IOCPARM_LEN(request) : sizeof(before));
 	}
+	/*
+	 * MADVISE (struct drm_panfrost_madvise: u32 handle, madv, retained): Mesa marks every buffer it puts into its cache
+	 * DONTNEED and every one it takes out WILLNEED, two kernel calls per reuse. SweetMali never takes a buffer's pages
+	 * back, so a buffer is always retained: answered here (2026-11-26, after 0157 made the cache hit).
+	 */
+	if (number == 0x48 && IOCPARM_LEN(request) >= 12) {
+		((uint32_t *)arg)[2] = 1;
+		return 0;
+	}
 	if (gl_self_coherent && number == PANFROST_SUBMIT_NR) {
 		hosts_flush();
 	}
