@@ -1463,3 +1463,9 @@ tools/sweet-root-tweaks.py.
   metal2 45805702530); payload-ab = payload-aa's boot-args + new kernel (0161 verified: sweet_prof_cpu 440 -> 1192
   bytes) + ADT gamut sRGB (sha256 364680e3...); drop-ak.zip sha256 1ae35972... (bundle drop + var/sweet root.cmd,
   glargs, gl, sym-aj.in, outbox.list + usr/local/etc/sweet-boot.list).
+- References checked 2026-11-26 18:45: Jesvi-iOS, pixel3-ios, hakios-mt6768/-a22/a22-5g/hk, open-mapple repos, nullarc:
+  no new commits. hackios.appaiproxy.com: Moto G05 page = only ours. New useful reference: **wardevsa/ios-a5xelte,
+  branch herolte** (Galaxy S7, Mali-T880, iOS 16.7.16 GPU SpringBoard; cloned in /home/claude/ext/s7-herolte): same
+  eagl lineage; surface_changed 12.5% -> 0.9% by one eighth of the rows a frame (taken into our eagl, built for round
+  al: glsums=1 = old way); 'b3a8' kept and converted 10-bit XR <-> BGRA into/out of both planes (if sRGB does not
+  remove b3a8, that is the complete version of our private-texture fallback); iOS 26 Metal on Mali Midgard in progress.
