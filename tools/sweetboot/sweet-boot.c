@@ -163,7 +163,7 @@ write_outbox(void)
 	}
 	closedir(d);
 	/*
-	 * 2026-11-26: files elsewhere, named one absolute path a line in /var/sweet/outbox.list, give their last 256 KB
+	 * 2026-11-26: files elsewhere, named one absolute path a line in /var/sweet/outbox.list, give their last 1 MB
 	 * the same way (what launchd keeps writing to its log, seen as it is now and not as a copy made at boot).
 	 */
 	FILE *list = fopen("/var/sweet/outbox.list", "r");
@@ -183,7 +183,7 @@ write_outbox(void)
 			OUT_FLUSH();
 		}
 		off_t size = lseek(in, 0, SEEK_END);
-		off_t at = size > (off_t)(256 << 10) ? size - (off_t)(256 << 10) : 0;
+		off_t at = size > (off_t)per_file ? size - (off_t)per_file : 0;
 
 		fill += (size_t)snprintf(buf + fill, sizeof(buf) - fill, "\n===== %s (last %lld of %lld bytes) =====\n", want,
 		    (long long)(size - at), (long long)size);
