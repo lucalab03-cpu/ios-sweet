@@ -1,0 +1,54 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index c6750dc..533ff43 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -667,6 +667,7 @@ AppleCLCD::swap(const uint8_t *rec)
+ 
+ static uint32_t sweet_fb_xmap[2048];
+ static uint8_t sweet_fb_xblend[2048];
++static uint32_t sweet_fb_out[2048];      /* 0155: one panel row, built here, then copied into the panel */
+ static int sweet_fb_filter = -1;
+ 
+ /* Two BGRA pixels averaged, all four channels at once (each loses its lowest bit). */
+@@ -816,24 +817,27 @@ AppleCLCD::scaled_blit(SweetSurface *s, uintptr_t src, uint32_t bpe,
+ 			nrow = blendY ? sweet_fb_row_load(base, s->bytesPerRow, sy + j + 1, (uint32_t)(sx + w), sy + j) : srow;
+ 			read_abs += mach_absolute_time() - t0;
+ 		}
++		/*
++		 * Patch 0155: no branch per pixel. Whether a pixel is averaged with its right neighbour follows the 828 -> 720
++		 * ratio, a pattern the branch predictor kept missing: 13.6 ms a frame for 1.15 M pixels (round ac, ~20 cycles a
++		 * pixel). The neighbour's index is at + blend (0 or 1) and avg(a, a) == a, so every pixel takes the same path;
++		 * the row is built in a cached buffer and stored into the panel with one memcpy (16-byte stores).
++		 */
+ 		uint32_t *drow = (uint32_t *)(fPixels + (uint64_t)Y * fRowBytes);
+-		for (int32_t X = X0; X < X1; X++) {
+-			uint32_t at = sweet_fb_xmap[X - X0];
+-			uint32_t p = srow[at];
+-
+-			if (sweet_fb_xblend[X - X0]) {
+-				p = sweet_fb_avg(p, srow[at + 1]);
++		uint32_t *orow = sweet_fb_out;
++		const int32_t n = X1 - X0;
++		if (blendY) {
++			for (int32_t k = 0; k < n; k++) {
++				uint32_t at = sweet_fb_xmap[k], at2 = at + sweet_fb_xblend[k];
++				orow[k] = sweet_fb_avg(sweet_fb_avg(srow[at], srow[at2]), sweet_fb_avg(nrow[at], nrow[at2]));
+ 			}
+-			if (blendY) {
+-				uint32_t q = nrow[at];
+-
+-				if (sweet_fb_xblend[X - X0]) {
+-					q = sweet_fb_avg(q, nrow[at + 1]);
+-				}
+-				p = sweet_fb_avg(p, q);
++		} else {
++			for (int32_t k = 0; k < n; k++) {
++				uint32_t at = sweet_fb_xmap[k];
++				orow[k] = sweet_fb_avg(srow[at], srow[at + sweet_fb_xblend[k]]);
+ 			}
+-			drow[X] = p;
+ 		}
++		memcpy(drow + X0, orow, (size_t)n * 4);
+ 	}
+ 	flushPanel((uint32_t)Y0, (uint32_t)Y1);
+ 	uint64_t read_ns;
