@@ -1671,3 +1671,18 @@ turns out to be Metal's.
 | M10 | Games / App Store apps (Metal 2/3 features, argument buffers) | - | metal2vulkan feature gaps logged as [metal2vulkan-degrade-*] |
 | M11 | Every stock app: opens, draws, no crash | - | table per app with the log of its run |
 | M12 | Frame times of Metal apps (99% < 16.7 ms), shader/pipeline cache warm-up stutter | - | sweetprof on the app; metal2vulkan pipeline cache counters |
+
+### 2026-11-27 00:50 — WALLPAPER ON SCREEN (round aw)
+- Photos from the user: iOS 16's stock wallpaper on the lock screen and the home screen; Control Center, App Library
+  and widgets blur over it. sweetheic: 16 + 32 = all 48 stock pictures PNG (16 per screen class x 3), 0 failed; the
+  "96" before was find's double listing. PosterBoard store/caches reset before it started (sweetwk posterreset again).
+- Wallpaper chain, all of it: sweetls entitlements (lsd's rebuild), /chosen mac-address-* (the rebuild no longer
+  crawls), LaunchServices rebuilt (413 plug-ins), stock HEIC made PNG on the phone (libheif/libde265), store reset.
+- Still open for the wallpaper item: every preview (gallery, lock-screen editor) black, while the live wallpaper is
+  fine = guacamole's "extension wallpapers black, PosterBoard-drawn fine" (black snapshots). **0164** = guacamole's
+  0214: IOSurface limits maxima were 0 (IOSurfaceGetPropertyMaximum) so BaseBoard's bs_IOSurfaceWithWidth:height:
+  returned nil for PosterBoard's snapshots. xnu 45912774316. If not enough: guacamole's next piece was a CPU
+  AppleM2ScalerCSCDriver stand-in (0262); payload-ag traces IOKit lookups of PosterBoard/backboardd (sweetiolog) to
+  see whether CA asks for it.
+- Seen in the photos (GL list): stripes on the left edge of the battery widgets (same as the wake strip), CC sliders
+  too light with stripes.
