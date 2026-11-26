@@ -45,6 +45,8 @@ def main():
     ap.add_argument('--expect', action='append', default=[], metavar='TEXT')
     ap.add_argument('--adt-u32', action='append', default=[], metavar='/PATH:PROP=N')
     ap.add_argument('--adt-str', action='append', default=[], metavar='/PATH:PROP=TEXT')
+    ap.add_argument('--adt-bytes', action='append', default=[], metavar='/PATH:PROP=HEX',
+                    help='set or add a property with these bytes (e.g. /chosen:mac-address-wifi0=025357454501)')
     a = ap.parse_args()
 
     _, adt_blob, cmdline = read_payload(a.old)
@@ -55,7 +57,9 @@ def main():
         if text.encode() not in kernel:
             sys.exit(f'{a.kernel}: does not contain "{text}" -- not the kernel with that patch')
     cmdline = set_args(cmdline, a.set)
-    changed_adt = bool(a.adt_u32 or a.adt_str)
+    changed_adt = bool(a.adt_u32 or a.adt_str or a.adt_bytes)
+    if a.adt_bytes:
+        adt_blob = set_adt_bytes(adt_blob, a.adt_bytes)
     if a.adt_u32:
         adt_blob = set_adt_u32(adt_blob, a.adt_u32)
     if a.adt_str:
@@ -76,7 +80,7 @@ def main():
     open(a.out, 'wb').write(blob)
     print(f'{a.out}: {len(blob)} bytes, sha256 {hashlib.sha256(blob).hexdigest()}')
     print(f'  kernel {a.kernel} (sha256 {hashlib.sha256(kernel).hexdigest()[:16]}...), entry {info["entry"]}')
-    print(f'  ADT from {a.old}: {len(adt_blob)} bytes, ' + (', '.join(a.adt_u32 + a.adt_str) if changed_adt else 'unchanged'))
+    print(f'  ADT from {a.old}: {len(adt_blob)} bytes, ' + (', '.join(a.adt_u32 + a.adt_str + a.adt_bytes) if changed_adt else 'unchanged'))
     print(f'  boot-args: {cmdline}')
 
 
@@ -102,6 +106,28 @@ def set_adt_u32(blob, settings, text=False):
                 break
         else:
             sys.exit(f'ADT: {path} has no property {prop}')
+    return adt.serialize(root)
+
+
+def set_adt_bytes(blob, settings):
+    """Sets a property to raw bytes, adding it to the node (flags 0) when it is not there."""
+    import adt
+    root, _ = adt.parse(blob)
+    for item in settings:
+        path, rest = item.split(':', 1)
+        prop, value = rest.split('=', 1)
+        data = bytes.fromhex(value)
+        node = root
+        for part in [p for p in path.split('/') if p]:
+            node = next((c for c in node.children if c.name == part), None)
+            if node is None:
+                sys.exit(f'ADT: no node {path}')
+        for i, (n, flags, v) in enumerate(node.props):
+            if n == prop:
+                node.props[i] = (n, flags, data)
+                break
+        else:
+            node.props.append((prop, 0, data))
     return adt.serialize(root)
 
 

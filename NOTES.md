@@ -1619,3 +1619,10 @@ tools/sweet-root-tweaks.py.
   sweetstack (pbwrap 45908060967): stacks of lsd, sweetls, installd, SpringBoard, driverkitd at 150/300/450 s, named
   on the phone (task_for_pid with sweetstack.entitlements; shared-cache image found with dyld_shared_cache_iterate_text,
   dlopen'ed, dladdr). Bundle 45908144640.
+- Reference coreycusick/ios-hotdogg (= ios-guacamole's tools): tools/mkadt.py puts /chosen mac-address-wifi0,
+  -bluetooth0, -ethernet0 (locally administered 02:53:57:45:45:0x): "without mac-address-wifi0 [MobileGestalt] waits
+  5 s for a Wi-Fi IONetworkController on every query, and installd asks once per bundle, so LaunchServices' rebuild
+  crawls" (ios-flame's finding; guacamole: wallpaper picker + all 10 poster providers with 0137 AMFI + these + one
+  `lsreg -r` = the same rebuild call). **Our /chosen had none of the three**: matches round at (lsd 1-3 %, installd
+  idle, the rebuild never back). tools/repayload.py --adt-bytes /PATH:PROP=HEX (sets or adds). **payload-ae** =
+  payload-ad (same kernel, rebuilt byte-identical as a check) + the three mac-address properties.
