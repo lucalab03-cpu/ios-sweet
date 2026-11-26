@@ -219,6 +219,17 @@ main(void)
 		return pid < 0;
 	}
 	setsid();
+	/* let go of sweetroot's pipe, or it would wait for this child to end */
+	int null = open("/dev/null", O_RDWR);
+
+	if (null >= 0) {
+		dup2(null, 0);
+		dup2(null, 1);
+		dup2(null, 2);
+		if (null > 2) {
+			close(null);
+		}
+	}
 	log_file = fopen("/var/tmp/sweetls.log", "a");
 	say("sweetls: start, pid %d\n", getpid());
 	work();
