@@ -1331,3 +1331,15 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   overwrote pool memory (GPU descriptors) and faulted when the allocation ended a buffer. patch-mesa.py 4e adds
   the parentheses. (26.2.7 has the same line; PanVK does not use pan_fb_preload.c.)
 - Round ac: mesa 45727595311, bundle 45728286940, glargs back to glwait=0.
+
+### 2026-11-26 01:45 — round ac observed: GL stable; next bottleneck = the panel copy; payload-u
+- Round ac (drop-ac, payload-t, glwait=0, Mesa preload fix): **no backboardd crash** (jiggle mode, apps, Control
+  Center tried by the user). User: apps open almost at once; Safari takes a few seconds.
+- 91-226 swaps/10 s. backboardd's display thread: leaf mostly mach_msg2_trap (kernel calls): the panel copy in
+  SwapEnd = 13.6 ms per swap (828x1792 -> 720x1604 filtered scale, 0139), plus panfrost_bo_create/bo_cache_fetch
+  per frame (transient BOs: to look at).
+- **payload-u** = payload-t + `sweetfb_w=750 sweetfb_h=1624 sweetfb_crop=1`: 375x812 pt @2x (the iPhone X's points;
+  hakios-mt6768 presents the same 750x1624 one-to-one, "without it the kernel scales every frame, 7 ms each"), the
+  panel shows the centre 720x1604 with a plain row memcpy (15 columns cut each side, 10 rows top/bottom). Touch maps
+  the panel onto the whole presented display (native default), so up to 15 px off at the edges: to fix in SweetHID if
+  this stays. Same kernel, drop-ac stays; one boot. Revert: payload-t.
