@@ -6,6 +6,7 @@
 // refuses fails its command buffer (status Error, handlers run) instead of being dropped. A selector this frontend does not implement is
 // reported through the missing-selector hook before the usual exception, so a hardware run names the gap.
 // Shared events work within this process (no cross-process handle yet). Not yet implemented here: heaps, argument buffers, indirect commands, drawables/presentation.
+#include <sys/sysctl.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurfaceRef.h>
@@ -1333,6 +1334,9 @@ static char sweetMemoryOwnerKey;
 - (uint64_t)registryID {return gRegistryID;}
 - (NSUInteger)maxBufferLength {return nmb_device_max_buffer_length(gDevice);}
 - (BOOL)hasUnifiedMemory {return YES;}
+// 2026-11-26: Settings died on it ("-[NativeBridgeMetalDevice sharedMemorySize]: unrecognized selector", round af):
+// a private MTLDevice property, the memory the GPU shares with the processor. Unified memory: all of it.
+- (uint64_t)sharedMemorySize {uint64_t mem=0;size_t len=sizeof mem;sysctlbyname("hw.memsize",&mem,&len,NULL,0);return mem;}
 - (BOOL)isLowPower {return NO;}
 - (BOOL)isRemovable {return NO;}
 - (BOOL)isHeadless {return NO;}
