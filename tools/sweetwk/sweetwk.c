@@ -24,6 +24,16 @@
  * Wallpaper.plist.sweetbak, same format, owner and mode). The Galaxy S7 port (wardevsa/ios-a5xelte, herolte,
  * tools/herolte-tune-ios-root.sh) does the same to its root image for its 480w-853h@3x screen; ours is 414 x 896
  * points @2x: "sweetwk retarget 375w-812h 414w-896h@2x~iphone".
+ *
+ *   sweetwk posterreset
+ *
+ * once (marker /var/sweet/posterreset.done): PosterBoard's store and caches are moved aside (renamed with a
+ * .sweetbak-DATE suffix: Application Support/PRBPosterExtensionDataStore, Caches/com.apple.PosterBoard, Saved
+ * Application State/com.apple.PosterBoard.savedState under /private/var/mobile/Library) and its preferences
+ * (com.apple.PosterBoard, user mobile) are saved to /var/sweet/PosterBoard-prefs.sweetbak-DATE.plist and removed, so it
+ * sets itself up from nothing. Why (round ao): PosterBoard trapped on "Invalid condition not satisfying:
+ * !_stateLock_switcherConfiguration" (its first-time setup with a switcher configuration already there: a store left
+ * half made since the boots when no poster extension was visible) and never launched a poster.
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <objc/runtime.h>
@@ -39,6 +49,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -324,6 +335,83 @@ retarget_walk(const char *dir, const char *from, const char *to, int depth)
 	closedir(d);
 }
 
+static int
+poster_reset(void)
+{
+	static const char marker[] = "/var/sweet/posterreset.done";
+	static const char *const what[] = { "Application Support/PRBPosterExtensionDataStore", "Caches/com.apple.PosterBoard",
+		"Saved Application State/com.apple.PosterBoard.savedState" };
+	CFStringRef app = CFSTR("com.apple.PosterBoard"), user = CFSTR("mobile");
+	char stamp[32], path[512], aside[600];
+	time_t now = time(NULL);
+
+	if (access(marker, F_OK) == 0) {
+		say("sweetwk: PosterBoard's store was reset before (%s): left alone\n", marker);
+		return 0;
+	}
+	strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", gmtime(&now));
+	for (unsigned i = 0; i < sizeof(what) / sizeof(what[0]); i++) {
+		snprintf(path, sizeof(path), "/private/var/mobile/Library/%s", what[i]);
+		snprintf(aside, sizeof(aside), "%s.sweetbak-%s", path, stamp);
+		if (access(path, F_OK) != 0) {
+			say("sweetwk: %s: not there\n", path);
+		} else if (rename(path, aside) != 0) {
+			say("sweetwk: %s: cannot move aside\n", path);
+		} else {
+			say("sweetwk: %s -> %s\n", path, aside);
+		}
+	}
+	CFDictionaryRef all = CFPreferencesCopyMultiple(NULL, app, user, kCFPreferencesAnyHost);
+	CFIndex count = all != NULL ? CFDictionaryGetCount(all) : 0;
+
+	if (count > 0) {
+		CFDataRef data = CFPropertyListCreateData(NULL, all, kCFPropertyListXMLFormat_v1_0, 0, NULL);
+		int fd;
+
+		snprintf(path, sizeof(path), "/var/sweet/PosterBoard-prefs.sweetbak-%s.plist", stamp);
+		fd = data != NULL ? open(path, O_WRONLY | O_CREAT | O_EXCL, 0644) : -1;
+		if (fd < 0 || write(fd, CFDataGetBytePtr(data), (size_t)CFDataGetLength(data)) != CFDataGetLength(data)) {
+			say("sweetwk: cannot keep PosterBoard's preferences in %s: they stay\n", path);
+			if (fd >= 0) {
+				close(fd);
+			}
+		} else {
+			const void **keys = calloc((size_t)count, sizeof(void *));
+
+			fsync(fd);
+			close(fd);
+			CFDictionaryGetKeysAndValues(all, keys, NULL);
+			for (CFIndex k = 0; keys != NULL && k < count; k++) {
+				char name[128] = "";
+
+				CFStringGetCString(keys[k], name, sizeof(name), kCFStringEncodingUTF8);
+				say("sweetwk: PosterBoard preference %s removed (kept in %s)\n", name, path);
+				CFPreferencesSetValue(keys[k], NULL, app, user, kCFPreferencesAnyHost);
+			}
+			CFPreferencesSynchronize(app, user, kCFPreferencesAnyHost);
+			free(keys);
+		}
+		if (data != NULL) {
+			CFRelease(data);
+		}
+	} else {
+		say("sweetwk: PosterBoard has no preferences\n");
+	}
+	if (all != NULL) {
+		CFRelease(all);
+	}
+	int m = open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+	if (m >= 0) {
+		write(m, stamp, strlen(stamp));
+		write(m, "\n", 1);
+		fsync(m);
+		close(m);
+	}
+	say("sweetwk: PosterBoard will set itself up from nothing (marker %s)\n", marker);
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -333,6 +421,9 @@ main(int argc, char **argv)
 	int answer;
 
 	log_file = fopen("/var/tmp/sweetwk.log", "a");
+	if (argc == 2 && strcmp(argv[1], "posterreset") == 0) {
+		return poster_reset();
+	}
 	if (argc == 4 && strcmp(argv[1], "retarget") == 0) {
 		retarget_walk("/Library/Wallpaper/Collections", argv[2], argv[3], 0);
 		say("sweetwk: retarget %s -> %s: %d changed, %d already so, %d failed\n", argv[2], argv[3], retargeted, already,
