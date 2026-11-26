@@ -31,7 +31,8 @@ def set_args(cmdline, settings):
     for item in settings:
         name = item.split('=', 1)[0]
         args = [a for a in args if a.split('=', 1)[0] != name]
-        args.append(item)
+        if item != name + '=':          # NAME= takes the argument out
+            args.append(item)
     return ' '.join(args)
 
 
