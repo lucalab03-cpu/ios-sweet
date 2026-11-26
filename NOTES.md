@@ -1508,3 +1508,15 @@ tools/sweet-root-tweaks.py.
   (OS_ACTIVITY_DT_MODE=YES + StandardErrorPath in launchd.plist) for PosterBoard and PaperBoard -> /var/tmp/sweetlog-*.
   eagl: gltrace_draws fires at >= N. glargs: gltrace_draws=130 gltrace_frames=40 gltrace_place=100,330,260,520
   (around the first connectivity toggle, 828x1792 px) gltrace_look=1 gltrace_shaders=1; user opens CC first.
+
+### 2026-11-26 20:30 — round am observed (trace crash, sweetwk, PosterBoard log); round an
+- Round am: backboardd crashed opening Control Center: gltrace_look's glReadPixels on the display's 'BGRA' surface
+  (util_format_b8g8r8a8_unorm_unpack, bad map). Before that the trace showed the four connectivity circles: CA draws
+  each (program 5, 256x256 LUMINANCE_ALPHA circle mask, vertex colour 1 1 1 1, blend ONE/ONE_MINUS_SRC_ALPHA) into a
+  117x117 offscreen texture, then copies it with a draw with no program (program 0) into another 117x117 texture: the
+  circles are white groups that CA composites later (vibrancy); that composite is what to trace next (no look).
+- sweetwk: -[NSUserDefaults wk_ignoreLogicalScreenClassForWallpaperBundle] answers NO and reads no NSUserDefaults key:
+  not a preference. PosterBoard's stderr file (OS_ACTIVITY_DT_MODE=YES from launchd) stayed empty.
+- Round an: `sweetwk retarget 375w-812h 414w-896h@2x~iphone` (Wallpaper.plist logicalScreenClass, .sweetbak kept;
+  the Galaxy S7 port does this for 480w-853h@3x), sweetroot `restart NAME FILE` (PosterBoard, SpringBoard once after
+  the retarget; backboardd.orig when glargs is newer: one boot per drop), glargs trace without gltrace_look + glcensus.
