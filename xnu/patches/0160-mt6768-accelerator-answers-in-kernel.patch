@@ -1,0 +1,41 @@
+diff --git a/iokit/Kernel/arm/SweetAccel.cpp b/iokit/Kernel/arm/SweetAccel.cpp
+index cdadb6f..ee5c2db 100644
+--- a/iokit/Kernel/arm/SweetAccel.cpp
++++ b/iokit/Kernel/arm/SweetAccel.cpp
+@@ -154,6 +154,36 @@ SweetAccelUserClient::forward(uint32_t selector, uint32_t nsin, const uint64_t *
+ 	if (gAccelLock == NULL) {
+ 		return kIOReturnUnsupported;
+ 	}
++	/*
++	 * Patch 0160: answered here, as the daemon answers (its table of known requests is empty: success, zero scalars
++	 * and zero bytes of what was asked for). Forwarding cost every request a trip to the daemon and back with a 1 ms
++	 * poll for its answer -- backboardd's selector 0x21 alone came ~1500 times in one fetch, on its display thread --
++	 * and the daemon ~20% of a CPU logging them. Boot-arg sweetacceld=1 forwards to the daemon again (to learn
++	 * requests).
++	 */
++	static int forwarding = -1;
++	if (forwarding < 0) {
++		int v = 0;
++		PE_parse_boot_argn("sweetacceld", &v, sizeof(v));
++		forwarding = v != 0;
++	}
++	if (!forwarding) {
++		if (selector < 0xff00) {
++			if (nsout != NULL) {
++				*nsout = nsoutwanted > ACC_SCALARS ? ACC_SCALARS : nsoutwanted;
++				for (uint32_t i = 0; i < *nsout && sout != NULL; i++) {
++					sout[i] = 0;
++				}
++			}
++			if (outsize != NULL) {
++				*outsize = outwanted > ACC_MAXIN ? ACC_MAXIN : outwanted;
++				if (out != NULL && *outsize != 0) {
++					bzero(out, *outsize);
++				}
++			}
++		}
++		return kIOReturnSuccess;
++	}
+ 	/* the daemon may start a little after the first request: wait for it once, up to 15 s */
+ 	if (!gDaemonThere && !gWaitedForDaemon) {
+ 		for (uint32_t i = 0; i < 1500 && !gDaemonThere; i++) {

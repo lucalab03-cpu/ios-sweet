@@ -1414,3 +1414,26 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
   patch-mesa.py 4f (cached BOs keep their mapping, unmapped in panfrost_bo_free); sweet-drm answers MADVISE (0x48)
   itself; tools/sweetjob (list/remove launchd.plist jobs, keeps launchd.plist.sweetbak). root.cmd: sweetsym on
   launchd/vmd pcs (tools/pbwrap/sym-ah.in), sweetjob list, sweetjob remove VisualVoicemail.framework/vmd.
+
+### Services switched off in the iOS root (to switch back on when their hardware works) — keep this list current
+User's rule (2026-11-26): everything that works on an iPhone must work in the end; turning something off is only
+temporary. Originals: /System/Library/xpc/launchd.plist.sweetbak (sweetjob keeps it), image build tweaks in
+tools/sweet-root-tweaks.py.
+| service | how | why | back on when |
+|---|---|---|---|
+| com.apple.CommCenter (cellular) | removed from launchd.plist at image build (sweet-root-tweaks.py) | no modem driver: crash loop, Setup blocked | modem/CCCI driver works (Open Mapple is doing MT6781's) |
+| VisualVoicemail vmd | `sweetjob remove VisualVoicemail.framework/vmd` (round ai, 2026-11-26) | no telephony: ~0.9 of a CPU spinning, launchd 110% -> 80% without it | cellular works |
+| VirtualAudio HAL plug-in | moved to /Library/Audio/Plug-Ins/HAL.disabled (image build) | mediaserverd crash | real audio driver |
+
+### 2026-11-26 14:05 — round ai observed; 0159, 0160 queued
+- Round ai (drop-ai, payload-z; second boot after a black-screen boot, see 0158): per draw ~220 us (was ~500),
+  average GL frame 15-16 ms at ~60 draws (was 22-25 ms at ~50), up to 289 swaps/10 s; launchd 80%, logd 5%, vmd gone.
+- First boot attempt of ai stayed black from the start: log shows iOS ran fine; ovl0's four layers were Android's
+  (SurfaceFlinger still composing at the jump) and all were turned off -> **0158**: point L0 at the framebuffer (con
+  0x8031ff, 720x1604, pitch 2880) when no layer shows it (boot-arg sweetovltake=0 off). Untested.
+- sweetsym (launchd): __workq_kernreturn, kevent_id, mach_msg, __sendto/_os_log_simple_send, __write_nocancel via
+  stdio __swrite/__sflush, lstat, proc_info, __mac_syscall, sync, posix_spawn: launchd is logging (what: next).
+- Kernel: SweetMaliUserClient::submit's walk of all 4096 buffers to mark imported ones = ~1/3 of backboardd's kernel
+  time (~1600 SUBMITs/s) -> **0159** list of imported indices. sweetaccel-d: every accelerator request forwarded with
+  a 1 ms poll (backboardd selector 0x21 ~1500 times a fetch) -> **0160** answered in the kernel as the daemon did
+  (boot-arg sweetacceld=1 forwards again).
