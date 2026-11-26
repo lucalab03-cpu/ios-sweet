@@ -1,0 +1,77 @@
+diff --git a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+index 11b8338..90c84e2 100644
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -234,6 +234,8 @@ class SweetMaliUserClient : public IOUserClient
+ 	OSDeclareDefaultStructors(SweetMaliUserClient);
+ 
+ 	struct sweet_mali_buffer * fBuffers;    /* handle n is fBuffers[n - 1] */
++	uint16_t *                 fImported;   /* 0159: the indices of the imported buffers, fImportedCount of them */
++	uint32_t                   fImportedCount;
+ 	struct sweet_syncobj *     fSyncobjs;   /* syncobj n is fSyncobjs[n - 1] */
+ 	uint32_t                   fNextBuffer;
+ 	uint32_t                   fSubmits, fFailed, fRequests;
+@@ -280,7 +282,8 @@ SweetMaliUserClient::start(IOService * provider)
+ 	IOLog("SweetMali: a client opened the GPU\n");
+ 	fBuffers = IONewZeroData(struct sweet_mali_buffer, SWEET_MALI_BUFFERS);
+ 	fSyncobjs = IONewZeroData(struct sweet_syncobj, SWEET_MALI_SYNCOBJS);
+-	return fBuffers != NULL && fSyncobjs != NULL;
++	fImported = IONewZeroData(uint16_t, SWEET_MALI_BUFFERS);
++	return fBuffers != NULL && fSyncobjs != NULL && fImported != NULL;
+ }
+ 
+ struct sweet_mali_buffer *
+@@ -323,6 +326,14 @@ SweetMaliUserClient::freeBuffer(struct sweet_mali_buffer * b)
+ 	}
+ 	sweet_mali_unmap(b->address, b->size);
+ 	if (b->imported != NULL) {
++		uint16_t index = (uint16_t)(b - fBuffers);
++
++		for (uint32_t k = 0; fImported != NULL && k < fImportedCount; k++) {
++			if (fImported[k] == index) {
++				fImported[k] = fImported[--fImportedCount];     /* 0159 */
++				break;
++			}
++		}
+ 		b->imported->complete();
+ 		b->imported->release();
+ 	} else {
+@@ -419,6 +430,9 @@ SweetMaliUserClient::importHost(struct sweet_import_host * request)
+ 	}
+ 	sweet_mali_mapped();
+ 	b->imported = memory;
++	if (fImported != NULL && fImportedCount < SWEET_MALI_BUFFERS) {
++		fImported[fImportedCount++] = (uint16_t)(handle - 1);  /* 0159 */
++	}
+ 	b->size = request->size;
+ 	b->readOnly = readOnlyPages;
+ 	request->handle = handle;
+@@ -805,10 +819,13 @@ SweetMaliUserClient::submit(struct sweet_panfrost_submit * request)
+ 			b->used[fragment ? 0 : 1] = fence;
+ 		}
+ 	}
+-	for (uint32_t i = 0; i < SWEET_MALI_BUFFERS; i++) {
+-		if (fBuffers[i].imported != NULL) {
+-			fBuffers[i].used[fragment ? 0 : 1] = fence;
+-		}
++	/*
++	 * Patch 0159: the imported buffers from their list, not from a walk of all 4096 handles -- that walk (224 KB of
++	 * table, read on every SUBMIT, ~1600 SUBMITs a second) was about a third of the window server's kernel time
++	 * (round ai profile: the loop in submit()).
++	 */
++	for (uint32_t k = 0; fImported != NULL && k < fImportedCount; k++) {
++		fBuffers[fImported[k]].used[fragment ? 0 : 1] = fence;
+ 	}
+ 	if (count == 0) {
+ 		fUnnamed = true;
+@@ -1031,6 +1048,10 @@ SweetMaliUserClient::free(void)
+ 		IOFreeData(fBuffers, SWEET_MALI_BUFFERS * sizeof(struct sweet_mali_buffer));
+ 		fBuffers = NULL;
+ 	}
++	if (fImported != NULL) {
++		IOFreeData(fImported, SWEET_MALI_BUFFERS * sizeof(uint16_t));
++		fImported = NULL;
++	}
+ 	if (fSyncobjs != NULL) {
+ 		IOFreeData(fSyncobjs, SWEET_MALI_SYNCOBJS * sizeof(struct sweet_syncobj));
+ 		fSyncobjs = NULL;
