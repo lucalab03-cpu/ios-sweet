@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -481,6 +482,59 @@ rest_of_line(char *line, int from, char *out, size_t size)
 	snprintf(out, size, "%s", line + i);
 }
 
+/*
+ * "restart NAME FILE" (2026-11-26): send SIGTERM to every process called NAME that started before FILE was last
+ * written; launchd starts it again. The dropbox is applied during the boot, often after backboardd has loaded the
+ * GL library and read /var/sweet/glargs, which then took effect only at the next boot (two boots for a GL change).
+ * With "restart backboardd.orig /usr/local/lib/libsweet-gl.dylib" (and glargs) a new drop counts from its own boot;
+ * on later boots the files are older than the process and nothing happens.
+ */
+static void
+restart_older(const char *name, const char *file)
+{
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+	struct kinfo_proc *procs = NULL;
+	size_t size = 0;
+	struct stat st;
+	int sent = 0;
+
+	if (stat(file, &st) != 0) {
+		say("restart: %s: %s\n", file, strerror(errno));
+		return;
+	}
+	if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || (procs = malloc(size + 16 * sizeof(*procs))) == NULL) {
+		say("restart: no process list\n");
+		return;
+	}
+	size += 16 * sizeof(*procs);
+	if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) {
+		say("restart: no process list\n");
+		free(procs);
+		return;
+	}
+	for (size_t i = 0; i < size / sizeof(*procs); i++) {
+		struct extern_proc *p = &procs[i].kp_proc;
+
+		if (strncmp(p->p_comm, name, sizeof(p->p_comm)) != 0) {
+			continue;
+		}
+		if (p->p_starttime.tv_sec > st.st_mtime) {
+			say("restart: %s[%d] started after %s was written: left alone\n", name, p->p_pid, file);
+			continue;
+		}
+		if (kill(p->p_pid, SIGTERM) == 0) {
+			say("restart: %s[%d] started before %s was written: SIGTERM, launchd starts it again\n", name, p->p_pid, file);
+			sent++;
+		} else {
+			say("restart: %s[%d]: %s\n", name, p->p_pid, strerror(errno));
+		}
+	}
+	if (sent == 0) {
+		say("restart: no %s to restart\n", name);
+	}
+	free(procs);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -595,6 +649,8 @@ main(int argc, char **argv)
 			}
 		} else if (!strcmp(tok[0], "run") && nt >= 2) {
 			run_prog(&tok[1]);
+		} else if (!strcmp(tok[0], "restart") && nt >= 3) {
+			restart_older(tok[1], tok[2]);
 		} else if (!strcmp(tok[0], "sync")) {
 			sync();
 			say("synced\n");
