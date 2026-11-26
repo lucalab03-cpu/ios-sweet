@@ -1351,3 +1351,15 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - **0155** (commit 9da97a7): scaled_blit builds each panel row branch-free in a cached buffer (the neighbour index
   at + blend, avg(a,a) == a) and memcpy's it into the panel. xnu 45792012972, bundle ad 45794247403 (mesa as ac).
 - Next: payload-v = payload-t's boot-args (828x1792 scaled) + this kernel; drop-ac stays on the phone.
+
+### 2026-11-26 11:20 — payload-v observed (0155 slower); 0156 GPU-scaled panel frames; bundle ae
+- payload-v (0155): copy **19 ms** a frame (worse than 13.6): CPU scaling in the kernel is compute-bound (no NEON
+  there). User: fluid, not 60; lock-screen wallpaper as before, home screen wallpaper black. PosterBoard sig 5 once.
+- **0156** (sweet_mali.c + SweetFramebuffer.cpp): sysctl sweetmali.fbshadow -- write {src,dst} after a draw, read
+  {panel w,h, presented w,h, last 4 swapped surfaces}; at a swap the display copies src's shadow one to one if it was
+  drawn since the last swap (else scales src as before). Stats line adds "GPU-scaled N, scaled here N".
+  0155 removed. Boot-arg sweetfbshadow=0 off.
+- eagl.c: shadow_look() each frame end; shadow_draw() after the mirror blit for a swapped surface of the presented
+  size: IOSurface 720x1604 BGRA of ours as a texture, glBlitFramebuffer GL_LINEAR, then the pair to the kernel.
+  /var/sweet/gl-noshadow off.
+- Builds: xnu 45797255780, mesa 45798671264, bundle ae 45799954487.
