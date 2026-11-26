@@ -1626,3 +1626,20 @@ tools/sweet-root-tweaks.py.
   `lsreg -r` = the same rebuild call). **Our /chosen had none of the three**: matches round at (lsd 1-3 %, installd
   idle, the rebuild never back). tools/repayload.py --adt-bytes /PATH:PROP=HEX (sets or adds). **payload-ae** =
   payload-ad (same kernel, rebuilt byte-identical as a check) + the three mac-address properties.
+
+### 2026-11-27 00:40 — round au/ae observed (LaunchServices rebuilt); round av (HEIC -> PNG on the phone)
+- payload-ae (mac-address-*) + drop-au: **"database rebuilt: 1, 128 s"**, plug-ins 155 -> **413**; records of
+  CollectionsPoster, GradientPoster, PhotosPosterProvider, LegacyPoster all yes. Phone not stuck. User: Settings ->
+  General -> About opens, the home screen got iOS's stock layout (Photos/App Store/Settings, a widget), battery
+  widgets (1 and 4 devices) on the left page. LegacyPoster runs. sweetstack works (lsd during the rebuild: a running
+  thread in InstalledContentLibrary; cache symbols are mostly <redacted> but images are named).
+- So the cause of rounds ar-at: no entitlements (ar), my registerPlugin: (as), no /chosen mac-address-* (at; the
+  hotdogg/guacamole finding). The HEIC test still 0 of 2500560 lit.
+- New loops now that extensions exist: **lskdd** exit(92) ~1/s (306 in 5 min), **AegirPoster** (Astronomy, Metal)
+  SIGABRT ~every 1.5 s (192). Not there before. PosterBoard sig 5 once early (the old assertion, before the rebuild).
+- Round av: tools/sweetheic + heic.yml (libde265 v1.0.15 + libheif v1.19.5 dylibs in /usr/local/lib, LGPL, built
+  from source; nothing of Apple's in CI). Root.cmd: `sweetheic test` (Clownfish Background) then
+  `sweetheic convert-bg /Library/Wallpaper 375w-812h` (originals to /var/sweet/heic-orig/..., PNG width padded x8,
+  ICC kept, ImageIO check after, PosterBoard + CollectionsPoster ended to redraw). heic 45910940696.
+  **payload-af** = payload-ae + sweetnull=AegirPoster,lskdd,CollectionsPoster, sweetscan=AegirPoster,MobileSMS,
+  MobileSlideShow, sweetenv removed (563 chars).

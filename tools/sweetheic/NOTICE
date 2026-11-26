@@ -1,0 +1,10 @@
+sweetheic (this directory) is ours (repository license).
+
+The heic workflow (.github/workflows/heic.yml) builds, unmodified, from their own sources:
+  libde265 v1.0.15  https://github.com/strukturag/libde265  LGPL-3.0-or-later
+  libheif  v1.19.5  https://github.com/strukturag/libheif   LGPL-3.0-or-later
+as shared libraries (/usr/local/lib/libde265.dylib, /usr/local/lib/libheif.1.dylib), so they can be replaced by any
+build of the same libraries. Their license texts go to the phone with them (/usr/local/share/sweetheic/).
+
+Method from the Galaxy S7 port (wardevsa/ios-a5xelte, tools/herolte-wallpaper-png.sh and herolte-png-pad8.py, MIT):
+stock wallpaper HEIC made PNG under the same name, widths padded to a multiple of 8 pixels.
