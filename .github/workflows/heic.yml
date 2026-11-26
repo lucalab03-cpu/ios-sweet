@@ -49,18 +49,15 @@ jobs:
           set -euo pipefail
           P=$PWD/prefix
           mkdir -p drop/usr/local/lib drop/usr/local/bin
-          for l in $P/lib/libde265*.dylib $P/lib/libheif*.dylib; do
-            [ -L "$l" ] && continue
-            cp "$l" drop/usr/local/lib/
-          done
-          (cd drop/usr/local/lib && for l in *.dylib; do
-             n=$(otool -D "$l" | tail -1); b=$(basename "$n"); [ "$b" != "$l" ] && cp "$l" "$b" || true; done)
+          # each library under its install name (what the others ask dyld for)
+          cp -L $P/lib/libde265.dylib drop/usr/local/lib/libde265.dylib
+          cp -L $P/lib/libheif.1.dylib drop/usr/local/lib/libheif.1.dylib
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -I$P/include tools/sweetheic/sweetheic.c \
             -L$P/lib -lheif -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o drop/usr/local/bin/sweetheic
           codesign -s - --force drop/usr/local/lib/*.dylib drop/usr/local/bin/sweetheic
           for f in drop/usr/local/lib/*.dylib drop/usr/local/bin/sweetheic; do echo "== $f"; otool -L "$f"; done
           # every library the tool needs is either the system's or in drop/usr/local/lib under its install name
-          for dep in $(otool -L drop/usr/local/bin/sweetheic drop/usr/local/lib/*.dylib | awk '/\/usr\/local\/lib\//{print $1}' | sort -u); do
+          for dep in $(otool -L drop/usr/local/bin/sweetheic drop/usr/local/lib/*.dylib | awk '/^\t\/usr\/local\/lib\//{print $1}' | sort -u); do
             test -f "drop$dep" || { echo "missing $dep"; exit 1; }
           done
           mkdir -p drop/usr/local/share/sweetheic

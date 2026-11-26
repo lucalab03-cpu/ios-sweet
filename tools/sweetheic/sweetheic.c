@@ -6,6 +6,9 @@
  *                                written as PNG (ImageIO) under the same name. The original is kept first under
  *                                /var/sweet/heic-orig/ + its path. A file that already starts with PNG's bytes is left
  *                                alone, so running it again changes nothing.
+ *   sweetheic convert-bg DIR TEXT  the same in the background (sweetroot does not wait), then ImageIO is asked to draw
+ *                                the first converted picture (the check that gave 0 lit pixels before), and PosterBoard
+ *                                and CollectionsPoster are ended so that they draw again with the PNGs.
  *   sweetheic test FILE          what libheif makes of FILE: size, alpha, lit pixels.
  *   Log: /var/tmp/sweetheic.log (and stdout).
  *
@@ -32,11 +35,14 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/sysctl.h>
 
 #define ORIG_DIR "/var/sweet/heic-orig"
 
 static FILE *log_file;
 static int made, kept, failed;
+static char first_made[1024];
 
 static void
 say(const char *fmt, ...)
@@ -275,6 +281,9 @@ convert_one(const char *path)
 		    alpha ? " with alpha" : "", icc != NULL ? ", ICC kept" : "", lit, (size_t)pw * h, (long long)st.st_size,
 		    ms_now() - t);
 		made++;
+		if (first_made[0] == 0) {
+			snprintf(first_made, sizeof(first_made), "%s", path);
+		}
 	}
 	if (icc != NULL) {
 		CFRelease(icc);
@@ -311,17 +320,97 @@ walk(const char *dir, const char *text)
 	closedir(d);
 }
 
+/* What ImageIO (as the wallpaper's poster uses it) makes of a file: its type and how many pixels are lit. */
+static void
+imageio_check(const char *path)
+{
+	CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+	CGImageSourceRef source = url != NULL ? CGImageSourceCreateWithURL(url, NULL) : NULL;
+	CFStringRef type = source != NULL ? CGImageSourceGetType(source) : NULL;
+	char type_text[64] = "(none)";
+
+	if (type != NULL) {
+		CFStringGetCString(type, type_text, sizeof(type_text), kCFStringEncodingUTF8);
+	}
+	CGImageRef image = source != NULL ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+	size_t w = image != NULL ? CGImageGetWidth(image) : 0, h = image != NULL ? CGImageGetHeight(image) : 0;
+	unsigned char *pixels = w && h ? calloc(w * h, 4) : NULL;
+	CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+	CGContextRef context = pixels != NULL ? CGBitmapContextCreate(pixels, w, h, 8, w * 4, space,
+	    kCGImageAlphaPremultipliedLast) : NULL;
+	size_t lit = 0;
+
+	if (context != NULL) {
+		CGContextDrawImage(context, CGRectMake(0, 0, w, h), image);
+		for (size_t i = 0; i < w * h; i++) {
+			lit += (pixels[i * 4] | pixels[i * 4 + 1] | pixels[i * 4 + 2]) != 0;
+		}
+	}
+	say("sweetheic: ImageIO check %s: type %s, %zux%zu, %zu of %zu pixels lit\n", path, type_text, w, h, lit, w * h);
+}
+
+static void
+end_all(const char *name)
+{
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
+	struct kinfo_proc *procs = NULL;
+	size_t size = 0;
+
+	if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || (procs = malloc(size + 16 * sizeof(*procs))) == NULL) {
+		return;
+	}
+	size += 16 * sizeof(*procs);
+	if (sysctl(mib, 4, procs, &size, NULL, 0) == 0) {
+		for (size_t i = 0; i < size / sizeof(*procs); i++) {
+			struct extern_proc *p = &procs[i].kp_proc;
+
+			if (strncmp(p->p_comm, name, sizeof(p->p_comm)) == 0) {
+				say("sweetheic: %s[%d] ended: %d\n", name, p->p_pid, kill(p->p_pid, SIGTERM));
+			}
+		}
+	}
+	free(procs);
+}
+
 int
 main(int argc, char **argv)
 {
 	log_file = fopen("/var/tmp/sweetheic.log", "a");
-	if (argc == 4 && strcmp(argv[1], "convert") == 0) {
+	int background = argc == 4 && strcmp(argv[1], "convert-bg") == 0;
+
+	if (background) {
+		pid_t pid = fork();
+
+		if (pid != 0) {
+			printf("sweetheic: converting in the background (pid %d), log /var/tmp/sweetheic.log\n", pid);
+			return pid < 0;
+		}
+		setsid();
+		int null = open("/dev/null", O_RDWR);
+
+		if (null >= 0) {
+			dup2(null, 0);
+			dup2(null, 1);
+			dup2(null, 2);
+			if (null > 2) {
+				close(null);
+			}
+		}
+	}
+	if (argc == 4 && (strcmp(argv[1], "convert") == 0 || background)) {
 		long t = ms_now();
 
 		say("sweetheic: libheif %s; converting the HEIC under %s with \"%s\" in the path\n", heif_get_version(),
 		    argv[2], argv[3]);
 		walk(argv[2], argv[3]);
 		say("sweetheic: %d made PNG, %d already PNG, %d failed, %ld s\n", made, kept, failed, (ms_now() - t) / 1000);
+		if (first_made[0] != 0) {
+			imageio_check(first_made);
+		}
+		if (background && made > 0) {
+			end_all("PosterBoard");
+			end_all("CollectionsPoster");
+		}
 		return failed != 0;
 	}
 	if (argc == 3 && strcmp(argv[1], "test") == 0) {
@@ -338,6 +427,6 @@ main(int argc, char **argv)
 		    icc != NULL ? "yes" : "no", lit, (size_t)pw * h, ms_now() - t);
 		return pixels == NULL;
 	}
-	fprintf(stderr, "usage: sweetheic convert DIR TEXT | sweetheic test FILE\n");
+	fprintf(stderr, "usage: sweetheic convert[-bg] DIR TEXT | sweetheic test FILE\n");
 	return 2;
 }
