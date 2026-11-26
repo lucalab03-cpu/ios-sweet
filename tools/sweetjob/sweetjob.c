@@ -3,6 +3,10 @@
  *
  *   sweetjob list                 every job: label and program
  *   sweetjob remove PATTERN...    remove the jobs whose Label is PATTERN or whose program path contains it
+ *   sweetjob log LABEL FILE       the job's os_log also goes to FILE: EnvironmentVariables OS_ACTIVITY_DT_MODE=YES
+ *                                 (libtrace then writes every message to stderr too) and StandardErrorPath FILE
+ *                                 (2026-11-26: PosterBoard runs but launches no poster at all; what it says is the
+ *                                 only way to see why, and its own signed binary has to stay for its entitlements)
  *
  * launchd reads that file at boot (boot-arg launchd_unsecure_cache=1), so a removal takes effect at the next boot.
  * The first change keeps the original as launchd.plist.sweetbak (never overwritten); the new file is written next to
@@ -94,12 +98,13 @@ main(int argc, char **argv)
 {
 	bool list = argc == 2 && strcmp(argv[1], "list") == 0;
 	bool remove = argc >= 3 && strcmp(argv[1], "remove") == 0;
+	bool logging = argc == 4 && strcmp(argv[1], "log") == 0;
 	CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
 	CFErrorRef error = NULL;
 	struct stat st;
 
-	if (!list && !remove) {
-		fprintf(stderr, "usage: sweetjob list | sweetjob remove PATTERN...\n");
+	if (!list && !remove && !logging) {
+		fprintf(stderr, "usage: sweetjob list | sweetjob remove PATTERN... | sweetjob log LABEL FILE\n");
 		return 2;
 	}
 	CFDataRef data = read_file(PLIST);
@@ -137,6 +142,37 @@ main(int argc, char **argv)
 		if (list) {
 			printf("%s\t%s\n", label, program);
 			continue;
+		}
+		if (logging) {
+			CFMutableDictionaryRef job = (CFMutableDictionaryRef)values[i];
+			CFStringRef file = CFStringCreateWithCString(NULL, argv[3], kCFStringEncodingUTF8);
+			CFTypeRef env = CFDictionaryGetValue(job, CFSTR("EnvironmentVariables"));
+			CFTypeRef had = CFDictionaryGetValue(job, CFSTR("StandardErrorPath"));
+			CFTypeRef mode = env != NULL && CFGetTypeID(env) == CFDictionaryGetTypeID() ?
+			    CFDictionaryGetValue(env, CFSTR("OS_ACTIVITY_DT_MODE")) : NULL;
+
+			if (strcmp(label, argv[2]) != 0) {
+				CFRelease(file);
+				continue;
+			}
+			if (had != NULL && CFEqual(had, file) && mode != NULL && CFEqual(mode, CFSTR("YES"))) {
+				printf("sweetjob: %s already logs to %s\n", label, argv[3]);
+				CFRelease(file);
+				return 0;
+			}
+			if (env == NULL || CFGetTypeID(env) != CFDictionaryGetTypeID()) {
+				CFMutableDictionaryRef fresh = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+				    &kCFTypeDictionaryValueCallBacks);
+				CFDictionarySetValue(job, CFSTR("EnvironmentVariables"), fresh);
+				CFRelease(fresh);
+				env = CFDictionaryGetValue(job, CFSTR("EnvironmentVariables"));
+			}
+			CFDictionarySetValue((CFMutableDictionaryRef)env, CFSTR("OS_ACTIVITY_DT_MODE"), CFSTR("YES"));
+			CFDictionarySetValue(job, CFSTR("StandardErrorPath"), file);
+			CFRelease(file);
+			printf("sweetjob: %s (%s): OS_ACTIVITY_DT_MODE=YES, stderr to %s\n", label, program, argv[3]);
+			removed++;
+			break;
 		}
 		for (int a = 2; a < argc; a++) {
 			if (strcmp(label, argv[a]) == 0 || (program[0] != 0 && strstr(program, argv[a]) != NULL)) {
@@ -177,6 +213,10 @@ main(int argc, char **argv)
 		return 1;
 	}
 	sync();
+	if (logging) {
+		printf("sweetjob: %s written; in effect at the next boot\n", PLIST);
+		return 0;
+	}
 	printf("sweetjob: %d job(s) removed from %s (%ld -> %ld); in effect at the next boot\n", removed, PLIST,
 	    (long)count, (long)(count - removed));
 	return 0;
