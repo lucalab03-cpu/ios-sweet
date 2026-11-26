@@ -1652,3 +1652,22 @@ tools/sweet-root-tweaks.py.
   SiriTTSSynthesizer (sig 6) and **assetsd** (sig 6, Photos' library daemon: Photos poster and app).
 - Round aw (no new tools, drop-aw = root.cmd only, payload-af): PosterBoard store/caches reset again (snapshots made
   while the pictures were unreadable), then `sweetheic convert-bg /Library/Wallpaper /Library` = all 96 (user).
+
+## METAL PHASE: EVERYTHING (user, 2026-11-27 00:40: "tutto quello che deve andare nella fase metal va fatto ma TUTTO")
+Order of the whole work stays: wallpaper -> GPU OpenGL path to 100% -> **Metal path** -> 90 Hz. Nothing below is
+dropped or "good enough"; each item closes only with a log/photo showing it working. Add here anything new that
+turns out to be Metal's.
+| # | Item | Seen | Notes / references |
+|---|---|---|---|
+| M1 | Messages (MobileSMS) ObjC exception at launch | rounds ah-aj | sweetscan on in payload-af: reason text in the kernel log |
+| M2 | Photos (MobileSlideShow) ObjC exception | rounds ah-aj | same; also assetsd crash loop (sig 6, round av) |
+| M3 | Safari slow (WebKit GPU/WebContent) | user | per-frame profile of com.apple.WebKit.GPU |
+| M4 | Astronomy wallpaper (AegirPoster) | round av: "insertObject:atIndex: object cannot be nil" after PRPosterRootViewController, restarted ~1/1.5 s | likely no MTLDevice for it (metal.allow gate: tools/metal-allow/base vs apps); extensions/posters need the device |
+| M5 | Photo + Pride wallpapers (MPS) | not yet tried | guacamole: SIGSEGV 0x18 in MPSAutoCache (CIImageProcessorKernel); MPSDevice::GetMPSDevice by supportsFamily (Apple8..2; Apple6 only for "Apple A13 GPU"); missing heapTextureSizeAndAlignWithDescriptor:, makeAliasable; protocol conformance of command buffer/encoders (their 0206-0210, hotdogg NOTES 2026-11-09) |
+| M6 | Core Image / photo editing / filters | - | rides on MPS (M5) |
+| M7 | Camera preview + capture rendering | - | with the camera driver later; preview is Metal |
+| M8 | Video playback rendering (AVPlayer layers, YouTube/Safari video) | - | decode is the software HEVC/H.264 item (services table); presentation is Metal/CA |
+| M9 | Maps, Weather (Metal shaders/backgrounds), Wallet cards, Fitness rings | - | per-app sweep |
+| M10 | Games / App Store apps (Metal 2/3 features, argument buffers) | - | metal2vulkan feature gaps logged as [metal2vulkan-degrade-*] |
+| M11 | Every stock app: opens, draws, no crash | - | table per app with the log of its run |
+| M12 | Frame times of Metal apps (99% < 16.7 ms), shader/pipeline cache warm-up stutter | - | sweetprof on the app; metal2vulkan pipeline cache counters |
