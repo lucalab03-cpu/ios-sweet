@@ -131,6 +131,7 @@ typedef GLDEBUGPROC GLDEBUGPROCKHR;
 #define GL_DRAW_FRAMEBUFFER_BINDING     0x8ca6
 #define GL_COLOR_BUFFER_BIT             0x4000
 #define GL_NEAREST                      0x2600
+#define GL_LINEAR                       0x2601
 #define GL_LINES                        0x0001
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE 0x8cd0
 #define GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME 0x8cd1
