@@ -1564,3 +1564,17 @@ tools/sweet-root-tweaks.py.
   /var/tmp/sweetlog-PROGRAM.txt; SpringBoard filtered to poster/wallpaper lines), `sweetjob env LABEL KEY=VALUE`;
   root.cmd puts DYLD_INSERT_LIBRARIES=/usr/local/bin/sweetlogcatch.dylib on com.apple.PosterBoard and
   com.apple.SpringBoard (launchd.plist: from the next boot -> two boots). pbwrap 45886592351.
+
+### 2026-11-26 23:20 — round ar (wallpaper: the Pixel 3's cause)
+- References read first (user's rule): pixel3-ios docs/LOG.md "migr5" = our symptoms on the same 20H392 (black
+  wallpaper, the same PosterBoard assertion): LaunchServices built without the system's extension records because
+  ExtensionFoundation could not check extensions.plist.sig (no AppleMobileFileIntegrity IOService); fixed by their
+  0164 + a database rebuild. The S7 port rebuilds from the phone (hero-run.c: LS migrator, LSRegisterURL of the
+  posters, _LSPrivateRebuildApplicationDatabasesForSystemApps as mobile; "lsd 125-130%, SpringBoard waits" ~3 min).
+- Round aq observed: sweetlogcatch never loaded -- launchd strips DYLD_ variables (pixel3 says so too).
+- **0162** sweetenv (kernel adds env to named programs), **0163** AppleMobileFileIntegrity IOService (selector 6) +
+  AMFI 0x5f (from pixel3-ios 0164). xnu 45888256563. tools/sweetls (pbwrap 45888433775): once, in the background,
+  migrator + LSRegisterURL + rebuild, census before/after (/var/tmp/sweetls.log; markers /var/sweet/ls-*.done).
+- payload-ad = payload-ac + kernel 0162/0163, boot-args: sweetscan out, sweetprof=backboardd.orig,
+  sweetnull=PosterBoard,CollectionsPoster, sweetenv=PosterBoard|CollectionsPoster:OS_ACTIVITY_DT_MODE=YES (572 chars).
+  drop-ar = bundle sweet-bundle-ar tools + root.cmd (sweetjob env ... DYLD_INSERT_LIBRARIES= to undo aq, sweetls).
