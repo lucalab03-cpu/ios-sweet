@@ -1,0 +1,73 @@
+name: heic
+# libde265 + libheif (LGPL-3.0, built from their own sources, as dylibs in /usr/local/lib) and tools/sweetheic, which
+# turns the phone's own stock wallpaper HEIC pictures into PNG on the phone (no Apple video decoder there). Nothing of
+# Apple's is downloaded or published here.
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runner image (macos-15; macos-15-intel when the arm64 Macs are queued for hours)
+        default: macos-15
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    env:
+      DE265_TAG: v1.0.15
+      HEIF_TAG: v1.19.5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sources
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$DE265_TAG" https://github.com/strukturag/libde265.git src/libde265
+          git clone -q --depth 1 --branch "$HEIF_TAG" https://github.com/strukturag/libheif.git src/libheif
+          (cd src/libde265 && git log -1 --format='libde265 %H %ci') ; (cd src/libheif && git log -1 --format='libheif %H %ci')
+      - name: Build for iOS arm64
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.app
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          P=$PWD/prefix
+          IOS="-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+               -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$P -DCMAKE_INSTALL_NAME_DIR=/usr/local/lib \
+               -DCMAKE_FIND_ROOT_PATH=$P -DCMAKE_PREFIX_PATH=$P -DBUILD_SHARED_LIBS=ON \
+               -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO"
+          cmake -S src/libde265 -B b/de265 $IOS -DENABLE_SDL=OFF -DENABLE_DECODER=OFF -DENABLE_ENCODER=OFF -DDISABLE_SSE=ON
+          cmake --build b/de265 -j 4 && cmake --install b/de265
+          cmake -S src/libheif -B b/heif $IOS \
+            -DWITH_LIBDE265=ON -DWITH_X265=OFF -DWITH_AOM_DECODER=OFF -DWITH_AOM_ENCODER=OFF -DWITH_DAV1D=OFF \
+            -DWITH_RAV1E=OFF -DWITH_SvtEnc=OFF -DWITH_KVAZAAR=OFF -DWITH_FFMPEG_DECODER=OFF -DWITH_JPEG_DECODER=OFF \
+            -DWITH_JPEG_ENCODER=OFF -DWITH_OpenJPEG_DECODER=OFF -DWITH_OpenJPEG_ENCODER=OFF -DWITH_OPENJPH_ENCODER=OFF \
+            -DWITH_LIBSHARPYUV=OFF -DWITH_EXAMPLES=OFF -DWITH_GDK_PIXBUF=OFF -DBUILD_TESTING=OFF -DWITH_UNCOMPRESSED_CODEC=OFF \
+            -DENABLE_PLUGIN_LOADING=OFF \
+            -DLIBDE265_INCLUDE_DIR=$P/include -DLIBDE265_LIBRARY=$P/lib/libde265.dylib
+          grep -i "libde265\|HEVC" b/heif/CMakeCache.txt | head -20
+          cmake --build b/heif -j 4 && cmake --install b/heif
+          ls -la $P/lib $P/include/libheif
+      - name: sweetheic and the drop tree
+        run: |
+          set -euo pipefail
+          P=$PWD/prefix
+          mkdir -p drop/usr/local/lib drop/usr/local/bin
+          for l in $P/lib/libde265*.dylib $P/lib/libheif*.dylib; do
+            [ -L "$l" ] && continue
+            cp "$l" drop/usr/local/lib/
+          done
+          (cd drop/usr/local/lib && for l in *.dylib; do
+             n=$(otool -D "$l" | tail -1); b=$(basename "$n"); [ "$b" != "$l" ] && cp "$l" "$b" || true; done)
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -O1 -I$P/include tools/sweetheic/sweetheic.c \
+            -L$P/lib -lheif -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o drop/usr/local/bin/sweetheic
+          codesign -s - --force drop/usr/local/lib/*.dylib drop/usr/local/bin/sweetheic
+          for f in drop/usr/local/lib/*.dylib drop/usr/local/bin/sweetheic; do echo "== $f"; otool -L "$f"; done
+          # every library the tool needs is either the system's or in drop/usr/local/lib under its install name
+          for dep in $(otool -L drop/usr/local/bin/sweetheic drop/usr/local/lib/*.dylib | awk '/\/usr\/local\/lib\//{print $1}' | sort -u); do
+            test -f "drop$dep" || { echo "missing $dep"; exit 1; }
+          done
+          mkdir -p drop/usr/local/share/sweetheic
+          cp src/libheif/COPYING drop/usr/local/share/sweetheic/libheif-COPYING
+          cp src/libde265/COPYING drop/usr/local/share/sweetheic/libde265-COPYING
+          find drop -type f -exec ls -l {} \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heic
+          path: drop

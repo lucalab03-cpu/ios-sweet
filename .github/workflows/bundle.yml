@@ -18,6 +18,9 @@ on:
       pbwrap_run:
         description: pbwrap run id (its usr/local/bin tools); empty = none
         required: false
+      heic_run:
+        description: heic run id (libde265, libheif, sweetheic); empty = none
+        required: false
       mesa_run:
         description: mesa-ios run id (OSMesa, libsweet-gl, gltest, drawtest, backboardd wrapper, sweetinject); empty = none
         required: false
@@ -81,6 +84,13 @@ jobs:
           path: in/mesa-ios
           run-id: ${{ inputs.mesa_run }}
           github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        if: inputs.heic_run != ''
+        with:
+          name: heic
+          path: in/heic
+          run-id: ${{ inputs.heic_run }}
+          github-token: ${{ github.token }}
       - name: Pick the files
         run: |
           set -e
@@ -99,8 +109,9 @@ jobs:
             cp in/pbwrap/usr/local/bin/* out/drop/usr/local/bin/
           fi
           if [ -d in/mesa-ios ]; then mkdir -p out/drop && cp -R in/mesa-ios/. out/drop/; fi
+          if [ -d in/heic ]; then mkdir -p out/drop && cp -R in/heic/. out/drop/; fi
           if [ -d in/symbols ]; then mkdir -p out/symbols && cp -R in/symbols/. out/symbols/; fi
-          printf 'xnu %s\npanvk-ios %s\nmetal2 %s\npbwrap %s\nmesa-ios %s\n' "${{ inputs.xnu_run }}" "${{ inputs.panvk_run }}" "${{ inputs.metal2_run }}" "${{ inputs.pbwrap_run }}" "${{ inputs.mesa_run }}" > out/RUNS.txt
+          printf 'xnu %s\npanvk-ios %s\nmetal2 %s\npbwrap %s\nmesa-ios %s\nheic %s\n' "${{ inputs.xnu_run }}" "${{ inputs.panvk_run }}" "${{ inputs.metal2_run }}" "${{ inputs.pbwrap_run }}" "${{ inputs.mesa_run }}" "${{ inputs.heic_run }}" > out/RUNS.txt
           find out -type f -exec ls -l {} \;
           (cd out && find . -type f ! -name SHA256SUMS -exec sha256sum {} \; > SHA256SUMS)
       - uses: actions/upload-artifact@v4
