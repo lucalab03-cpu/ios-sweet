@@ -1548,3 +1548,15 @@ tools/sweet-root-tweaks.py.
   once (marker /var/sweet/posterreset.done; store/caches/savedState renamed .sweetbak-DATE, prefs saved to
   /var/sweet/PosterBoard-prefs.sweetbak-DATE.plist and removed) and `restart PosterBoard /var/sweet/posterreset.done`.
   No glargs in the drop, so backboardd is not restarted.
+
+### 2026-11-26 22:00 — round ap observed
+- Control Center: glyphs on the round buttons now (photo 20:46); the blue aura around Siri's banner gone (another
+  plain-drawn effect). Still: CC background light grey/white over a black wallpaper (should be dark), the white
+  slider fills with diagonal stripes; the pull-down animation looks white.
+- sweetwk posterreset ran (store, caches, savedState -> .sweetbak-20261126-194426; prefs CAEnable*,
+  SnapshotsBuildVersion, PBF_LOCALE_* saved and removed). No PosterBoard crash after it, but still **no poster
+  extension launched and no extensionkitservice stub from PosterBoard** (other processes make one): PosterBoard never
+  queries extensions; on iOS 16 the lock-screen poster is also asked for by SpringBoard (FrontBoard scene) -- open.
+- PosterBoard's stderr file stays empty even across its assertion crash: OS_ACTIVITY_DT_MODE from launchd gives
+  nothing here (a22-5g sets it in-process and reads a pipe). Next for the wallpaper: kernel sampler
+  (sweetsample=PosterBoard,SpringBoard) or an in-process log catcher.
