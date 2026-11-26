@@ -1456,3 +1456,6 @@ tools/sweet-root-tweaks.py.
 - MobileSMS/MobileSlideShow sig 6, same stack (to name: tools/pbwrap/sym-aj.in, slide 0xad90000); an older MobileSMS
   report: SIGSEGV in CI::GLContext::GLContext (CoreImage's icon compositor took the OpenGL ES path in the app).
 - sweet-boot: /var/sweet/outbox.list names files whose last 256 KB go to the outbox every 10 s (launchd.log live).
+- sweetaccel-d no longer started (tools/pbwrap/sweet-boot.list, also in drop-ak): idle since 0160 but 9-15% of a CPU
+  (SweetAccelControl selector 0 waits in 1 ms polls). Not an iOS service: nothing to switch back on unless
+  sweetacceld=1 is used.

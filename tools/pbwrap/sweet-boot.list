@@ -1,4 +1,6 @@
 /usr/local/bin/sweetroot
 /usr/local/bin/install-wrap
 /usr/local/bin/sweetsvc
-&/usr/local/bin/sweetaccel-d
+# sweetaccel-d is not started since round ak: with 0160 the kernel answers the accelerator itself, and the idle
+# daemon still cost 9-15% of a CPU (the kernel's "next request" call polls every 1 ms). For boot-arg sweetacceld=1
+# (forwarding to the daemon again) put back the line: &/usr/local/bin/sweetaccel-d
