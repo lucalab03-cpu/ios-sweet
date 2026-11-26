@@ -1310,3 +1310,14 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
     eagl frame_end). Kill: /var/sweet/gl-kernel-clean.
   - eagl: CAEnableDeepFramebuffer = NO (pixel3-ios does the same).
   - /var/sweet/glargs = "glwait=0" (SweetFB 0140 already waits for the frame's GPU chains). Delete to restore.
+
+### 2026-11-26 01:10 — round aa observed: kernel cleaning gone, GL frames 3-5 ms; glwait=0 crashed Mesa
+- "SweetMali: a client asks for mode 3: ... keeps its imported pages coherent itself"; libsweet-gl: frame mark found.
+- backboardd 8-14% of a CPU (was 70%); clean_mmu_dcache/FlushPoC/CleanPoC gone from its kernel profile. GL frames
+  3-5.5 ms (were 17-20 ms), ~1.5-2.3 ms of it waiting. 159-222 swaps/10 s; FB copy still 13.6 ms a swap.
+- One backboardd crash (user: SpringBoard restarted on the jiggle long-press): crash recorder ->
+  SIGSEGV in Mesa pan_preload_fb_part <- jm_preload_fb_v7 <- submit_batch <- panfrost_flush <- _mesa_fence_sync
+  <- our glFenceSync (eagl's frame-end fence flush, taken only with glwait=0). Launch 2 went on on GL.
+- 'b3a8'/'w30r' offscreen targets still "not done": CAEnableDeepFramebuffer only concerns the display's own
+  framebuffer (already BGRA here). Those layers need eagl to draw them into a texture of its own.
+- drop-ab: /var/sweet/glargs = glwait=1 (back to glFinish at frame end).
