@@ -1,0 +1,23 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -868,6 +868,19 @@
+ 		uint8_t limits[0x18] = { 0 };
+ 		put32(limits, 0x0, SWEET_SURFACE_ROW_ALIGN - 1);
+ 		put32(limits, 0x4, SWEET_SURFACE_ROW_ALIGN - 1);
++		/*
++		 * 0164: the maxima (port of ios-guacamole's 0214, coreycusick, same SweetSurface origin). IOSurface.framework
++		 * keeps this block as _ioSurfaceLimits and IOSurfaceGetPropertyMaximum answers BytesPerRow (+0x08), Width
++		 * (+0x0c) and Height (+0x10) from it as they are (the Plane* keys too). They were 0, so every size was over
++		 * the maximum: BaseBoard's +[IOSurface bs_IOSurfaceWithWidth:height:options:] returns nil, and PosterBoard
++		 * snapshots its posters over no surface (round aw, 2026-11-27: the live wallpaper shows, every preview in the
++		 * gallery and in the editor is black; guacamole saw the same). The values are what create() enforces:
++		 * SWEET_SURFACE_MAX_DIM a side, the widest row of that many 16-byte texels (an allocation over
++		 * SWEET_SURFACE_MAX_ALLOC is still refused there).
++		 */
++		put32(limits, 0x8, SWEET_SURFACE_MAX_DIM * 16);
++		put32(limits, 0xc, SWEET_SURFACE_MAX_DIM);
++		put32(limits, 0x10, SWEET_SURFACE_MAX_DIM);
+ 		limits[0x16] = 1;
+ 		sweet_surf_log_once("sel", selector);
+ 		return sweet_struct_out(args, limits, sizeof(limits));
