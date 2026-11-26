@@ -15,11 +15,23 @@
  * ignoring is set to true for root and mobile, in the global domain and WallpaperKit's/PosterBoard's/SpringBoard's,
  * and a second run of this program (a new process: the method may keep its first answer) says what it answers now.
  * Nothing of WallpaperKit or of the wallpapers is changed. Run by sweetroot (root.cmd).
+ * Round am: the method answers NO and reads no NSUserDefaults key at all, so it is not a preference.
+ *
+ *   sweetwk retarget FROM TO
+ *
+ * gives the wallpapers made for screen class FROM this screen's class TO instead: every Wallpaper.plist under
+ * /Library/Wallpaper/Collections whose path contains FROM gets logicalScreenClass = TO (the original is kept once as
+ * Wallpaper.plist.sweetbak, same format, owner and mode). The Galaxy S7 port (wardevsa/ios-a5xelte, herolte,
+ * tools/herolte-tune-ios-root.sh) does the same to its root image for its 480w-853h@3x screen; ours is 414 x 896
+ * points @2x: "sweetwk retarget 375w-812h 414w-896h@2x~iphone".
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -198,6 +210,120 @@ set_key(const char *key)
 	CFRelease(name);
 }
 
+static int retargeted, already, failed;
+
+static void
+retarget_file(const char *path, const char *to)
+{
+	CFStringRef key = CFSTR("logicalScreenClass"), want = CFStringCreateWithCString(NULL, to, kCFStringEncodingUTF8);
+	CFPropertyListFormat format = kCFPropertyListXMLFormat_v1_0;
+	struct stat st;
+	char backup[1100], tmp[1100];
+	int fd = open(path, O_RDONLY);
+	CFMutableDataRef bytes = CFDataCreateMutable(NULL, 0);
+	uint8_t buf[16384];
+	ssize_t got;
+
+	if (fd < 0 || fstat(fd, &st) != 0) {
+		say("sweetwk: %s: cannot read\n", path);
+		failed++;
+		goto out;
+	}
+	while ((got = read(fd, buf, sizeof(buf))) > 0) {
+		CFDataAppendBytes(bytes, buf, got);
+	}
+	close(fd);
+	fd = -1;
+	CFPropertyListRef plist = CFPropertyListCreateWithData(NULL, bytes, kCFPropertyListMutableContainersAndLeaves, &format, NULL);
+	if (plist == NULL || CFGetTypeID(plist) != CFDictionaryGetTypeID()) {
+		say("sweetwk: %s: not a dictionary\n", path);
+		failed++;
+		if (plist != NULL) {
+			CFRelease(plist);
+		}
+		goto out;
+	}
+	CFTypeRef had = CFDictionaryGetValue(plist, key);
+	char was[128] = "(none)";
+
+	if (had != NULL && CFGetTypeID(had) == CFStringGetTypeID()) {
+		CFStringGetCString(had, was, sizeof(was), kCFStringEncodingUTF8);
+	}
+	if (had != NULL && CFEqual(had, want)) {
+		already++;
+		CFRelease(plist);
+		goto out;
+	}
+	snprintf(backup, sizeof(backup), "%s.sweetbak", path);
+	if (access(backup, F_OK) != 0) {
+		int b = open(backup, O_WRONLY | O_CREAT | O_EXCL, st.st_mode & 07777);
+
+		if (b < 0 || write(b, CFDataGetBytePtr(bytes), (size_t)CFDataGetLength(bytes)) != CFDataGetLength(bytes)) {
+			say("sweetwk: %s: cannot keep the original; left alone\n", path);
+			if (b >= 0) {
+				close(b);
+			}
+			failed++;
+			CFRelease(plist);
+			goto out;
+		}
+		fchown(b, st.st_uid, st.st_gid);
+		fsync(b);
+		close(b);
+	}
+	CFDictionarySetValue((CFMutableDictionaryRef)plist, key, want);
+	CFDataRef data = CFPropertyListCreateData(NULL, plist, format, 0, NULL);
+	CFRelease(plist);
+	snprintf(tmp, sizeof(tmp), "%s.sweettmp", path);
+	int t = data != NULL ? open(tmp, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 07777) : -1;
+
+	if (t < 0 || write(t, CFDataGetBytePtr(data), (size_t)CFDataGetLength(data)) != CFDataGetLength(data) ||
+	    fchown(t, st.st_uid, st.st_gid) != 0 || fsync(t) != 0 || close(t) != 0 || rename(tmp, path) != 0) {
+		say("sweetwk: %s: cannot write; left alone\n", path);
+		unlink(tmp);
+		failed++;
+	} else {
+		if (retargeted < 6) {
+			say("sweetwk: %s: logicalScreenClass %s -> %s\n", path, was, to);
+		}
+		retargeted++;
+	}
+	if (data != NULL) {
+		CFRelease(data);
+	}
+out:
+	if (fd >= 0) {
+		close(fd);
+	}
+	CFRelease(bytes);
+	CFRelease(want);
+}
+
+static void
+retarget_walk(const char *dir, const char *from, const char *to, int depth)
+{
+	DIR *d = depth < 8 ? opendir(dir) : NULL;
+	struct dirent *e;
+
+	if (d == NULL) {
+		return;
+	}
+	while ((e = readdir(d)) != NULL) {
+		char path[1024];
+
+		if (e->d_name[0] == '.') {
+			continue;
+		}
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		if (e->d_type == DT_DIR) {
+			retarget_walk(path, from, to, depth + 1);
+		} else if (e->d_type == DT_REG && strcmp(e->d_name, "Wallpaper.plist") == 0 && strstr(path, from) != NULL) {
+			retarget_file(path, to);
+		}
+	}
+	closedir(d);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -207,6 +333,12 @@ main(int argc, char **argv)
 	int answer;
 
 	log_file = fopen("/var/tmp/sweetwk.log", "a");
+	if (argc == 4 && strcmp(argv[1], "retarget") == 0) {
+		retarget_walk("/Library/Wallpaper/Collections", argv[2], argv[3], 0);
+		say("sweetwk: retarget %s -> %s: %d changed, %d already so, %d failed\n", argv[2], argv[3], retargeted, already,
+		    failed);
+		return 0;
+	}
 	if (dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", RTLD_NOW) == NULL ||
 	    dlopen("/System/Library/PrivateFrameworks/WallpaperKit.framework/WallpaperKit", RTLD_NOW) == NULL) {
 		say("sweetwk: cannot load WallpaperKit: %s\n", dlerror());
