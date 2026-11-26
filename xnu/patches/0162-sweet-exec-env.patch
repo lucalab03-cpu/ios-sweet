@@ -1,0 +1,84 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5806,6 +5806,81 @@
+ 		imgp->ip_envc++;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * ios-sweet 0162 (2026-11-26): boot-arg sweetenv=NAME[|NAME...]:VAR=VAL[,VAR=VAL...][;NAME...:VAR=VAL...] appends
++	 * VAR=VAL to the environment of every program whose file name is a NAME, after the caller's own variables. launchd
++	 * hands its jobs no DYLD_ variables and, here, no OS_ACTIVITY_DT_MODE either (round aq: given in launchd.plist,
++	 * PosterBoard wrote nothing). The same as sailfish/pixel3-ios's sweetenv (pixel3-ios 0990, several entries).
++	 */
++	{
++		static char sweet_env_spec[512];
++		static int sweet_env_state;     /* 0 not parsed, 1 none, 2 set */
++		const char *base = imgp->ip_strings;
++
++		if (sweet_env_state == 0) {
++			sweet_env_state = PE_parse_boot_argn("sweetenv", sweet_env_spec, sizeof(sweet_env_spec)) &&
++			    sweet_env_spec[0] ? 2 : 1;
++		}
++		for (const char *c = imgp->ip_strings; sweet_env_state == 2 && *c; c++) {
++			if (*c == '/') {
++				base = c + 1;
++			}
++		}
++		for (const char *e = sweet_env_spec; sweet_env_state == 2 && *e;) {
++			size_t n = 0, end = 0;
++			bool match = false;
++
++			while (e[end] && e[end] != ';') {
++				end++;
++			}
++			while (n < end && e[n] != ':') {
++				n++;
++			}
++			for (size_t a = 0, z; a < n && !match; a = z + 1) {    /* NAME|NAME|... */
++				for (z = a; z < n && e[z] != '|'; z++) {
++				}
++				match = strlen(base) == z - a && strncmp(base, e + a, z - a) == 0;
++			}
++			if (n < end && match) {
++				const char *p = e + n + 1, *stop = e + end;
++
++				while (p < stop) {
++					char var[128];
++					size_t len = 0;
++
++					while (p + len < stop && p[len] != ',') {
++						len++;
++					}
++					if (len > 0 && len < sizeof(var)) {
++						memcpy(var, p, len);
++						var[len] = '\0';
++						error = exec_add_user_string(imgp, CAST_USER_ADDR_T(var), UIO_SYSSPACE, TRUE);
++						if (error) {
++							goto bad;
++						}
++						if (imgp->ip_argspace < new_ptr_size) {
++							error = E2BIG;
++							goto bad;
++						}
++						imgp->ip_argspace -= new_ptr_size;
++						imgp->ip_envc++;
++						printf("SWEET ENV: %s += %s\n", base, var);
++					}
++					p += len;
++					if (p < stop && *p == ',') {
++						p++;
++					}
++				}
++			}
++			e += end;
++			if (*e == ';') {
++				e++;
++			}
++		}
++	}
++#endif
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
