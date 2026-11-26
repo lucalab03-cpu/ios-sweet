@@ -247,6 +247,8 @@ struct image {
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
 	uint64_t sum;                   /* ... and what it added up to */
+	uint64_t sums[8];               /* ios-sweet: big surfaces, rows y with y % 8 == i (see surface_changed) */
+	bool sums_known;
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
 	GLsizei width, height;
@@ -363,6 +365,7 @@ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
  * Boot-arg glblit=0: the surface's memory, as before.
  */
 static int blit_targets = 1;
+static int all_sums;                     /* ios-sweet: glsums=1, every byte of a copied surface every frame */
 static int wide_targets = 1;            /* ios-sweet: 'b3a8'/'w30r' targets drawn into textures of ours (glwide=0: refused) */
 /*
  * A frame that is handed to the display must have been drawn. The display's driver waits for
@@ -673,19 +676,60 @@ surface_shared(struct eagl *e, struct image *image)
  * a frame, when the texture is about to be drawn with, the memory is added up, and copied again
  * if the sum has changed.
  */
+/*
+ * ios-sweet (2026-11-26), after the Galaxy S7 port (wardevsa/ios-a5xelte, herolte branch, "0334": 12.5% -> 0.9%):
+ * adding up every byte of every copied surface each frame was 11% of backboardd's samples in round aj. A surface of
+ * more than 256 KB has one eighth of its rows looked at a frame (rows y with y % 8 == the frame's phase), against what
+ * those rows added up to before; when that eighth has changed, all eight are added up again (it is about to be copied
+ * anyway). A change in a big surface is seen within eight frames; small ones are still looked at whole, every frame.
+ * glsums=1 in /var/sweet/glargs: every byte every frame, as before.
+ */
+static uint64_t
+rows_sum(const uint8_t *base, size_t row, size_t used, GLsizei height, unsigned phase)
+{
+	uint64_t sum = used ^ phase, word;
+
+	for (GLsizei y = (GLsizei)phase; y < height; y += 8) {
+		const uint8_t *line = base + row * (size_t)y;
+
+		for (size_t at = 0; at + 8 <= used; at += 8) {
+			memcpy(&word, line + at, 8);
+			sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
+			sum ^= sum >> 29;
+		}
+	}
+	return sum;
+}
+
 static bool
 surface_changed(struct eagl *e, struct image *image)
 {
 	IOSurfaceRef surface = image->surface;
-	size_t size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
-	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
+	size_t row = IOSurfaceGetBytesPerRow(surface);
+	size_t size = row * (size_t)(image->height - 1) + (size_t)image->width * bytes_a_pixel(image->format, image->type);
+	size_t used = (size_t)image->width * bytes_a_pixel(image->format, image->type);
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
 	uint64_t sum = size, word;
 
-	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
+	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0 || image->height <= 0) {
 		return false;
 	}
 	image->looked = e->frames + 1;
+	if (!all_sums && size > (256u << 10)) {
+		unsigned phase = e->frames % 8;
+
+		if (used > row) {
+			used = row;
+		}
+		if (image->sums_known && rows_sum(base, row, used, image->height, phase) == image->sums[phase]) {
+			return false;
+		}
+		for (unsigned i = 0; i < 8; i++) {
+			image->sums[i] = rows_sum(base, row, used, image->height, i);
+		}
+		image->sums_known = true;
+		return true;
+	}
 	for (size_t at = 0; at + 8 <= size; at += 8) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
@@ -4500,6 +4544,7 @@ install(void)
 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
 		blit_targets = strstr(arguments, "glblit=0") == NULL;
 		wide_targets = strstr(arguments, "glwide=0") == NULL;
+		all_sums = strstr(arguments, "glsums=1") != NULL;
 		sync_frames = strstr(arguments, "glsync=0") == NULL;
 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
 			wait_for_frames = 0;
