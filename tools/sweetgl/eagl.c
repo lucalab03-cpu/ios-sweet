@@ -878,6 +878,12 @@ shadow_draw(struct eagl *e, struct image *image)
 	if (image->shadow_texture == 0) {
 		return;
 	}
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	if (e->writer == 0) {
+		glGenFramebuffers(1, &e->writer);
+	}
 	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
 	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
@@ -933,6 +939,7 @@ target_to_surface(struct eagl *e, struct image *image)
 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
 			IOSurfaceUnlock(surface, 0, NULL);
 		}
+		shadow_draw(e, image);  /* ios-sweet 0156: drawn in place (glblit=0) has its shadow too */
 		return;
 	}
 	if (e->reader == 0) {

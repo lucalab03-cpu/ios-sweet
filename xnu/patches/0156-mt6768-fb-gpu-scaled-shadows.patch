@@ -1,8 +1,8 @@
 diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
-index 806b253..d73a65f 100644
+index 806b253..ced7aff 100644
 --- a/bsd/dev/sweet_mali.c
 +++ b/bsd/dev/sweet_mali.c
-@@ -1444,4 +1444,127 @@ sweet_mali_init(void)
+@@ -1444,4 +1444,130 @@ sweet_mali_init(void)
  		printf("SWEET MALI: kernel_thread_start failed\n");
  	}
  }
@@ -67,10 +67,13 @@ index 806b253..d73a65f 100644
 +	lck_mtx_lock(&fb_shadow_lock);
 +	for (int i = 0; i < SWEET_FB_SHADOWS; i++) {
 +		if (fb_shadows[i].src == src && fb_shadows[i].dst != 0) {
-+			if (fb_shadows[i].fresh) {
-+				dst = fb_shadows[i].dst;
-+				fb_shadows[i].fresh = false;
-+			}
++			/*
++			 * Round ae: 67 of 249 swaps came with no new shadow -- frames CoreAnimation swapped without drawing
++			 * into the surface. The shadow drawn last is still that surface's picture then (the library draws it
++			 * every time it draws the surface), so it is used either way; "fresh" is kept for the statistics.
++			 */
++			dst = fb_shadows[i].dst;
++			fb_shadows[i].fresh = false;
 +			break;
 +		}
 +	}
