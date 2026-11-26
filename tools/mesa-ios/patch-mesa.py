@@ -101,6 +101,14 @@ sub_once('src/gallium/drivers/panfrost/pan_bo.c',
 "   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n",
 "#ifdef SWEET_IOS\n   if (sweet_os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#else\n   if (os_munmap((void *)(uintptr_t)bo->ptr.cpu, panfrost_bo_size(bo))) {\n#endif\n")
 
+# 4e. (2026-11-26) pan_fb_preload.c: the padding ATTRIBUTE_BUFFER of the preload's varyings was written 0x100 bytes
+#     past a 0x20-byte allocation -- pan_cast_and_pack() casts its first argument without parentheses, so
+#     "cpu + pan_size(ATTRIBUTE_BUFFER)" became 16 descriptors on, not 16 bytes. It overwrote whatever the pool held
+#     there and, at a buffer's end, faulted: backboardd SIGSEGV in pan_preload_fb_part (rounds aa, ab).
+sub_once('src/gallium/drivers/panfrost/pan_fb_preload.c',
+"      pan_cast_and_pack(varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER),\n",
+"      pan_cast_and_pack(((uint8_t *)varying_buffer.cpu + pan_size(ATTRIBUTE_BUFFER)),\n")
+
 # 5. the osmesa target: panfrost's screen, software rendering as the fallback
 shutil.copy(os.path.join(shim, "osmesa/sweet_winsys.c"), os.path.join(mesa, "src/gallium/targets/osmesa/sweet_winsys.c"))
 t = rd('src/gallium/targets/osmesa/osmesa_target.c')
