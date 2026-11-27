@@ -187,24 +187,31 @@ by_count(const void *a, const void *b)
 	return x > y ? -1 : x < y;
 }
 
+/* (fix17) raw stacks first, named only at the end: naming every frame of every sample (dladdr) took longer than the
+ * window the user moved things in (fix16: no result yet when the phone was taken back to Android) */
+#define PROF_MAX 4096
+static uint64_t prof_pcs[PROF_MAX][8];
+static int prof_depth[PROF_MAX];
+static int prof_n;
+
 static void
 prof_sample(task_t task, thread_t thread)
 {
 	arm_thread_state64_t st;
 	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
-	uint64_t pcs[10];
 	int depth = 0;
-	char name[200], stack[2048];
+	uint64_t *pcs;
 
-	if (thread_suspend(thread) != KERN_SUCCESS) {
+	if (prof_n >= PROF_MAX || thread_suspend(thread) != KERN_SUCCESS) {
 		return;
 	}
+	pcs = prof_pcs[prof_n];
 	if (thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&st, &count) == KERN_SUCCESS) {
 		uint64_t fp = __darwin_arm_thread_state64_get_fp(st);
 
 		pcs[depth++] = __darwin_arm_thread_state64_get_pc(st) & 0xfffffffffULL;
 		pcs[depth++] = __darwin_arm_thread_state64_get_lr(st) & 0xfffffffffULL;
-		while (depth < 10 && fp != 0) {
+		while (depth < 8 && fp != 0) {
 			uint64_t frame[2];
 			vm_size_t got = 0;
 
@@ -220,27 +227,50 @@ prof_sample(task_t task, thread_t thread)
 		}
 	}
 	thread_resume(thread);
-	if (depth == 0) {
-		return;
-	}
-	stack[0] = 0;
-	for (int i = 0; i < depth && i < 8; i++) {
-		name_of(pcs[i], name, sizeof(name));
-		char *plus = strrchr(name, '+');      /* (functions, not places in them: the offset dropped) */
+	prof_depth[prof_n++] = depth;
+}
 
-		if (plus != NULL && strchr(name, '`') != NULL) {
-			*plus = 0;
+/* the names of the samples taken, tallied */
+static void
+prof_name_all(void)
+{
+	char name[200], stack[2048];
+
+	for (int k = 0; k < prof_n; k++) {
+		stack[0] = 0;
+		for (int i = 0; i < prof_depth[k]; i++) {
+			static uint64_t memo_pc[PROF_KEYS];
+			static char *memo_name[PROF_KEYS];
+			static int memo_n;
+			int m;
+
+			for (m = 0; m < memo_n && memo_pc[m] != prof_pcs[k][i]; m++) {
+			}
+			if (m < memo_n) {
+				strlcpy(name, memo_name[m], sizeof(name));
+			} else {
+				name_of(prof_pcs[k][i], name, sizeof(name));
+				if (memo_n < PROF_KEYS) {
+					memo_pc[memo_n] = prof_pcs[k][i];
+					memo_name[memo_n++] = strdup(name);
+				}
+			}
+			char *plus = strrchr(name, '+');      /* (functions, not places in them: the offset dropped) */
+
+			if (plus != NULL && strchr(name, '`') != NULL) {
+				*plus = 0;
+			}
+			if (i == 0) {
+				tally(name, leaves, &nleaves);
+			}
+			if (i == 2) {
+				tally(name, callers, &ncallers);
+			}
+			strlcat(stack, i == 0 ? "" : " < ", sizeof(stack));
+			strlcat(stack, name, sizeof(stack));
 		}
-		if (i == 0) {
-			tally(name, leaves, &nleaves);
-		}
-		if (i == 2) {
-			tally(name, callers, &ncallers);
-		}
-		strlcat(stack, i == 0 ? "" : " < ", sizeof(stack));
-		strlcat(stack, name, sizeof(stack));
+		tally(stack, stacks, &nstacks);
 	}
-	tally(stack, stacks, &nstacks);
 }
 
 static int
@@ -270,6 +300,7 @@ prof(int delay, int samples, int interval_ms, const char *process, const char *t
 		return 1;
 	}
 	load_target_images(task);
+	say("sweetstack prof: sampling now, %d tries every %d ms\n", samples, interval_ms);
 	for (int s = 0; s < samples; s++) {
 		if (target == MACH_PORT_NULL) {
 			thread_act_array_t threads;
@@ -305,6 +336,8 @@ prof(int delay, int samples, int interval_ms, const char *process, const char *t
 		}
 		usleep((useconds_t)interval_ms * 1000);
 	}
+	say("sweetstack prof: %d samples taken, naming them\n", taken);
+	prof_name_all();
 	qsort(leaves, nleaves, sizeof(leaves[0]), by_count);
 	qsort(callers, ncallers, sizeof(callers[0]), by_count);
 	qsort(stacks, nstacks, sizeof(stacks[0]), by_count);
