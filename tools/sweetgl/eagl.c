@@ -1565,6 +1565,7 @@ static unsigned shots_taken;
 static uint64_t shot_every, shot_next;          /* glshot_every= (timed_shot_due) */
 static unsigned shot_draws = 40;                   /* glshot_draws=: a frame with at least that many draws */
 static unsigned shot_budget = 500u << 10;      /* (base64 bytes a picture when timed: smaller than SHOT_BYTES) */
+static unsigned shot_step = 1;                  /* the first one pixel in how many tried (shot_take): 1, 2, 4... */
 static struct { GLuint texture; GLsizei width, height; bool taken; } shot_want[SHOT_TEXTURES];
 static unsigned shot_wanted;
 
@@ -1596,7 +1597,7 @@ shot_take(struct eagl *e, const char *what, GLuint texture, GLint x, GLint y, GL
 	static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 	uint8_t *all, *small = NULL, *packed = NULL;
 	uLongf packed_size = 0;
-	unsigned step = 1;
+	unsigned step = shot_step;
 	char path[64];
 	FILE *f;
 
@@ -1625,7 +1626,7 @@ shot_take(struct eagl *e, const char *what, GLuint texture, GLint x, GLint y, GL
 				memcpy(small + (r * sw + c) * 4, all + ((r * step) * (size_t)w + c * step) * 4, 4);
 			}
 		}
-		if (compress2(packed, &packed_size, small, (uLong)n, 6) != Z_OK) {
+		if (compress2(packed, &packed_size, small, (uLong)n, 1) != Z_OK) {     /* (fast: a picture took 3 s at 6) */
 			packed_size = 0;
 			break;
 		}
@@ -1718,8 +1719,10 @@ timed_shot_take(struct eagl *e, struct image *display)
 	/* fix13: only frames with motion in them (glshot_draws=, 40 draws by default; fix12's went to a still screen), the
 	 * whole picture small and its left part at full size (the bars are at the left edge of what moves) */
 	shot_budget = 300u << 10;
+	shot_step = 4;
 	shot_take(e, "the display's picture (glshot_every)", display->texture, 0, 0, display->width, display->height);
 	shot_budget = 900u << 10;
+	shot_step = 1;
 	shot_take(e, "the display's picture, its left part (glshot_every)", display->texture, 0, 0,
 	    display->width > 360 ? 360 : display->width, display->height);
 }
