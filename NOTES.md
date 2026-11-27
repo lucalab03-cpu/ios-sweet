@@ -1915,3 +1915,12 @@ turns out to be Metal's.
   could still be copying: 0169 makes the copy wait up to 11 ms); (b) shim sweet_drm_host_gpu_only(): 'BGRA' shared
   targets attached by CA are not cleaned (glgpuonly=0: as before); addresses dropped from the list at GEM close;
   (c) frame lines report KB cleaned. Next for smoothness: 90 Hz pacing (CA vsync from 0169's frame done).
+
+### 2026-11-27 22:00 — fix14 observed: **left-edge bars gone**; fix15 + payload-an (0171) building
+- User (fix14 + payload-am): the side glitch/bars are gone (ping-pong shadows: the GPU had redrawn the shadow the
+  kernel was still copying). Wallpaper shows at once at start (no black wait). Still: stutter moving between widgets
+  and apps; purple aura in the app switcher.
+- Frame lines: **~4 GB cleaned every 20 frames (~200 MB a frame, ~7 MB a SUBMIT, ~28 SUBMITs a frame)**; busy frames
+  p50 17.1 ms, p90 27.8 ms; 194 us/draw.
+- fix15 (shim): only imports in the SUBMIT's BO list, once a frame. 0171 (kernel): vsync from the panel
+  (sweetfb_vsync_div 1 = 90 Hz, 2 = 45 Hz; default 0 = 60 Hz timer as before). Payloads to try: an (60), an90, an45.
