@@ -168,6 +168,7 @@ static long eagl_missing(void *context, unsigned offset);
 
 #define EAGL_GEN_DECLARATIONS
 #include "eagl_gen.h"
+static unsigned solid_clears;                   /* fix20: one-colour draws made clears (solid_clear) */
 #undef EAGL_GEN_DECLARATIONS
 
 static void
@@ -1381,7 +1382,9 @@ frame_end(struct eagl *e, bool finished)
 				}
 			}
 			say("redwood-gl: frames in %llu ms: %u drawn; ms p50 %u p90 %u p99 %u, longest %llu us; %u over 16.7 ms, %u over "
-			    "11.1 ms\n", (after - since) / 1000, n, p[0], p[1], p[2], longest, over16, over11);
+			    "11.1 ms; %u one-colour draws made clears\n", (after - since) / 1000, n, p[0], p[1], p[2], longest, over16,
+			    over11, solid_clears);
+			solid_clears = 0;
 			memset(bucket, 0, sizeof(bucket));
 			n = over16 = over11 = 0;
 			longest = 0;
@@ -3748,6 +3751,141 @@ my_glVertexAttribPointer(void *context, GLuint index, GLint size, GLenum type, G
 	EAGL_LEAVE(e, 0x1000);
 }
 
+
+/*
+ * fix20: CoreAnimation starts a frame of the display by drawing the whole of it in one colour (in fix9's trace, three
+ * such draws into the display's picture, black, blending off, then the wallpaper over them). On a tiling GPU a draw
+ * like that is a full-screen pass of fragments, and a pass that does not begin with a clear also has every tile
+ * loaded from memory first; a clear costs neither. So a draw with CoreAnimation's plainest program (its fragment
+ * shader is only "gl_FragData[0] = color;"), one colour at every corner, covering exactly the viewport, with no
+ * blending, depth, stencil or masked colour, into a surface of the display's or one CoreAnimation draws into, is made
+ * a glClear of that colour (scissored to the viewport). glsolid=0: drawn as before.
+ */
+#define GL_SHADER_TYPE                  0x8b4f
+#define GL_DEPTH_TEST_ON                0x0b71
+#define GL_STENCIL_TEST_ON              0x0b90
+#define GL_COLOR_WRITEMASK_Q            0x0c23
+#define SOLID_PROGRAMS                  65536
+static uint8_t solid_program[SOLID_PROGRAMS / 8];
+static int solid_on = 1;
+
+static void
+solid_note_program(GLuint program)
+{
+	GLuint shaders[4];
+	GLsizei n = 0;
+
+	if (program >= SOLID_PROGRAMS) {
+		return;
+	}
+	solid_program[program >> 3] &= (uint8_t)~(1u << (program & 7));
+	glGetAttachedShaders(program, 4, &n, shaders);
+	for (GLsizei i = 0; i < n; i++) {
+		GLint type = 0, length = 0;
+		char *source;
+
+		glGetShaderiv(shaders[i], GL_SHADER_TYPE, &type);
+		if (type != GL_FRAGMENT_SHADER) {
+			continue;
+		}
+		glGetShaderiv(shaders[i], 0x8b88 /* GL_SHADER_SOURCE_LENGTH */, &length);
+		if (length <= 0 || length > 65536 || (source = malloc((size_t)length + 1)) == NULL) {
+			continue;
+		}
+		glGetShaderSource(shaders[i], length + 1, NULL, source);
+		if (strstr(source, "void main(void) {\n  gl_FragData[0] = color;\n}") != NULL && strstr(source, "texture") == NULL &&
+		    strstr(source, "sampler") == NULL) {
+			solid_program[program >> 3] |= (uint8_t)(1u << (program & 7));
+		}
+		free(source);
+	}
+}
+
+static bool
+solid_clear(struct eagl *e, GLenum mode, GLenum type, const void *indices, GLint first, GLsizei count)
+{
+	GLint view[4], enabled = 0;
+	GLboolean mask[4];
+	float low[2] = { 1e9f, 1e9f }, high[2] = { -1e9f, -1e9f }, colour[4] = { 0, 0, 0, 0 };
+	const GLfloat *m = e->matrix;
+
+	if (!solid_on || e->program >= SOLID_PROGRAMS || !(solid_program[e->program >> 3] & (1u << (e->program & 7))) ||
+	    !((mode == GL_TRIANGLES && count == 6) || (mode == GL_TRIANGLE_STRIP && count == 4)) || m == NULL ||
+	    e->framebuffer == 0 || e->colour == 0 || image_of(e, e->colour) == NULL ||
+	    e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2 ||
+	    e->arrays[1].pointer == NULL || e->arrays[1].type != GL_HALF_FLOAT || e->arrays[1].size != 4 ||
+	    glIsEnabled(GL_BLEND) || glIsEnabled(GL_DEPTH_TEST_ON) || glIsEnabled(GL_STENCIL_TEST_ON)) {
+		return false;
+	}
+	glGetVertexAttribiv(1, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
+	glGetBooleanv(GL_COLOR_WRITEMASK_Q, mask);
+	if (!enabled || !mask[0] || !mask[1] || !mask[2] || !mask[3]) {
+		return false;
+	}
+	for (GLsizei i = 0; i < count; i++) {
+		unsigned vertex = indices == NULL ? (unsigned)(first + i) : type == GL_UNSIGNED_SHORT ?
+		    ((const uint16_t *)indices)[i] : type == GL_UNSIGNED_BYTE ? ((const uint8_t *)indices)[i] :
+		    ((const uint32_t *)indices)[i];
+		GLsizei pstride = e->arrays[0].stride != 0 ? e->arrays[0].stride : (GLsizei)(4 * e->arrays[0].size);
+		GLsizei cstride = e->arrays[1].stride != 0 ? e->arrays[1].stride : 8;
+		float place[2], here[4];
+		uint16_t halves[4];
+
+		memcpy(place, (const uint8_t *)e->arrays[0].pointer + (size_t)vertex * (size_t)pstride, sizeof(place));
+		memcpy(halves, (const uint8_t *)e->arrays[1].pointer + (size_t)vertex * (size_t)cstride, sizeof(halves));
+		for (unsigned k = 0; k < 4; k++) {
+			here[k] = half_float(halves[k]);
+		}
+		if (i == 0) {
+			memcpy(colour, here, sizeof(colour));
+		} else if (memcmp(colour, here, sizeof(colour)) != 0) {
+			return false;                   /* (not one colour: a gradient) */
+		}
+		for (unsigned axis = 0; axis < 2; axis++) {
+			low[axis] = place[axis] < low[axis] ? place[axis] : low[axis];
+			high[axis] = place[axis] > high[axis] ? place[axis] : high[axis];
+		}
+	}
+	glGetIntegerv(GL_VIEWPORT, view);
+	/* the corners, through CoreAnimation's matrix, at the corners of the viewport (either way up) */
+	for (unsigned c = 0; c < 4; c++) {
+		float x = c & 1 ? high[0] : low[0], y = c & 2 ? high[1] : low[1];
+		float w = m[3] * x + m[7] * y + m[15];
+
+		if (w == 0) {
+			return false;
+		}
+		float nx = (m[0] * x + m[4] * y + m[12]) / w, ny = (m[1] * x + m[5] * y + m[13]) / w;
+
+		if (__builtin_fabsf(__builtin_fabsf(nx) - 1) > 0.002f || __builtin_fabsf(__builtin_fabsf(ny) - 1) > 0.002f) {
+			return false;
+		}
+	}
+	if (high[0] - low[0] < (float)view[2] - 0.5f || high[1] - low[1] < (float)view[3] - 0.5f) {
+		return false;
+	}
+	{
+		GLfloat was[4];
+		GLint box[4];
+		GLboolean boxed = glIsEnabled(GL_SCISSOR_TEST);
+
+		clear_now(e);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, was);
+		glGetIntegerv(GL_SCISSOR_BOX, box);
+		glEnable(GL_SCISSOR_TEST);
+		glScissor(view[0], view[1], view[2], view[3]);
+		glClearColor(colour[0], colour[1], colour[2], colour[3]);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glClearColor(was[0], was[1], was[2], was[3]);
+		glScissor(box[0], box[1], box[2], box[3]);
+		if (!boxed) {
+			glDisable(GL_SCISSOR_TEST);
+		}
+	}
+	solid_clears++;
+	return true;
+}
+
 static void
 my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 {
@@ -3769,6 +3907,8 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 	}
 	if (skipping != 0 && skip_draw(e)) {
 		/* glskip=N: nothing is drawn, so that what this program puts there can be seen missing */
+	} else if (solid_clear(e, mode, 0, NULL, first, count)) {
+		/* fix20: a clear instead */
 	} else if (group_draw_begin(e, enabled)) {
 		glDrawArrays(mode, first, count);
 		group_draw_end(e, enabled);
@@ -3809,6 +3949,8 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	}
 	if (skipping != 0 && skip_draw(e)) {
 		/* glskip=N: see my_glDrawArrays */
+	} else if (solid_clear(e, mode, type, indices, 0, count)) {
+		/* fix20: a clear instead */
 	} else if (group_draw_begin(e, enabled)) {
 		glDrawElements(mode, count, type, indices);
 		group_draw_end(e, enabled);
@@ -4438,6 +4580,8 @@ my_glLinkProgram(void *context, GLuint program)
 	if (!good) {
 		glGetProgramInfoLog(program, sizeof(said), NULL, said);
 		say("redwood-gl: A PROGRAM DOES NOT LINK (program %u): %s\n", program, said);
+	} else {
+		solid_note_program(program);    /* fix20 */
 	}
 	EAGL_LEAVE(e, 0x12c0);
 }
@@ -4937,6 +5081,7 @@ install(void)
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
 		trace_shot = strstr(arguments, "gltrace_shot=1") != NULL;
 		gpu_only_on = strstr(arguments, "glgpuonly=0") == NULL;
+		solid_on = strstr(arguments, "glsolid=0") == NULL;
 		if ((argument = strstr(arguments, "glshot_every=")) != NULL) {
 			shot_every = strtoull(argument + 13, NULL, 10) * 1000000ull;
 			shot_next = now_us() + 60000000ull;
