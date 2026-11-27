@@ -1736,3 +1736,16 @@ turns out to be Metal's.
   phone's /data/local/tmp/go-ios.sh (not in git; user runs: backup to go-ios.sh.bak, `sed -i '2i echo 0 >
   /proc/gpufreqv2/fix_target_opp_index'` if absent); (b) real DVFS from iOS (MFG PLL + Vgpu through the PMIC +
   thermal limits) stays in the list: today the GPU runs at a fixed 823 MHz set by Android.
+
+### 2026-11-27 15:00 — STALE DROPS (my naming mistake); round fix1
+- Rounds ag/ah/ai reused drop names of older rounds (drop-ag/-ah/-ai existed on the user's PC): `unzip -o ... -d
+  drop-X` merged into the old folder and pack-dropbox packed the old files. Phone, round ai: generation
+  1795787421944, 57 MB, 21 files: an old libsweet-gl (365952 bytes, without ca_hooks; good one 366720), old sweetroot
+  (70960, no `restart`), root.cmd 592 bytes (sweetsym ...), glargs 28 bytes; the round-ah boot got an old drop-ah
+  (root.cmd 27 bytes). So: the **red gradient on the lock screen is a regression** (round ao had removed it with
+  ca_hooks), sweetcaprobe never ran, and Settings > About / the app switcher failing in round ai may come from it too.
+- 0166 works: SpringBoard used the scaler 4 times (207x448 -> 828x1792 in 22 ms, 104x224 -> 207x448 in 1.4 ms).
+- **Rule from now on: every drop gets a name never used before (drop-fixN, then new series), and the commands start
+  with `rm -rf drop-X`.**
+- drop-fix1 = mesa 45878203042 + metal2 45805702530 + panvk 45701349534 (from bundle ao) + pbwrap 45969931918 + heic
+  45910940696 + var: gl, sweet-boot.list (ao), glargs (round ai trace), root.cmd (sweetcaprobe later 120).
