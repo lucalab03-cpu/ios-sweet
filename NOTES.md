@@ -1851,3 +1851,11 @@ turns out to be Metal's.
 - drop-fix8: glargs `glwait=0 glblit=0 glstats=1 glcensus=1 gltrace_at=150 gltrace_frames=20
   gltrace_place=0,250,300,900` (placed lines only: no readback, see eagl frame_begin/trace_placed_look); user on the
   widgets page at 2:30. "gl-at: ... texture filled from surface ... bytes a row" gives the strides.
+
+### 2026-11-27 18:30 — drop-fix9 (one boot a drop; trace pixels through a GPU copy)
+- backboardd-wrap waits (max 600 s) when the dropbox generation > applied.gen, until /var/tmp/sweetboot.ready names
+  this boot (sweet-boot writes it after apply or give-up). Takes effect from the drop AFTER fix9 (fix9 installs both).
+- eagl peek_pixels(): trace readback = glBlitFramebuffer into our RGBA8 renderbuffer, then glReadPixels there
+  (no CPU unpack of surface memory). glargs fix9: base + gltrace_at=150 gltrace_frames=20
+  gltrace_place=0,250,300,900 gltrace_look=1. Runs: mesa-ios 46038557547, pbwrap 46038560669, bundle 46039840400
+  (sweet-bundle-fix9). Payload unchanged (al). If backboardd crash-loops at the trace: peek_pixels is not enough.
