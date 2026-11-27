@@ -3793,9 +3793,24 @@ solid_note_program(GLuint program)
 			continue;
 		}
 		glGetShaderSource(shaders[i], length + 1, NULL, source);
-		if (strstr(source, "void main(void) {\n  gl_FragData[0] = color;\n}") != NULL && strstr(source, "texture") == NULL &&
-		    strstr(source, "sampler") == NULL) {
+		bool plain = strstr(source, "gl_FragData[0] = color;") != NULL && strstr(source, "texture") == NULL &&
+		    strstr(source, "sampler") == NULL;
+		static unsigned told;
+
+		if (plain) {
 			solid_program[program >> 3] |= (uint8_t)(1u << (program & 7));
+		}
+		if (told++ < 80) {
+			const char *main_at = strstr(source, "void main");
+			char line[200];
+
+			snprintf(line, sizeof(line), "%s", main_at != NULL ? main_at : "(no main)");
+			for (char *c = line; *c != 0; c++) {
+				if (*c == '\n') {
+					*c = ' ';
+				}
+			}
+			say("redwood-gl: program %u: %s; %s\n", program, plain ? "ONE COLOUR" : "other", line);
 		}
 		free(source);
 	}
@@ -3809,17 +3824,50 @@ solid_clear(struct eagl *e, GLenum mode, GLenum type, const void *indices, GLint
 	float low[2] = { 1e9f, 1e9f }, high[2] = { -1e9f, -1e9f }, colour[4] = { 0, 0, 0, 0 };
 	const GLfloat *m = e->matrix;
 
-	if (!solid_on || e->program >= SOLID_PROGRAMS || !(solid_program[e->program >> 3] & (1u << (e->program & 7))) ||
-	    !((mode == GL_TRIANGLES && count == 6) || (mode == GL_TRIANGLE_STRIP && count == 4)) || m == NULL ||
-	    e->framebuffer == 0 || e->colour == 0 || image_of(e, e->colour) == NULL ||
-	    e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2 ||
-	    e->arrays[1].pointer == NULL || e->arrays[1].type != GL_HALF_FLOAT || e->arrays[1].size != 4 ||
-	    glIsEnabled(GL_BLEND) || glIsEnabled(GL_DEPTH_TEST_ON) || glIsEnabled(GL_STENCIL_TEST_ON)) {
+	static unsigned told;
+	const char *why = NULL;
+
+	if (!solid_on || !((mode == GL_TRIANGLES && count == 6) || (mode == GL_TRIANGLE_STRIP && count == 4))) {
+		return false;
+	}
+	if (e->program >= SOLID_PROGRAMS || !(solid_program[e->program >> 3] & (1u << (e->program & 7)))) {
+		why = "program";
+	} else if (m == NULL) {
+		why = "no matrix";
+	} else if (e->framebuffer == 0 || e->colour == 0 || image_of(e, e->colour) == NULL) {
+		why = "not into a surface";
+	} else if (e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2) {
+		why = "positions";
+	} else if (e->arrays[1].pointer == NULL || e->arrays[1].type != GL_HALF_FLOAT || e->arrays[1].size != 4) {
+		why = "colours";
+	} else if (glIsEnabled(GL_BLEND)) {
+		why = "blending";
+	} else if (glIsEnabled(GL_DEPTH_TEST_ON) || glIsEnabled(GL_STENCIL_TEST_ON)) {
+		why = "depth/stencil";
+	}
+	if (why != NULL) {
+		/* (fix21: the ones that look like a full-screen fill, for the log: a first vertex at 0,0 and no blending) */
+		if (told < 40 && why[0] != 'b' && e->arrays[0].pointer != NULL && e->arrays[0].type == GL_FLOAT &&
+		    indices == NULL && !glIsEnabled(GL_BLEND)) {
+			float p0[2];
+
+			memcpy(p0, (const uint8_t *)e->arrays[0].pointer + (size_t)first * (size_t)(e->arrays[0].stride != 0 ?
+			    e->arrays[0].stride : 4 * e->arrays[0].size), sizeof(p0));
+			if (p0[0] == 0 && p0[1] == 0) {
+				told++;
+				say("redwood-gl: one colour? frame %u draw %u, program %u into %u: no (%s; colours type %#x size %d)\n",
+				    e->frames + 1, e->draws, e->program, e->colour, why, e->arrays[1].type, e->arrays[1].size);
+			}
+		}
 		return false;
 	}
 	glGetVertexAttribiv(1, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &enabled);
 	glGetBooleanv(GL_COLOR_WRITEMASK_Q, mask);
 	if (!enabled || !mask[0] || !mask[1] || !mask[2] || !mask[3]) {
+		if (told++ < 40) {
+			say("redwood-gl: one colour? program %u: no (colour array %s, mask %d%d%d%d)\n", e->program,
+			    enabled ? "on" : "off", mask[0], mask[1], mask[2], mask[3]);
+		}
 		return false;
 	}
 	for (GLsizei i = 0; i < count; i++) {
@@ -3858,10 +3906,18 @@ solid_clear(struct eagl *e, GLenum mode, GLenum type, const void *indices, GLint
 		float nx = (m[0] * x + m[4] * y + m[12]) / w, ny = (m[1] * x + m[5] * y + m[13]) / w;
 
 		if (__builtin_fabsf(__builtin_fabsf(nx) - 1) > 0.002f || __builtin_fabsf(__builtin_fabsf(ny) - 1) > 0.002f) {
+			if (told++ < 40) {
+				say("redwood-gl: one colour? program %u: no (corner %g,%g goes to %g,%g)\n", e->program, (double)x,
+				    (double)y, (double)nx, (double)ny);
+			}
 			return false;
 		}
 	}
 	if (high[0] - low[0] < (float)view[2] - 0.5f || high[1] - low[1] < (float)view[3] - 0.5f) {
+		if (told++ < 40) {
+			say("redwood-gl: one colour? program %u: no (%g x %g, the viewport %d x %d)\n", e->program,
+			    (double)(high[0] - low[0]), (double)(high[1] - low[1]), view[2], view[3]);
+		}
 		return false;
 	}
 	{
