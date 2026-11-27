@@ -192,6 +192,7 @@ by_count(const void *a, const void *b)
 #define PROF_MAX 4096
 static uint64_t prof_pcs[PROF_MAX][8];
 static int prof_depth[PROF_MAX];
+static bool prof_running[PROF_MAX];     /* (fix18) waiting samples are kept too, marked */
 static int prof_n;
 
 static void
@@ -261,12 +262,15 @@ prof_name_all(void)
 				*plus = 0;
 			}
 			if (i == 0) {
-				tally(name, leaves, &nleaves);
+				char key[220];
+
+				snprintf(key, sizeof(key), "%s %s", prof_running[k] ? "run " : "wait", name);
+				tally(key, leaves, &nleaves);
 			}
-			if (i == 2) {
+			if (i == 2 && prof_running[k]) {
 				tally(name, callers, &ncallers);
 			}
-			strlcat(stack, i == 0 ? "" : " < ", sizeof(stack));
+			strlcat(stack, i == 0 ? (prof_running[k] ? "run  " : "wait ") : " < ", sizeof(stack));
 			strlcat(stack, name, sizeof(stack));
 		}
 		tally(stack, stacks, &nstacks);
@@ -311,9 +315,9 @@ prof(int delay, int samples, int interval_ms, const char *process, const char *t
 					thread_extended_info_data_t ext;
 					mach_msg_type_number_t ecount = THREAD_EXTENDED_INFO_COUNT;
 
-					if (target == MACH_PORT_NULL &&
-					    thread_info(threads[i], THREAD_EXTENDED_INFO, (thread_info_t)&ext, &ecount) == KERN_SUCCESS &&
-					    strcmp(ext.pth_name, thread_name) == 0) {
+					if (target == MACH_PORT_NULL && ((strcmp(thread_name, "#0") == 0 && i == 0) ||
+					    (thread_info(threads[i], THREAD_EXTENDED_INFO, (thread_info_t)&ext, &ecount) == KERN_SUCCESS &&
+					    strcmp(ext.pth_name, thread_name) == 0))) {
 						target = threads[i];
 					} else {
 						mach_port_deallocate(mach_task_self(), threads[i]);
@@ -329,10 +333,13 @@ prof(int delay, int samples, int interval_ms, const char *process, const char *t
 		thread_basic_info_data_t basic;
 		mach_msg_type_number_t bcount = THREAD_BASIC_INFO_COUNT;
 
-		if (thread_info(target, THREAD_BASIC_INFO, (thread_info_t)&basic, &bcount) == KERN_SUCCESS &&
-		    basic.run_state == TH_STATE_RUNNING) {
-			prof_sample(task, target);      /* (only when it runs: what it waits on is not its cost) */
-			taken++;
+		if (thread_info(target, THREAD_BASIC_INFO, (thread_info_t)&basic, &bcount) == KERN_SUCCESS) {
+			/* fix18: waiting samples too (marked): a frame that is long while its thread runs a third of the time waits */
+			if (prof_n < PROF_MAX) {
+				prof_running[prof_n] = basic.run_state == TH_STATE_RUNNING;
+			}
+			prof_sample(task, target);
+			taken += basic.run_state == TH_STATE_RUNNING;
 		}
 		usleep((useconds_t)interval_ms * 1000);
 	}
@@ -343,13 +350,13 @@ prof(int delay, int samples, int interval_ms, const char *process, const char *t
 	qsort(stacks, nstacks, sizeof(stacks[0]), by_count);
 	say("=== sweetstack prof %s[%d] \"%s\": %d samples of it running, of %d tries every %d ms\n", process, pid,
 	    thread_name, taken, samples, interval_ms);
-	for (unsigned i = 0; i < nleaves && i < 40; i++) {
+	for (unsigned i = 0; i < nleaves && i < 60; i++) {
 		say("LEAF %u %s\n", leaves[i].count, leaves[i].key);
 	}
 	for (unsigned i = 0; i < ncallers && i < 40; i++) {
 		say("FRAME2 %u %s\n", callers[i].count, callers[i].key);
 	}
-	for (unsigned i = 0; i < nstacks && i < 40; i++) {
+	for (unsigned i = 0; i < nstacks && i < 60; i++) {
 		say("STACK %u %s\n", stacks[i].count, stacks[i].key);
 	}
 	say("sweetstack prof: done\n");
