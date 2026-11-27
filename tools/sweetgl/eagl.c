@@ -2897,6 +2897,10 @@ redwood_gl_function_refused(unsigned function)
 static void
 census_draw(struct eagl *e, unsigned function, unsigned kind)
 {
+	/* (fix24: here, so that the functions our own blur draws -- 38, 39 -- start a trace too) */
+	if ((int)function == trace_function && --trace_function_after == 0) {
+		trace_function_met = 1;
+	}
 	char textures[200] = "", numbers[200] = "";
 	GLint source = 0, destination = 0, viewport[4] = { 0, 0, 0, 0 };
 	float low[2] = { 0, 0 }, high[2] = { 0, 0 };
@@ -3515,9 +3519,6 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 	if (function < 90 && !said[function]) {
 		said[function] = 1;
 		say("redwood-gl: a draw with no program is CoreAnimation's function %u (\"%s\")\n", function, census_name(function));
-	}
-	if ((int)function == trace_function && --trace_function_after == 0) {
-		trace_function_met = 1;
 	}
 	e->blended = 0;
 	if (e->bound[0] != 0 && plain_draws != 3 && function < 90 && ((function == FUNCTION_VIBRANT_MATRIX && fetch_offered) ||
