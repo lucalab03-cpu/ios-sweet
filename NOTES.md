@@ -1427,6 +1427,7 @@ tools/sweet-root-tweaks.py.
 | bluetoothd, fairplayd.H2 | sweetsvc (/var/sweet/svc-disable -> launchd disabled.plist, since 2026-11-14) | each restarted ~335 times a boot (no Bluetooth; FairPlay) | Bluetooth driver works / FairPlay needed for App Store apps |
 | BTAudioHALPlugin.driver (mediaserverd's Bluetooth audio) | moved to /System/Library/Audio/Plug-Ins/HAL.disabled (root.cmd, round al) | with bluetoothd off it looked up com.apple.BTAudioHALPlugin.xpc ~2200 times/s: launchd 78%, mediaserverd 47% | together with bluetoothd |
 | driverkitd | `sweetjob remove com.apple.driverkitd` (round au, 2026-11-27; the S7 does the same with heronoexec) | jetsam-killed at once, restarted every 10 s by an xpc event during LaunchServices' rebuild (47 times), ReportCrash 16 % | a DriverKit driver is needed (none on this phone) |
+| axassetsd (com.apple.accessibility.axassetsd) | `sweetjob remove com.apple.accessibility.axassetsd` (2026-11-27; the S7 removes sirittsd for the same reason) | launches the TTS audio units KonaSynthesizer / MacinTalkAUSP / SiriTTSSynthesizerAU "speculatively", each dies with SIGABRT (36+36 exits in one log) | real audio driver; then check the synthesizers start |
 | Apple video decoder (AppleAVD) | not there: HEIC/HEVC decodes to empty pictures (0 of 2500560 pixels lit) | no hardware | software HEVC/H.264 decoder in VideoToolbox; later MediaTek VDEC |
 
 ### 2026-11-26 14:05 — round ai observed; 0159, 0160 queued
@@ -1817,3 +1818,13 @@ turns out to be Metal's.
   was timing (user opened About later in au/aj). pixel3-ios 0173 says the same: wifid and SpringBoard wait behind it.
 - **0168**: IONetworkStack stand-in (pixel3 MiniIONetworkStack.cpp, from HackiOS, APSL; S7 0314 has it too),
   matched from KernelConfigTables on IOResources; logs "SWEET: IONetworkStack registered" and who opens it.
+
+- References for the open items (user: "prendi già le correzioni dagli altri repo"):
+  - S7 HEROLTE_PROGRESS 18k21: "the wallpaper gallery (PosterBoard) stays empty (needs Metal, as on iOS 16)": our IOK
+    trace shows PosterBoard opening AGXAccelerator -> the gallery previews are a Metal item (M4/M5), not GL.
+  - S7 18k19: the "red veil" was vcm (45) drawn as an image. Ours: a vcm draw with function_given != 20 fell through
+    to the plain program (its mask drawn as a picture) -> the intermittent translucent red rectangle over the clock.
+    eagl fix: such a draw is not drawn (glvcmplain=1 = as before), logged with its count of numbers.
+  - pixel3 target_carry (stale pool buffers -> old frames around redrawn areas; possible cause of the left strip):
+    blueeagl draws into mirrored textures, ours in place: not ported blindly; to check with the strip reproducible.
+  - axassetsd off (services table).

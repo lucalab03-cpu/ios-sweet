@@ -2439,6 +2439,7 @@ static const char *const census_kinds[CENSUS_KINDS] = {
 	"drawn with our program that reads the levels by the mask (a blur whose radius varies)",
 };
 static int census_on;
+static int vcm_plain_on;              /* glvcmplain=1: a vibrant matrix with no numbers drawn as a picture (as before) */
 static struct census {
 	unsigned draws[CENSUS_KINDS], lately[CENSUS_KINDS];
 	unsigned refused, refused_lately;
@@ -3178,6 +3179,23 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 			}
 		}
 		return true;
+	}
+	if (function == FUNCTION_VIBRANT_MATRIX && !vcm_plain_on) {
+		/*
+		 * ios-sweet (2026-11-27): a vibrant colour matrix without its 20 numbers (or without what it needs) used to
+		 * fall through to the plain program below, i.e. its mask drawn as a picture: the translucent red rectangle
+		 * over the lock screen's clock, now and then (the Galaxy S7 port's "red veil" was the same draw, vcm as an
+		 * image). Better nothing than the mask as a picture, as for a library without framebuffer fetch above.
+		 * glvcmplain=1 draws it as before.
+		 */
+		static unsigned skipped;
+
+		if (skipped++ < 8) {
+			say("redwood-gl: vibrant colour matrix (function 45) with %u numbers%s: not drawn as a picture\n",
+			    (unsigned)function_given[function], fetch_offered ? "" : " (no framebuffer fetch)");
+		}
+		census_draw(e, function, CENSUS_NOT_DRAWN);
+		return false;
 	}
 	if (e->bound[0] != 0 && e->bound[1] != 0) {
 		glActiveTexture(GL_TEXTURE0 + 1);
@@ -4501,6 +4519,7 @@ install(void)
 		}
 		all_shaders = strstr(arguments, "glshaders=1") != NULL;
 		census_on = strstr(arguments, "glcensus=1") != NULL;
+		vcm_plain_on = strstr(arguments, "glvcmplain=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
 		frame_stats = strstr(arguments, "glstats=1") != NULL;
 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
