@@ -1,0 +1,107 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -260,6 +260,13 @@ public:
+ 	uint64_t      fStatTearUs, fStatTearMax, fStatTearMissed;
+ 	void          tearFreeStart(void);
+ 	void          waitScanout(void);
++	/* 0171: the vsync CoreAnimation is paced by, from the panel's own refresh */
++	uint64_t      fPanelUs;         /* the panel's refresh as 0169 measured it (0: not known) */
++	uint64_t      fVsyncPeriodAbs;  /* the period of the vsync notifications, in absolute time */
++	uint64_t      fNextVsync;       /* the next one, absolute time */
++	uint64_t      fLastFrameDone;   /* the last frame done the presenter saw, absolute time */
++	bool          fVsyncLocked;     /* the period is the panel's (sweetfb_vsync_div): kept in phase with it */
++	void          vsyncArm(void);
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -438,9 +445,55 @@ AppleCLCD::start(IOService *provider)
+ 	    fScale ? "scaled" : "unscaled", fDotPitch, fVsyncOld ? "old layout" : "time, time, count");
+ 	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight, fWidth, fHeight, fRowBytes);
+ 	tearFreeStart();
++	{
++		/*
++		 * Patch 0171: the vsync CoreAnimation paces its frames by was a 60 Hz timer, while the panel refreshes at 90 Hz
++		 * (0169 measured 11007 us): frames came out one or two refreshes apart, never evenly -- "fluid at moments". The
++		 * notifications now come every sweetfb_vsync_div panel refreshes (default 0 = the old 60 Hz timer; 1 = 90 Hz,
++		 * 2 = 45 Hz, each frame on screen for exactly two refreshes), on absolute deadlines (no drift from the work
++		 * done in the handler), kept in phase with the frames done the presenter sees. sweetfb_vsync_us=N: any period.
++		 */
++		uint32_t div = 0, us = 0;
++		uint64_t period = SWEET_FB_VSYNC_US;
++
++		PE_parse_boot_argn("sweetfb_vsync_div", &div, sizeof(div));
++		PE_parse_boot_argn("sweetfb_vsync_us", &us, sizeof(us));
++		if (div >= 1 && div <= 4 && fPanelUs >= 5000 && fPanelUs <= 34000) {
++			period = fPanelUs * div;
++			fVsyncLocked = true;
++		}
++		if (us >= 5000 && us <= 100000) {
++			period = us;
++		}
++		clock_interval_to_absolutetime_interval((uint32_t)period, kMicrosecondScale, &fVsyncPeriodAbs);
++		IOLog("SWEET FB: 0171 vsync every %llu us (panel %llu us, sweetfb_vsync_div %u)\n", period, fPanelUs, div);
++	}
+ 	return true;
+ }
+ 
++/* 0171: the next vsync notification, one period on, in phase with the panel when its frames done are known */
++void
++AppleCLCD::vsyncArm(void)
++{
++	uint64_t now = mach_absolute_time(), next;
++
++	if (fVsyncPeriodAbs == 0) {
++		fVsync->setTimeoutUS(SWEET_FB_VSYNC_US);
++		return;
++	}
++	next = fNextVsync != 0 ? fNextVsync + fVsyncPeriodAbs : now + fVsyncPeriodAbs;
++	if (fVsyncLocked && fLastFrameDone != 0 && now - fLastFrameDone < 50 * fVsyncPeriodAbs) {
++		/* in phase with the last frame done: the first one of the panel's after now */
++		uint64_t k = (now - fLastFrameDone) / fVsyncPeriodAbs + 1;
++		next = fLastFrameDone + k * fVsyncPeriodAbs;
++	}
++	if (next <= now) {
++		next = now + fVsyncPeriodAbs;
++	}
++	fNextVsync = next;
++	fVsync->wakeAtTime(next);
++}
++
+ /*
+  * Patch 0169: tearing. The copy into the panel memory (0156: ~1.3 ms, one to one) ran as soon as a frame's GPU work
+  * was done, at any point of the panel's scan of that same memory: the overlay engine read the top of one frame and the
+@@ -491,6 +544,7 @@ AppleCLCD::tearFreeStart(void)
+ 		IODelay(50);
+ 	}
+ 	fTearFree = seen >= 2;
++	fPanelUs = seen >= 2 ? sum / (seen - 1) : 0;
+ 	IOLog("SWEET FB: 0169 disp_ovl0 inten %#x intsta %#x: %u frames done in 100 ms, one every %llu us: %s\n", inten,
+ 	    first, seen, seen >= 2 ? sum / (seen - 1) : 0, fTearFree ? "frames copied into the panel after a frame done" :
+ 	    "no frame done seen, frames copied at any time");
+@@ -510,6 +564,7 @@ AppleCLCD::waitScanout(void)
+ 	for (;;) {
+ 		if ((fOvl[0x8 / 4] & 2) != 0) {
+ 			fTearMisses = 0;
++			fLastFrameDone = mach_absolute_time();  /* (0171: the vsync's phase) */
+ 			break;
+ 		}
+ 		now = mach_absolute_time();
+@@ -575,7 +630,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 			}
+ 			fb->flushPanel(0, fb->fHeight);
+ 		}
+-		sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++		fb->vsyncArm();         /* 0171 */
+ 		return;
+ 	}
+ 	bool flush = !fb->fAsync && fb->fDirty && (count % fb->fFlushTicks) == 0;
+@@ -598,7 +653,7 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		IOLockUnlock(fb->fPresentLock);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+-	sender->setTimeoutUS(SWEET_FB_VSYNC_US);
++	fb->vsyncArm();                 /* 0171 */
+ }
+ 
+ /* Patch 0141: the presenter thread. */

@@ -42,7 +42,7 @@
 
 /* OpenGL ES self-coherency (below, at the host imports) */
 static int gl_self_coherent;
-static void hosts_flush(void);
+static void hosts_flush(const uint32_t *handles, uint32_t count);
 static void host_forget(uint32_t handle);
 
 typedef mach_port_t io_object_t, io_service_t, io_connect_t;
@@ -883,7 +883,14 @@ drmIoctl(int fd, unsigned long request, void *arg)
 		return 0;
 	}
 	if (gl_self_coherent && number == PANFROST_SUBMIT_NR) {
-		hosts_flush();
+		/* struct drm_panfrost_submit: u64 bo_handles at 24, u32 bo_handle_count at 32 (fix15) */
+		const uint8_t *submit = arg;
+		uint64_t list;
+		uint32_t count;
+
+		memcpy(&list, submit + 24, sizeof(list));
+		memcpy(&count, submit + 32, sizeof(count));
+		hosts_flush((const uint32_t *)(uintptr_t)list, count);
 	}
 	if (gl_self_coherent && number == 0x09) {
 		host_forget(*(const uint32_t *)arg);
@@ -1240,17 +1247,35 @@ host_forget(uint32_t handle)
 	pthread_mutex_unlock(&host_lock);
 }
 
+/*
+ * fix15: fix14's frame lines said 4 GB cleaned every 20 frames (about 200 MB a frame, ~7 MB at each of ~28 SUBMITs):
+ * every small import was cleaned at every SUBMIT, used by it or not. Now only the imports the SUBMIT names in its BO
+ * list (what the job reads or writes: Panfrost lists every BO of the batch) are cleaned, and each once a frame
+ * (sweet_drm_frame_mark()), whatever its size. A processor write into a picture after its first use in a frame
+ * shows from the next frame. With no list given (count 0), every import is taken as named, as before.
+ */
+static uint8_t host_named[65536 / 8];
+
 static void
-hosts_flush(void)
+hosts_flush(const uint32_t *handles, uint32_t count)
 {
 	pthread_mutex_lock(&host_lock);
 	host_flushes++;
+	if (handles != NULL && count != 0) {
+		for (uint32_t k = 0; k < count; k++) {
+			host_named[(handles[k] & 0xffff) >> 3] |= (uint8_t)(1u << (handles[k] & 7));
+		}
+	}
 	for (unsigned i = 0, seen = 0; i < HOSTS && seen < host_count; i++) {
 		if (hosts[i].address == NULL) {
 			continue;
 		}
 		seen++;
-		if (hosts[i].gpu_only || (hosts[i].size >= HOST_BIG && hosts[i].gen == host_gen)) {
+		if (hosts[i].gpu_only || hosts[i].gen == host_gen) {
+			continue;
+		}
+		if (handles != NULL && count != 0 &&
+		    (host_named[(hosts[i].handle & 0xffff) >> 3] & (1u << (hosts[i].handle & 7))) == 0) {
 			continue;
 		}
 		/* the same range imported again (a surface made a texture every frame): once */
@@ -1265,6 +1290,11 @@ hosts_flush(void)
 		if (!again) {
 			sys_dcache_flush(hosts[i].address, (size_t)hosts[i].size);
 			host_flushed_bytes += hosts[i].size;
+		}
+	}
+	if (handles != NULL && count != 0) {
+		for (uint32_t k = 0; k < count; k++) {
+			host_named[(handles[k] & 0xffff) >> 3] = 0;
 		}
 	}
 	pthread_mutex_unlock(&host_lock);
