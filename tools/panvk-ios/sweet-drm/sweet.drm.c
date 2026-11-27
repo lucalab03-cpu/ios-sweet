@@ -1140,7 +1140,16 @@ drmGetNodeTypeFromFd(int fd)
 #include <libkern/OSCacheControl.h>
 #define HOSTS 512
 #define HOST_BIG (1u << 20)
-static struct { uint32_t handle; void *address; uint64_t size; unsigned gen; } hosts[HOSTS];
+static struct { uint32_t handle; void *address; uint64_t size; unsigned gen; int gpu_only; } hosts[HOSTS];
+/*
+ * fix14: memory only the GPU writes and reads (the display's surfaces and CoreAnimation's offscreen ones, named by
+ * libsweet-gl, sweet_drm_host_gpu_only()) is not cleaned: no processor writes it, so nothing of it is dirty in a cache.
+ * fix13's profile: a quarter of CoreAnimation's render thread went to cleaning (DC CIVAC) window-sized surfaces once a
+ * frame, the two display surfaces among them.
+ */
+#define GPU_ONLY 64
+static void *gpu_only_at[GPU_ONLY];
+static unsigned gpu_only_count;
 static unsigned host_gen = 1, host_count;
 static pthread_mutex_t host_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t host_flushed_bytes, host_flushes;
@@ -1165,6 +1174,30 @@ sweet_drm_host_flush_stats(unsigned long long *bytes, unsigned long long *submit
 	pthread_mutex_unlock(&host_lock);
 }
 
+__attribute__((visibility("default"))) void sweet_drm_host_gpu_only(void *address);
+__attribute__((visibility("default"))) void
+sweet_drm_host_gpu_only(void *address)
+{
+	unsigned i;
+
+	if (address == NULL) {
+		return;
+	}
+	pthread_mutex_lock(&host_lock);
+	for (i = 0; i < gpu_only_count && gpu_only_at[i] != address; i++) {
+	}
+	if (i == gpu_only_count && gpu_only_count < GPU_ONLY) {
+		gpu_only_at[gpu_only_count++] = address;
+	}
+	for (unsigned j = 0, seen = 0; j < HOSTS && seen < host_count; j++) {
+		if (hosts[j].address != NULL) {
+			seen++;
+			hosts[j].gpu_only |= hosts[j].address == address;
+		}
+	}
+	pthread_mutex_unlock(&host_lock);
+}
+
 static void
 host_note(uint32_t handle, void *address, uint64_t size)
 {
@@ -1175,6 +1208,10 @@ host_note(uint32_t handle, void *address, uint64_t size)
 			hosts[i].address = address;
 			hosts[i].size = size;
 			hosts[i].gen = 0;
+			hosts[i].gpu_only = 0;
+			for (unsigned k = 0; k < gpu_only_count; k++) {
+				hosts[i].gpu_only |= gpu_only_at[k] == address;
+			}
 			host_count++;
 			break;
 		}
@@ -1188,6 +1225,13 @@ host_forget(uint32_t handle)
 	pthread_mutex_lock(&host_lock);
 	for (unsigned i = 0; i < HOSTS && host_count != 0; i++) {
 		if (hosts[i].address != NULL && hosts[i].handle == handle) {
+			/* (memory that goes may come back as somebody else's, written by a processor: not taken for GPU-only) */
+			for (unsigned k = 0; hosts[i].gpu_only && k < gpu_only_count; k++) {
+				if (gpu_only_at[k] == hosts[i].address) {
+					gpu_only_at[k] = gpu_only_at[--gpu_only_count];
+					break;
+				}
+			}
 			hosts[i].address = NULL;
 			host_count--;
 			break;
@@ -1206,7 +1250,7 @@ hosts_flush(void)
 			continue;
 		}
 		seen++;
-		if (hosts[i].size >= HOST_BIG && hosts[i].gen == host_gen) {
+		if (hosts[i].gpu_only || (hosts[i].size >= HOST_BIG && hosts[i].gen == host_gen)) {
 			continue;
 		}
 		/* the same range imported again (a surface made a texture every frame): once */

@@ -1900,3 +1900,18 @@ turns out to be Metal's.
   present -- copy synchronized to the real scanout (DSI/OVL frame-done or line counter) or OVL L0 page flip between two
   frames inside the bootloader fb region (if it holds two). Same work is needed for 90 Hz. To confirm with a
   slow-motion video of the bars.
+
+### 2026-11-27 21:45 — payload-am observed (0169, 0170); drop-fix14 (ping-pong shadows, GPU-only surfaces not cleaned)
+- **0169 works**: "disp_ovl0 inten 0x4 intsta 0x4003: 9 frames done in 100 ms, one every 11007 us" -> **the panel
+  runs at 90 Hz** (CA is paced by a 60 Hz timer: 60-on-90 judder). Scan wait 5.5 ms average, 11.2 longest, 0 missed.
+  User: bars still there -> not (only) tearing. Second swipe slower than the first.
+- **0170 works**: "thread com.apple.coreanimation.display.primary of backboardd.orig[55] bound to CPU 6"; PRF: that
+  thread now on CPU 6 (2933 of 3412 samples). Per-draw cost only ~15% lower (245 -> 207 us/draw p50; frame p50 18.7 ->
+  15.5 ms, p90 43 -> 81 ms).
+- Profile of the render thread (fix13): leaf 211c2d030 (shared cache, one PC, 25%: DC CIVAC loop = the shim's
+  hosts_flush cleaning window-sized imports once a frame) and libsweet-gl+0x262a8 = surface_changed (~10%).
+- Shots in motion (8): composed frames clean again.
+- fix14: (a) eagl shadow_draw alternates two shadows a surface (the GPU drew the next frame into the shadow the kernel
+  could still be copying: 0169 makes the copy wait up to 11 ms); (b) shim sweet_drm_host_gpu_only(): 'BGRA' shared
+  targets attached by CA are not cleaned (glgpuonly=0: as before); addresses dropped from the list at GEM close;
+  (c) frame lines report KB cleaned. Next for smoothness: 90 Hz pacing (CA vsync from 0169's frame done).

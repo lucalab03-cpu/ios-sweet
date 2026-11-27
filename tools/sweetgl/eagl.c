@@ -78,6 +78,7 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <dlfcn.h>
 
 #include "redwood_gl.h"
 #include <fcntl.h>
@@ -256,6 +257,8 @@ struct image {
 	bool private_target;            /* ios-sweet: a wide-colour surface drawn into a texture of ours only (see my_attachImage) */
 	IOSurfaceRef shadow;            /* ios-sweet 0156: the frame scaled to the panel by the GPU, for the display to copy */
 	GLuint shadow_texture;          /* ... that surface's memory as a texture */
+	IOSurfaceRef shadow_other;      /* fix14: and the one before, drawn into next time (shadow_draw: two in turn) */
+	GLuint shadow_other_texture;
 };
 
 struct eagl {
@@ -851,6 +854,14 @@ shadow_drop(struct image *image)
 		image->shadow = NULL;
 		image->shadow_texture = 0;
 	}
+	if (image->shadow_other != NULL) {
+		if (image->shadow_other_texture != 0) {
+			glDeleteTextures(1, &image->shadow_other_texture);
+		}
+		CFRelease(image->shadow_other);
+		image->shadow_other = NULL;
+		image->shadow_other_texture = 0;
+	}
 }
 
 static void
@@ -920,6 +931,20 @@ shadow_draw(struct eagl *e, struct image *image)
 			say("redwood-gl: surface %u is not among the last four swapped (%u %u %u %u): its shadow drawn anyway\n", id,
 			    shadow_info[4], shadow_info[5], shadow_info[6], shadow_info[7]);
 		}
+	}
+	/*
+	 * fix14: two shadows a surface, drawn into in turn. With one, the GPU drew a surface's next frame into the shadow
+	 * the kernel could still be copying to the panel (0169 has the copy wait for the scan, up to 11 ms, and the
+	 * display has only two surfaces): the panel got rows of two frames. The kernel copies the one named last.
+	 */
+	if (image->shadow != NULL && image->shadow_texture != 0) {
+		IOSurfaceRef s = image->shadow;
+		GLuint t = image->shadow_texture;
+
+		image->shadow = image->shadow_other;
+		image->shadow_texture = image->shadow_other_texture;
+		image->shadow_other = s;
+		image->shadow_other_texture = t;
 	}
 	if (image->shadow == NULL) {
 		image->shadow = shadow_surface(pw, ph);
@@ -1365,6 +1390,26 @@ frame_end(struct eagl *e, bool finished)
 		    "out), %llu before it for the IOSurfaces\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
 		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
 		    after - waited, e->attaching);
+		{
+			/* fix14: what the GPU driver's shim cleaned from the caches since the last such line */
+			static void (*flush_stats)(unsigned long long *, unsigned long long *);
+			static bool looked;
+			static unsigned long long last_bytes, last_submits;
+			unsigned long long bytes = 0, submits = 0;
+
+			if (!looked) {
+				looked = true;
+				flush_stats = (void (*)(unsigned long long *, unsigned long long *))dlsym(RTLD_DEFAULT,
+				    "sweet_drm_host_flush_stats");
+			}
+			if (flush_stats != NULL) {
+				flush_stats(&bytes, &submits);
+				say("redwood-gl: cleaned from the caches since: %llu KB in %llu submits\n", (bytes - last_bytes) >> 10,
+				    submits - last_submits);
+				last_bytes = bytes;
+				last_submits = submits;
+			}
+		}
 	}
 	if (e->frames == 30 || (frame_stats && e->frames % 200 == 0)) {
 		summary(e);
@@ -1561,6 +1606,7 @@ peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
 #define SHOT_MAX        32
 #define SHOT_BYTES      (800u << 10)    /* of base64 at most: what the outbox keeps of a file is its last 1 MB */
 static int trace_shot;
+static int gpu_only_on = 1;                     /* glgpuonly=0: CoreAnimation's own surfaces cleaned from the caches too */
 static unsigned shots_taken;
 static uint64_t shot_every, shot_next;          /* glshot_every= (timed_shot_due) */
 static unsigned shot_draws = 40;                   /* glshot_draws=: a frame with at least that many draws */
@@ -4576,6 +4622,22 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	if (surface_mirrored(e, image) || !surface_shared(e, image)) {
 		surface_changed(e, image);              /* (what it adds up to now) */
 		surface_to_texture(e, image);
+	} else if (gpu_only_on && pixels == 'BGRA') {
+		/*
+		 * fix14: a 'BGRA' surface CoreAnimation draws into is the GPU's alone (the display's two, its offscreen
+		 * pictures): the GPU driver's shim stops cleaning it from the processor's caches before every frame (a
+		 * quarter of the render thread's time in fix13's profile). glgpuonly=0: cleaned as before.
+		 */
+		static void (*gpu_only)(void *);
+		static bool looked;
+
+		if (!looked) {
+			looked = true;
+			gpu_only = (void (*)(void *))dlsym(RTLD_DEFAULT, "sweet_drm_host_gpu_only");
+		}
+		if (gpu_only != NULL) {
+			gpu_only(IOSurfaceGetBaseAddress(surface));
+		}
 	}
 	e->attaching += now_us() - began;
 	if (attached++ < 24) {
@@ -4817,6 +4879,7 @@ install(void)
 		trace_lit = strstr(arguments, "gltrace_lit=1") != NULL;
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
 		trace_shot = strstr(arguments, "gltrace_shot=1") != NULL;
+		gpu_only_on = strstr(arguments, "glgpuonly=0") == NULL;
 		if ((argument = strstr(arguments, "glshot_every=")) != NULL) {
 			shot_every = strtoull(argument + 13, NULL, 10) * 1000000ull;
 			shot_next = now_us() + 60000000ull;
