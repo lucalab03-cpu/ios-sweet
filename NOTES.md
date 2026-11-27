@@ -1828,3 +1828,13 @@ turns out to be Metal's.
   - pixel3 target_carry (stale pool buffers -> old frames around redrawn areas; possible cause of the left strip):
     blueeagl draws into mirrored textures, ours in place: not ported blindly; to check with the strip reproducible.
   - axassetsd off (services table).
+
+### 2026-11-27 17:40 — round fix6 observed (payload-al + drop-fix6, two boots)
+- **0168 works**: "SWEET: IONetworkStack registered", "MiniIONetworkStack: opened by configd; the registry's busy state
+  is 0"; About opens at once (user), already in boot 1. Power off from Settings works again.
+- Boot 2 (new libsweet-gl 366784): no red rectangle seen (user), no vcm-without-numbers draw happened in this log.
+  **TTS crash loop gone** (axassetsd off): only AegirPoster (M4), assetsd (M2), datamigrator x1, BatteriesWidget x1.
+- Power + volume: SpringBoard did not take it as the power-off chord but as a long press of the side button ->
+  **Siri** launched (08:34:44), invisible here, and while it is up apps do not open (icons still highlight). Escape:
+  short power press or swipe up. No reference port handles the chord. New item: button chords (power+volume ->
+  slider; SpringBoard's hardware-button handling vs our SweetHIDButtons events) + Siri's UI invisible.
