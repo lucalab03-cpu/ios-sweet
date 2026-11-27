@@ -1838,3 +1838,8 @@ turns out to be Metal's.
   **Siri** launched (08:34:44), invisible here, and while it is up apps do not open (icons still highlight). Escape:
   short power press or swipe up. No reference port handles the chord. New item: button chords (power+volume ->
   slider; SpringBoard's hardware-button handling vs our SweetHIDButtons events) + Siri's UI invisible.
+- Left strip: user: it shows while the screen moves (Settings page changes, scrolling), not only on wake/widgets.
+  Suspects in eagl: the partial per-frame check of large surfaces (1/8 of the rows a frame; glsums=1 = all) and no GPU
+  wait (glwait=0). drop-fix7 = glargs `glwait=1 glsums=1 glblit=0 glstats=1 glcensus=1` (both off at once; two boots:
+  the first backboardd reads glargs before the dropbox installs it). If the strip goes, split them; if not, the pool
+  buffers (pixel3 target_carry) are next.
