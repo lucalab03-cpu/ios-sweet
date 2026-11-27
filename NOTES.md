@@ -1760,3 +1760,15 @@ turns out to be Metal's.
 - Round fix2: drop-fix2 = glargs `glwait=0 glblit=0 gltrace_at=119 gltrace_frames=4 gltrace_shaders=1
   gltrace_uniforms=1` (no glstats/glcensus: the trace stays in the last 1 MB; all draws of 4 frames, which include
   sweetcaprobe's snapshot at 120 s and the lock screen's red band) + root.cmd (sweetcaprobe later 120). payload-ai.
+
+### 2026-11-27 16:10 — round fix2 observed; payload-aj; 0167
+- fix2 (glargs without glstats/glcensus): **lock screen normal, no red band** -> one of glstats=1/glcensus=1 changes
+  what is drawn (to check in eagl). Purple "aura" between the cards of the app switcher stays.
+- Settings spawned at 06:58:12 and never exited nor crashed (stuck); app switcher no longer comes up; power-off slider
+  never appears though the keys arrive (9 power presses to 1 HID client). SpringBoard used the scaler for an app's
+  launch picture (579x1254 -> 828x1792) right then. Hypothesis: IOSurfaceAccelerator asked asynchronously (wake port)
+  and waits for a completion 0166 never sends -> SpringBoard stuck mid-transition. (Round ai: the switcher worked
+  once, then never; About did not open.) Before 0166 (round aw) About opened.
+- payload-aj = payload-ai + sweetscaler=0 (sweetiolog removed for length, 577 chars): the test of the hypothesis.
+- **0167**: completion sent to the wake port (sendAsyncResult64) for async requests, logged ("asynchronous ...
+  completion sent").

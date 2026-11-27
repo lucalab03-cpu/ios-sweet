@@ -1,0 +1,55 @@
+diff --git a/iokit/Kernel/arm/SweetM2Scaler.cpp b/iokit/Kernel/arm/SweetM2Scaler.cpp
+--- a/iokit/Kernel/arm/SweetM2Scaler.cpp
++++ b/iokit/Kernel/arm/SweetM2Scaler.cpp
+@@ -21,6 +21,13 @@
+  * flushed from the cache before it is read and the destination cleaned to memory after it is written; boot-arg
+  * sweetscaler=0 leaves the service out (as before 0166); the time spent is logged (first 32 requests, then every
+  * 500th with the totals), to see what it costs.
++ *
++ * 0167 (2026-11-27): asynchronous requests. IOSurfaceAccelerator can ask for a transfer with a completion: the call
++ * comes with a wake port (IOConnectCallAsyncStructMethod) and the caller waits for the completion message. 0166 copied
++ * and returned but never sent that message, so the caller waited for good: round fix2, SpringBoard copying an app's
++ * launch picture (579x1254 -> 828x1792) when Settings was opened, then Settings never came up, the app switcher and
++ * the power-off slider no longer appeared (round ai: the switcher worked once, then never). Now the result also goes
++ * to the wake port (sendAsyncResult64); the log says which kind each request was.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -81,7 +88,7 @@
+ };
+ OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriverUserClient, IOUserClient);
+ 
+-static uint32_t sweet_scaler_requests, sweet_scaler_copied;
++static uint32_t sweet_scaler_requests, sweet_scaler_copied, sweet_scaler_async;
+ static uint64_t sweet_scaler_abs_total;
+ 
+ static inline uint32_t
+@@ -229,6 +236,9 @@
+ 			IOLog("SWEET SCALER: %s selector %u (%u bytes in): not handled\n", name, selector,
+ 			    args != NULL ? (uint32_t)args->structureInputSize : 0);
+ 		}
++		if (args != NULL && args->asyncWakePort != MACH_PORT_NULL && args->asyncReference != NULL) {
++			(void)sendAsyncResult64(args->asyncReference, kIOReturnBadArgument, NULL, 0);    /* 0167 */
++		}
+ 		return kIOReturnBadArgument;
+ 	}
+ 	const uint8_t *in = (const uint8_t *)args->structureInput;
+@@ -274,6 +284,17 @@
+ 	}
+ 	OSSafeReleaseNULL(src);
+ 	OSSafeReleaseNULL(dst);
+-	return ok ? kIOReturnSuccess : kIOReturnUnsupported;
++	IOReturn result = ok ? kIOReturnSuccess : kIOReturnUnsupported;
++	if (args->asyncWakePort != MACH_PORT_NULL && args->asyncReference != NULL) {
++		/* 0167: the caller waits for this message, not for the return */
++		IOReturn sent = sendAsyncResult64(args->asyncReference, result, NULL, 0);
++		if (sweet_scaler_async++ < 16) {
++			char name[32];
++			proc_selfname(name, sizeof(name));
++			IOLog("SWEET SCALER: #%u %s asynchronous (%u reference words): completion %x sent: %x\n", n, name,
++			    args->asyncReferenceCount, result, sent);
++		}
++	}
++	return result;
+ }
+ #endif /* SWEET */
