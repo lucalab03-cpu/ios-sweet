@@ -1700,3 +1700,14 @@ turns out to be Metal's.
 9. Automatic GPU frequency (no fix_target_opp_index each boot).
 10. Metal apps' frame times and shader-compile stutter (M12).
 11. 90 Hz.
+
+### 2026-11-27 10:05 — round ag observed (0164); round ah (sweetcaprobe)
+- 0164 on the phone: the gallery's previews went from **grey to black** (a surface now exists, nothing is drawn in
+  it); Astronomy still grey (its extension crashes, M4). Wallpaper shows a few seconds after the Apple logo (no valid
+  cached snapshot yet).
+- IOK trace: PosterBoard opens SweetMali, IOCoreSurfaceRoot, AGXAccelerator (-> SweetAccelerator), AppleKeyStore; it
+  does **not** look up AppleM2ScalerCSCDriver. backboardd untraced: my mistake, its process is `backboardd.orig`.
+  PosterBoard is in metal.allow (base, 57 bytes) but never appears in sweetmtl2.log.
+- Round ah: tools/sweetcaprobe (port of ios-hotdogg userland/jb/caprobe.c, MIT, Corey Cusick; 828x1792; `later
+  DELAY` mode): render-server snapshot of each display (black or not), IOSurfaceAcceleratorCreate/Transfer (the 2D
+  scaler). payload-ah: sweetiolog=backboardd.orig,PosterBoard.
