@@ -1711,3 +1711,18 @@ turns out to be Metal's.
 - Round ah: tools/sweetcaprobe (port of ios-hotdogg userland/jb/caprobe.c, MIT, Corey Cusick; 828x1792; `later
   DELAY` mode): render-server snapshot of each display (black or not), IOSurfaceAcceleratorCreate/Transfer (the 2D
   scaler). payload-ah: sweetiolog=backboardd.orig,PosterBoard.
+
+### 2026-11-27 13:50 — round ah observed (panic at power off; scaler confirmed); 0165 + 0166
+- ~1 h after boot (phone time 02:05): volume up, volume down, power x2, then a swipe at the top left->right (184,175 ->
+  719,233) = "slide to power off". launchd: shutdown COMMITTED ... "Will be calling reboot(2) with flags: 0x8"
+  (RB_HALT), "CPU halted", and 30 s later **panic "Halt/Restart Timed Out" (IOPlatformExpert.cpp:884)**. Cause:
+  PE_halt_restart was NULL -> haltRestart() -1 -> halt_all_cpus() spins -> the PEHaltRestart timer panics.
+  **0165** (SweetCPU.cpp): PE_halt_restart = PSCI SYSTEM_OFF for kPEHaltCPU (SYSTEM_RESET if it returns),
+  SYSTEM_RESET for kPERestartCPU; panic restarts unchanged; sweethalt=0 = as before. (pixel3: PSCI SYSTEM_RESET;
+  xnu_kernel_mediatek_common notes SYSTEM_OFF hanging on one of its phones -> watch the first power off.)
+- IOK trace (sweetiolog=backboardd.orig): **backboardd looks up AppleM2ScalerCSCDriver -> none** (as on guacamole);
+  also IOAcceleratorES matched 153 times, 0 found (fluidity list). sweetcaprobe did not run: the phone got a
+  27-byte root.cmd and no sweetcaprobe (another drop was packed, not drop-ah).
+- **0166**: AppleM2ScalerCSCDriver CPU stand-in (guacamole 0262 + their clientClose/setProperties), whole surfaces
+  only (rectangle requests refused as in 0262), cache flush of the source / clean of the destination (Mali not
+  coherent), sweetscaler=0 = off, time logged ("SWEET SCALER: #n ... in N us (total ...)").

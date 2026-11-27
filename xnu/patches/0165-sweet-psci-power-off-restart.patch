@@ -1,0 +1,72 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -17,6 +17,7 @@
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
++#include <IOKit/IOPlatformExpert.h>
+ 
+ extern "C" void sweet_secondary_entry(void);
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+@@ -25,6 +26,47 @@
+ static SweetCPU *sweet_cpus[MAX_CPUS];
+ static uint32_t sweet_cpus_registered;
+ 
++/*
++ * 0165 (2026-11-27): power off and restart through PSCI (SMCCC 1.0, like CPU_ON below). PE_halt_restart was NULL, so
++ * IOPlatformExpert::haltRestart answered -1, halt_all_cpus() spun after "CPU halted", and 30 s later the timer that
++ * PEHaltRestart arms panicked "Halt/Restart Timed Out" (round ah: "slide to power off", launchd reboot(2) with
++ * RB_HALT, panic on screen an hour later). kPEHaltCPU: SYSTEM_OFF; should the firmware refuse it, SYSTEM_RESET, so the
++ * phone at worst restarts (to Android) instead of panicking. kPERestartCPU: SYSTEM_RESET. Panic restarts are left as
++ * they were (-1: the panic stays on screen). Boot-arg sweethalt=0: as before. (pixel3-ios resets through PSCI
++ * SYSTEM_RESET the same way; xnu_kernel_mediatek_common notes SYSTEM_OFF hanging on one of its phones, hence the
++ * log line before each call.)
++ */
++static uint64_t
++sweet_psci_call0(uint64_t function)
++{
++	register uint64_t x0 __asm__("x0") = function;
++	__asm__ volatile("smc #0" : "+r"(x0) : :
++	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
++	    "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	return x0;
++}
++
++static int
++sweet_halt_restart(unsigned int type)
++{
++	if (type == kPEHaltCPU) {
++		kprintf("SWEET CPU: power off (PSCI SYSTEM_OFF)\n");
++		printf("SWEET CPU: power off (PSCI SYSTEM_OFF)\n");
++		int32_t rc = (int32_t)sweet_psci_call0(0x84000008ULL);
++		printf("SWEET CPU: SYSTEM_OFF returned %d: restarting instead (PSCI SYSTEM_RESET)\n", rc);
++		(void)sweet_psci_call0(0x84000009ULL);
++		return -1;
++	}
++	if (type == kPERestartCPU) {
++		kprintf("SWEET CPU: restart (PSCI SYSTEM_RESET)\n");
++		printf("SWEET CPU: restart (PSCI SYSTEM_RESET)\n");
++		int32_t rc = (int32_t)sweet_psci_call0(0x84000009ULL);
++		printf("SWEET CPU: SYSTEM_RESET returned %d\n", rc);
++		return -1;
++	}
++	return -1;
++}
++
+ /* SMCCC 1.0: x0 is the signed PSCI result; do not assume x1-x17 survive. */
+ static int32_t
+ sweet_psci_cpu_on(uint64_t target, uint64_t entry, uint64_t context)
+@@ -111,6 +153,12 @@
+ 	__atomic_store_n(&sweet_cpus[cpu->cpu_id], this, __ATOMIC_RELEASE);
+ 	__atomic_add_fetch(&sweet_cpus_registered, 1, __ATOMIC_ACQ_REL);
+ 	if (cpu == topology->boot_cpu) {
++		uint32_t halt_on = 1;
++
++		(void)PE_parse_boot_argn("sweethalt", &halt_on, sizeof(halt_on));
++		if (halt_on) {
++			PE_halt_restart = sweet_halt_restart;      /* 0165 */
++		}
+ 		thread_t thread;
+ 		result = kernel_thread_start(&SweetCPU::startAll, NULL, &thread);
+ 		if (result != KERN_SUCCESS) {

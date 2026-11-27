@@ -1,0 +1,310 @@
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -19,6 +19,7 @@
+ iokit/Kernel/arm/SweetMali.cpp                                       optional iokitcpp
+ iokit/Kernel/arm/SweetAccel.cpp                                      optional iokitcpp
+ iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
++iokit/Kernel/arm/SweetM2Scaler.cpp                               optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -58,6 +58,11 @@
+     "     'IOMatchCategory' = AppleMobileFileIntegrity;"
+     "   },"
+     "   {"
++    "     'IOClass'         = AppleM2ScalerCSCDriver;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = AppleM2ScalerCSCDriver;"
++    "   },"
++    "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+diff --git a/iokit/Kernel/arm/SweetM2Scaler.cpp b/iokit/Kernel/arm/SweetM2Scaler.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetM2Scaler.cpp
+@@ -0,0 +1,279 @@
++/*
++ * ios-sweet 0166 (2026-11-27): CPU stand-in for Apple's AppleM2ScalerCSCDriver (the 2D scaler behind
++ * IOSurfaceAccelerator.framework).
++ *
++ * From ios-guacamole / ios-hotdogg (coreycusick, MIT): xnu/patches/0262-guacamole-m2scaler-cpu-standin.patch, with
++ * clientClose/setProperties from their later xnu12377-scaler-rect.diff (without them every user leaked its connection
++ * and IOSurfaceAcceleratorCreate logged "Failed to set client property"). Same SweetSurface origin as ours.
++ *
++ * Why here: round ah (payload-ah, sweetiolog=backboardd.orig): backboardd looks the service up ("AppleM2ScalerCSCDriver
++ * -> none"); the wallpaper previews in PosterBoard's gallery and editor are black (with 0164 a surface exists, nothing
++ * is drawn into it); guacamole had the same: CARenderServer snapshots return success and 64/64 black, CoreAnimation
++ * copying the composited display through the 2D scaler that is not there.
++ *
++ * IOSurfaceAccelerator opens type 0 and sends selector 1 through IOConnectCallStructMethod, 0x170 bytes: destination
++ * and source IOSurface ids at 0 and 4; rectangles at 0x28 and 0x58 (zero = whole surfaces, what CA's snapshot
++ * TransferSurface sends). Whole surfaces only (scaled nearest-neighbour), BGRA/RGBA and 420f/420v in, BGRA/RGBA out.
++ * Requests with rectangles are refused as in 0262: on guacamole, taking backboardd's per-frame rectangle requests as
++ * copies broke the screen.
++ *
++ * Ours on top: the Mali here is not coherent with the CPU's caches (the S7 port found the same), so the source is
++ * flushed from the cache before it is read and the destination cleaned to memory after it is written; boot-arg
++ * sweetscaler=0 leaves the service out (as before 0166); the time spent is logged (first 32 requests, then every
++ * 500th with the totals), to see what it costs.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <sys/proc.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <pexpert/pexpert.h>
++#include "SweetSurface.h"
++
++class AppleM2ScalerCSCDriver : public IOService {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCDriver);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriver, IOService);
++
++bool
++AppleM2ScalerCSCDriver::start(IOService *provider)
++{
++	uint32_t on = 1;
++
++	(void)PE_parse_boot_argn("sweetscaler", &on, sizeof(on));
++	if (!on) {
++		IOLog("SWEET SCALER: off (sweetscaler=0)\n");
++		return false;
++	}
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "AppleM2ScalerCSCDriverUserClient");
++	setProperty("IONameMatched", "AppleM2ScalerCSCDriver");
++	registerService();
++	IOLog("SWEET SCALER: AppleM2ScalerCSCDriver registered (CPU stand-in)\n");
++	return true;
++}
++
++class AppleM2ScalerCSCDriverUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleM2ScalerCSCDriverUserClient);
++public:
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE
++	{
++		terminate();
++		return kIOReturnSuccess;
++	}
++	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE
++	{
++		(void)properties;
++		return kIOReturnSuccess;
++	}
++};
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriverUserClient, IOUserClient);
++
++static uint32_t sweet_scaler_requests, sweet_scaler_copied;
++static uint64_t sweet_scaler_abs_total;
++
++static inline uint32_t
++sweet_scaler_u32(const uint8_t *p)
++{
++	uint32_t v;
++	bcopy(p, &v, sizeof(v));
++	return v;
++}
++
++static inline bool
++sweet_scaler_fourcc(uint32_t f, char a, char b, char c, char d)
++{
++	return f == (((uint32_t)(uint8_t)a << 24) | ((uint32_t)(uint8_t)b << 16) |
++	       ((uint32_t)(uint8_t)c << 8) | (uint32_t)(uint8_t)d);
++}
++
++static uint8_t
++sweet_scaler_clamp(int v)
++{
++	return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
++}
++
++static bool
++sweet_scaler_convert(SweetSurface *src, SweetSurface *dst)
++{
++	if (src == NULL || dst == NULL || !src->width || !src->height || !dst->width || !dst->height ||
++	    src->width > 16384 || src->height > 16384 || dst->width > 16384 || dst->height > 16384 ||
++	    src->memory == NULL || dst->memory == NULL) {
++		return false;
++	}
++	uintptr_t sb = src->kernelAddress(), db = dst->kernelAddress();
++	if (!sb || !db) {
++		return false;
++	}
++	bool srcBGRA = sweet_scaler_fourcc(src->pixelFormat, 'B', 'G', 'R', 'A');
++	bool srcRGBA = sweet_scaler_fourcc(src->pixelFormat, 'R', 'G', 'B', 'A');
++	bool src420f = sweet_scaler_fourcc(src->pixelFormat, '4', '2', '0', 'f');
++	bool src420v = sweet_scaler_fourcc(src->pixelFormat, '4', '2', '0', 'v');
++	bool dstBGRA = sweet_scaler_fourcc(dst->pixelFormat, 'B', 'G', 'R', 'A');
++	bool dstRGBA = sweet_scaler_fourcc(dst->pixelFormat, 'R', 'G', 'B', 'A');
++	if ((!srcBGRA && !srcRGBA && !src420f && !src420v) || (!dstBGRA && !dstRGBA)) {
++		return false;
++	}
++	uint32_t sw = src->width, sh = src->height, dw = dst->width, dh = dst->height;
++	uint32_t sp = src->bytesPerRow, dp = dst->bytesPerRow;
++	if (srcBGRA || srcRGBA) {
++		if (sp < sw * 4 || dp < dw * 4) {
++			return false;
++		}
++	} else {
++		if (src->planeCount < 2 || src->planes[0].bytesPerRow < sw ||
++		    src->planes[1].bytesPerRow < ((sw + 1) & ~1u) || dp < dw * 4) {
++			return false;
++		}
++	}
++	uint8_t *s = (uint8_t *)sb + src->offset;
++	uint8_t *d = (uint8_t *)db + dst->offset;
++	uint64_t srcEnd, dstEnd;
++	uint64_t srcRowBytes = (srcBGRA || srcRGBA) ? (uint64_t)sw * 4 : sw;
++	uint64_t dstRowBytes = (uint64_t)dw * 4;
++	if (__builtin_mul_overflow((uint64_t)(sh - 1), (uint64_t)sp, &srcEnd) ||
++	    __builtin_add_overflow(srcEnd, srcRowBytes, &srcEnd) ||
++	    __builtin_add_overflow(srcEnd, (uint64_t)src->offset, &srcEnd) ||
++	    srcEnd > src->allocSize ||
++	    __builtin_mul_overflow((uint64_t)(dh - 1), (uint64_t)dp, &dstEnd) ||
++	    __builtin_add_overflow(dstEnd, dstRowBytes, &dstEnd) ||
++	    __builtin_add_overflow(dstEnd, (uint64_t)dst->offset, &dstEnd) ||
++	    dstEnd > dst->allocSize) {
++		return false;
++	}
++	uint8_t *yplane = NULL, *uvplane = NULL;
++	uint32_t yp = 0, uvp = 0;
++	if (src420f || src420v) {
++		uint64_t yEnd, uvEnd;
++		yplane = (uint8_t *)sb + src->planes[0].offset;
++		uvplane = (uint8_t *)sb + src->planes[1].offset;
++		yp = src->planes[0].bytesPerRow;
++		uvp = src->planes[1].bytesPerRow;
++		uint64_t chromaRows = ((uint64_t)sh + 1) / 2;
++		uint64_t chromaBytes = ((uint64_t)sw + 1) & ~1ull;
++		if (__builtin_mul_overflow((uint64_t)(sh - 1), (uint64_t)yp, &yEnd) ||
++		    __builtin_add_overflow(yEnd, (uint64_t)sw, &yEnd) ||
++		    __builtin_add_overflow(yEnd, (uint64_t)src->planes[0].offset, &yEnd) ||
++		    yEnd > src->allocSize ||
++		    __builtin_mul_overflow(chromaRows - 1, (uint64_t)uvp, &uvEnd) ||
++		    __builtin_add_overflow(uvEnd, chromaBytes, &uvEnd) ||
++		    __builtin_add_overflow(uvEnd, (uint64_t)src->planes[1].offset, &uvEnd) ||
++		    uvEnd > src->allocSize) {
++			return false;
++		}
++	}
++	/* the GPU wrote the source behind the CPU's caches: drop what the caches hold of it */
++	(void)src->memory->performOperation(kIOMemoryIncoherentIOFlush, 0, src->allocSize);
++	for (uint32_t y = 0; y < dh; y++) {
++		uint32_t sy = (uint32_t)((uint64_t)y * sh / dh);
++		for (uint32_t x = 0; x < dw; x++) {
++			uint32_t sx = (uint32_t)((uint64_t)x * sw / dw);
++			uint8_t r, g, b, a = 255;
++			if (srcBGRA || srcRGBA) {
++				const uint8_t *p = s + (uint64_t)sy * sp + (uint64_t)sx * 4;
++				if (srcBGRA) {
++					b = p[0]; g = p[1]; r = p[2]; a = p[3];
++				} else {
++					r = p[0]; g = p[1]; b = p[2]; a = p[3];
++				}
++			} else {
++				int yy = yplane[(uint64_t)sy * yp + sx];
++				const uint8_t *uv = uvplane + (uint64_t)(sy / 2) * uvp + (sx & ~1u);
++				int u = uv[0], v = uv[1];
++				int c = src420v ? yy - 16 : yy;
++				int d1 = u - 128, e1 = v - 128;
++				/* BT.601: 420v is video range, 420f full range */
++				if (src420v) {
++					r = sweet_scaler_clamp((298 * c + 409 * e1 + 128) >> 8);
++					g = sweet_scaler_clamp((298 * c - 100 * d1 - 208 * e1 + 128) >> 8);
++					b = sweet_scaler_clamp((298 * c + 516 * d1 + 128) >> 8);
++				} else {
++					r = sweet_scaler_clamp(yy + ((359 * e1 + 128) >> 8));
++					g = sweet_scaler_clamp(yy - ((88 * d1 + 183 * e1 + 128) >> 8));
++					b = sweet_scaler_clamp(yy + ((454 * d1 + 128) >> 8));
++				}
++			}
++			uint8_t *q = d + (uint64_t)y * dp + (uint64_t)x * 4;
++			if (dstBGRA) {
++				q[0] = b; q[1] = g; q[2] = r; q[3] = a;
++			} else {
++				q[0] = r; q[1] = g; q[2] = b; q[3] = a;
++			}
++		}
++	}
++	/* the GPU and the display read memory, not the CPU's caches */
++	(void)dst->memory->performOperation(kIOMemoryIncoherentIOStore, 0, dst->allocSize);
++	return true;
++}
++
++IOReturn
++AppleM2ScalerCSCDriverUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target, __unused void *reference)
++{
++	if (selector != 1 || args == NULL || args->structureInput == NULL || args->structureInputSize < 0x170) {
++		if (sweet_scaler_requests++ < 32) {
++			char name[32];
++			proc_selfname(name, sizeof(name));
++			IOLog("SWEET SCALER: %s selector %u (%u bytes in): not handled\n", name, selector,
++			    args != NULL ? (uint32_t)args->structureInputSize : 0);
++		}
++		return kIOReturnBadArgument;
++	}
++	const uint8_t *in = (const uint8_t *)args->structureInput;
++	uint32_t dstID = sweet_scaler_u32(in + 0);
++	uint32_t srcID = sweet_scaler_u32(in + 4);
++	bool fullSurface = true;
++	for (uint32_t i = 0x28; i < 0x48; i++) {
++		if (in[i] != 0) {
++			fullSurface = false;
++		}
++	}
++	for (uint32_t i = 0x58; i < 0x78; i++) {
++		if (in[i] != 0) {
++			fullSurface = false;
++		}
++	}
++	SweetSurface *src = sweet_surface_copy(srcID);
++	SweetSurface *dst = sweet_surface_copy(dstID);
++	uint64_t t0 = mach_absolute_time();
++	bool ok = fullSurface && sweet_scaler_convert(src, dst);
++	uint64_t spent = mach_absolute_time() - t0, ns = 0;
++	uint32_t n = ++sweet_scaler_requests;
++
++	sweet_scaler_abs_total += spent;
++	sweet_scaler_copied += ok;
++	absolutetime_to_nanoseconds(spent, &ns);
++	if (n <= 32 || n % 500 == 0) {
++		uint64_t total_ns = 0;
++		char name[32];
++		absolutetime_to_nanoseconds(sweet_scaler_abs_total, &total_ns);
++		proc_selfname(name, sizeof(name));
++		IOLog("SWEET SCALER: #%u %s src=%u %08x %ux%u dst=%u %08x %ux%u rects %08x,%08x,%08x,%08x / %08x,%08x,%08x,%08x"
++		    " -> %s in %llu us (total %u copied, %llu ms)\n",
++		    n, name, srcID, src ? src->pixelFormat : 0, src ? src->width : 0, src ? src->height : 0,
++		    dstID, dst ? dst->pixelFormat : 0, dst ? dst->width : 0, dst ? dst->height : 0,
++		    sweet_scaler_u32(in + 0x28), sweet_scaler_u32(in + 0x2c), sweet_scaler_u32(in + 0x30), sweet_scaler_u32(in + 0x34),
++		    sweet_scaler_u32(in + 0x58), sweet_scaler_u32(in + 0x5c), sweet_scaler_u32(in + 0x60), sweet_scaler_u32(in + 0x64),
++		    ok ? "copied" : (fullSurface ? "unsupported" : "refused (rectangles)"), ns / 1000, sweet_scaler_copied,
++		    total_ns / 1000000);
++	}
++	if (args->structureOutput != NULL && args->structureOutputSize) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	OSSafeReleaseNULL(src);
++	OSSafeReleaseNULL(dst);
++	return ok ? kIOReturnSuccess : kIOReturnUnsupported;
++}
++#endif /* SWEET */
