@@ -1,6 +1,8 @@
 /* Stands in for /usr/libexec/backboardd. Starts backboardd.inj (the real program with our library added as a dependency)
  * and, if that crashes twice in a row, the untouched backboardd.orig. Kill switch: a file /var/sweet/noinject. */
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
@@ -18,9 +20,45 @@ static long boot_id(void)
 	return sysctl(mib, 2, &tv, &len, NULL, 0) == 0 ? (long)tv.tv_sec : 0;
 }
 
+/*
+ * 2026-11-27: one boot a drop. sweet-boot applies the dropbox while backboardd starts, so the first backboardd of a
+ * boot had the old libsweet-gl and the old glargs, and a drop took two boots. When the dropbox holds a generation
+ * newer than the one applied (header: "SWDROP01", u64 generation; /var/sweet/applied.gen), this waits for
+ * sweet-boot to say it is done with it (/var/tmp/sweetboot.ready naming this boot), at most WAIT_MAX seconds.
+ */
+#define WAIT_MAX 600
+
+static unsigned long long applied_gen(void)
+{
+	unsigned long long a = 0; FILE *f = fopen("/var/sweet/applied.gen", "r");
+	if (f) { if (fscanf(f, "%llu", &a) != 1) a = 0; fclose(f); }
+	return a;
+}
+
+static void wait_for_dropbox(long boot)
+{
+	unsigned char head[16]; unsigned long long gen = 0; FILE *d = fopen("/var/sweet/dropbox.bin", "rb"), *f;
+	if (!d) return;
+	if (fread(head, 1, sizeof(head), d) != sizeof(head) || memcmp(head, "SWDROP01", 8) != 0) { fclose(d); return; }
+	fclose(d);
+	for (int i = 0; i < 8; i++) gen |= (unsigned long long)head[8 + i] << (8 * i);
+	if (gen <= applied_gen()) return;
+	if ((f = fopen("/var/tmp/sweetwrap.log", "a")) != NULL) { fprintf(f, "wrap: dropbox generation %llu not applied yet: waiting for sweet-boot\n", gen); fclose(f); }
+	int t = 0;
+	for (; t < WAIT_MAX; t++) {
+		long ready = 0; FILE *r = fopen("/var/tmp/sweetboot.ready", "r");
+		if (r) { if (fscanf(r, "%ld", &ready) != 1) ready = 0; fclose(r); }
+		if ((boot != 0 && ready == boot) || gen <= applied_gen()) break;
+		sleep(1);
+	}
+	if ((f = fopen("/var/tmp/sweetwrap.log", "a")) != NULL) { fprintf(f, "wrap: waited %d s for the dropbox (applied %llu)\n", t, applied_gen()); fclose(f); }
+}
+
 int main(int argc, char **argv)
 {
-	long now = (long)time(NULL), last = 0, boot = boot_id(), lastboot = -1; int count = 0;
+	long boot = boot_id(), last = 0, lastboot = -1; int count = 0;
+	wait_for_dropbox(boot);
+	long now = (long)time(NULL);
 	FILE *s = fopen(STATE, "r");
 	if (s) { if (fscanf(s, "%d %ld %ld", &count, &last, &lastboot) < 2) { count = 0; last = 0; } fclose(s); }
 	/* The phone has no real-time clock (it starts at 1970-01-01 on every boot), so only a launch 0..29 s after the

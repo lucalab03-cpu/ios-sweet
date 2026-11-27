@@ -19,6 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <pthread.h>
 #include <signal.h>
@@ -469,12 +471,40 @@ run_list(void)
 	fclose(f);
 }
 
+/*
+ * 2026-11-27: the first backboardd of a boot started before the dropbox was applied, so a new libsweet-gl or
+ * glargs only took effect on the boot after (two boots a drop). backboardd-wrap now waits, when the dropbox holds a
+ * generation not yet applied, for this file to name the present boot (kern.boottime's seconds): written when the
+ * dropbox is done with, whatever came of it, or when it is given up on.
+ */
+#define READY "/var/tmp/sweetboot.ready"
+
+static void
+say_ready(const char *how)
+{
+	struct timeval tv = { 0, 0 };
+	size_t len = sizeof(tv);
+	int mib[2] = { CTL_KERN, KERN_BOOTTIME };
+	FILE *f;
+
+	if (sysctl(mib, 2, &tv, &len, NULL, 0) != 0) {
+		return;
+	}
+	f = fopen(READY ".sweettmp", "w");
+	if (f) {
+		fprintf(f, "%ld %s\n", (long)tv.tv_sec, how);
+		fclose(f);
+		rename(READY ".sweettmp", READY);
+	}
+}
+
 static void *
 apply_thread(void *arg)
 {
 	(void)arg;
 	apply_dropbox();
 	apply_finished = 1;
+	say_ready("applied");
 	return NULL;
 }
 
@@ -523,6 +553,7 @@ main(void)
 	if (!apply_finished) {
 		say("SWEETBOOT: the dropbox is not applied (%s): starting the programs anyway\n",
 		    stalled >= APPLY_STALL ? "no progress for a minute" : "20 minutes passed");
+		say_ready("given-up");
 	}
 	pthread_create(&th, NULL, outbox_thread, NULL);
 	run_list();

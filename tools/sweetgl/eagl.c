@@ -268,6 +268,8 @@ struct eagl {
 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */
 	GLuint reader;                  /* a framebuffer of ours, to read a texture back */
 	GLuint writer;                  /* ... and one to copy a frame into its surface with (blit_targets) */
+	GLuint peek, peek_colour;       /* ... and one with a renderbuffer of ours, for the trace to read pixels from (peek_pixels()) */
+	GLsizei peek_width, peek_height;
 	GLuint program;                 /* the one in use, as CoreAnimation has it */
 	GLuint plain, lookup;           /* programs of ours for when that is none (plain_draw_begin()) */
 	GLint plain_matrix, plain_textured, lookup_matrix;
@@ -1458,6 +1460,62 @@ my_glClear(void *context, GLbitfield mask)
 
 /* While calls are written down: what a draw has left in the middle of what it drew into, and near its top. */
 #define GL_VIEWPORT             0x0ba2
+#define GL_RENDERBUFFER         0x8d41
+#define GL_RENDERBUFFER_BINDING 0x8ca7
+#define GL_RGBA8                0x8058
+
+/*
+ * Pixels of what is drawn into, for the trace. glReadPixels straight from a framebuffer whose
+ * colour is a texture made of a surface's memory has Mesa map that memory and unpack it on the
+ * processor (util_format_b8g8r8a8_unorm_unpack), and that is where backboardd crashed every time
+ * a trace read pixels back (rounds aj, ak, am). Here what is wanted is first copied by the GPU
+ * (glBlitFramebuffer, as blit_targets does with those same textures every frame) into a
+ * renderbuffer of ours, an ordinary one, and read from there. What is bound is put back.
+ */
+static void
+peek_pixels(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
+{
+	GLint read = 0, draw = 0, buffer = 0, box[4];
+	GLboolean boxed;
+
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	if (e->framebuffer == 0) {
+		glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out);
+		return;
+	}
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	glGetIntegerv(GL_RENDERBUFFER_BINDING, &buffer);
+	boxed = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_SCISSOR_BOX, box);
+	if (e->peek == 0) {
+		glGenFramebuffers(1, &e->peek);
+		glGenRenderbuffers(1, &e->peek_colour);
+	}
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->peek);
+	if (w > e->peek_width || h > e->peek_height) {
+		e->peek_width = w > e->peek_width ? w : e->peek_width;
+		e->peek_height = h > e->peek_height ? h : e->peek_height;
+		glBindRenderbuffer(GL_RENDERBUFFER, e->peek_colour);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, e->peek_width, e->peek_height);
+		glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, e->peek_colour);
+		glBindRenderbuffer(GL_RENDERBUFFER, (GLuint)buffer);
+	}
+	if (boxed) {
+		glDisable(GL_SCISSOR_TEST);     /* (the one test a blit goes through) */
+	}
+	glBlitFramebuffer(x, y, x + w, y + h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->peek);
+	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	if (boxed) {
+		glEnable(GL_SCISSOR_TEST);
+		glScissor(box[0], box[1], box[2], box[3]);
+	}
+}
 
 static void
 trace_pixels(struct eagl *e)
@@ -1467,13 +1525,11 @@ trace_pixels(struct eagl *e)
 	unsigned lit = 0, left = ~0u, bottom = ~0u, right = 0, top = 0;
 
 	glGetIntegerv(GL_VIEWPORT, view);
-	glReadPixels(view[0] + view[2] / 2, view[1] + view[3] / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, middle);
-	glReadPixels(view[0] + view[2] / 2, view[1] + view[3] / 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, low);
+	peek_pixels(e, view[0] + view[2] / 2, view[1] + view[3] / 2, 1, 1, middle);
+	peek_pixels(e, view[0] + view[2] / 2, view[1] + view[3] / 8, 1, 1, low);
 	/* ... and how much of the picture is anything but black, and where */
 	if (trace_lit && view[2] > 0 && view[3] > 0 && (all = malloc((size_t)view[2] * (size_t)view[3] * 4)) != NULL) {
-		glPixelStorei(GL_PACK_ALIGNMENT, 1);
-		glReadPixels(view[0], view[1], view[2], view[3], GL_RGBA, GL_UNSIGNED_BYTE, all);
-		glPixelStorei(GL_PACK_ALIGNMENT, 4);
+		peek_pixels(e, view[0], view[1], view[2], view[3], all);
 		for (unsigned y = 0; y < (unsigned)view[3]; y++) {
 			const uint8_t *row = all + (size_t)y * (size_t)view[2] * 4;
 
@@ -1805,7 +1861,7 @@ trace_placed_look(struct eagl *e)
 	glGetIntegerv(GL_VIEWPORT, view);
 	px = view[0] + (int)((x / w + 1) / 2 * (float)view[2]);
 	py = view[1] + (int)((y / w + 1) / 2 * (float)view[3]);
-	glReadPixels(px, py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+	peek_pixels(e, px, py, 1, 1, pixel);
 	say("gl-at:     it left %u %u %u %u (red green blue alpha) at %d,%d of the framebuffer%s\n", pixel[0], pixel[1], pixel[2],
 	    pixel[3], px, py, glGetError() ? " (not readable)" : "");
 }
