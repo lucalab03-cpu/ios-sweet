@@ -1859,3 +1859,15 @@ turns out to be Metal's.
   (no CPU unpack of surface memory). glargs fix9: base + gltrace_at=150 gltrace_frames=20
   gltrace_place=0,250,300,900 gltrace_look=1. Runs: mesa-ios 46038557547, pbwrap 46038560669, bundle 46039840400
   (sweet-bundle-fix9). Payload unchanged (al). If backboardd crash-loops at the trace: peek_pixels is not enough.
+
+### 2026-11-27 19:00 — fix9 observed; drop-fix10 (pictures from the compositor)
+- fix9 boot 1: install-wrap restarted backboardd with the new wrapper/libs at once. Boot 2 trace (gltrace_look=1
+  through peek_pixels): 593 pixels read, **no crash** -> GPU-copy readback is safe.
+- Trace (frames 622-641, a page sliding in from the left): CA redraws the whole display buffer each frame (full-screen
+  draws 2-5 into fb 41/32) -> stale pool buffers (pixel3 target_carry) are NOT the cause in these frames.
+  Left page = texture 399 (579x1254) filled from surface 200 'BGRA' 2320 bytes/row: B,G,R all zero, alpha only
+  (726066 px): a black+alpha picture drawn with program 44/115, scissor 0,322 220x1128. Blur chain: 82 (828x1792) ->
+  396 (416x898) -> 398 (420x902) -> 400 (213x454) -> 397, 276 (209x450). Coordinates in gl-at are vertex positions.
+- drop-fix10: eagl gltrace_shot=1 (shot_take: textures of listed draws + display whole/crop on the first/last traced
+  frame, zlib+base64 in /var/tmp/sweetshot-NN.txt; decoder tools/sweetshot/sweetshot.py). mesa-ios 46043668783,
+  bundle 46044415090. First drop with the waiting wrapper: should need ONE boot.
