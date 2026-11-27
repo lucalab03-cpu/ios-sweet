@@ -1726,3 +1726,9 @@ turns out to be Metal's.
 - **0166**: AppleM2ScalerCSCDriver CPU stand-in (guacamole 0262 + their clientClose/setProperties), whole surfaces
   only (rectangle requests refused as in 0262), cache flush of the source / clean of the destination (Mali not
   coherent), sweetscaler=0 = off, time logged ("SWEET SCALER: #n ... in N us (total ...)").
+- User: on the lock screen, from the start and always, a **red gradient at the top** (seen already before the
+  wallpaper as "gradient from red to black"). Only function 40 is refused (sweetca.log), so not a missing CA function.
+  Guess: the legibility dimming behind the clock (black -> clear) drawn from a one-channel (alpha) texture that ends
+  up in red. Promoted to GL item 2 (before the left strip). Round ai traces it: glargs gltrace_at=150
+  gltrace_frames=3 gltrace_place=0,0,828,500 gltrace_shaders=1 gltrace_uniforms=1 (no gltrace_look: it crashed
+  backboardd in round am). drop-ai = sweet-bundle-ah tools (sweetcaprobe) + glargs + root.cmd (sweetcaprobe later 120).
