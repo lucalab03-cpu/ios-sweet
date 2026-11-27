@@ -1880,3 +1880,12 @@ turns out to be Metal's.
   likely the moving-edge bars). Display buffers this boot: surfaces 2 and 4 (double-buffered; textures 1/10 and 3/7).
 - eagl fix: a surface with a shadow has it drawn every time ("not among the last four swapped ... drawn anyway" logged
   8x). mesa-ios 46049018371, bundle 46049667444 (sweet-bundle-fix12), glargs as fix11.
+
+### 2026-11-27 20:05 — fix12 observed; drop-fix13
+- fix12: "drawn anyway" never logged (the unlisted case did not happen this boot); display/shadow pairs now match
+  (0.8 % of pixels differ = scaling), but all 15 pairs were of a still screen (frames 118-131). User: bars still
+  there, "lagga un po'". **Each timed picture stalled backboardd ~3 s** (frames 120, 520: zlib level 6, retries).
+- Busy-frame cost: ~0.2 ms a draw on the CPU (57 draws ~12-15 ms, 100 draws ~20 ms, p90 53 ms): fluidity item =
+  per-draw overhead in eagl/Mesa, to profile.
+- fix13: shots only in frames with >= glshot_draws (40) draws, every 8 s from 45 s; whole picture at 1/4 + left 360
+  columns at full size; zlib level 1, size chosen first. mesa-ios 46052336042, bundle 46052945621.
