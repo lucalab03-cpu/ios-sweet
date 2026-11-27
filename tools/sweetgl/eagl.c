@@ -77,6 +77,7 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include "redwood_gl.h"
 #include <fcntl.h>
@@ -1225,6 +1226,7 @@ frame_begin(struct eagl *e)
  */
 static void frame_functions(struct eagl *e);
 static void (*sweet_frame_mark)(void);   /* ios-sweet: sweet_drm_frame_mark() of the GPU shim inside libOSMesa */
+static void shots_at_frame_end(struct eagl *e);
 static void
 frame_end(struct eagl *e, bool finished)
 {
@@ -1233,6 +1235,7 @@ frame_end(struct eagl *e, bool finished)
 	unsigned copied = 0, in_place = 0;
 
 	clear_now(e);
+	shots_at_frame_end(e);  /* (gltrace_shot=1) */
 	shadow_look();          /* ios-sweet 0156: which surfaces the display swaps, and the panel's size */
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
@@ -1472,12 +1475,10 @@ my_glClear(void *context, GLbitfield mask)
  * (glBlitFramebuffer, as blit_targets does with those same textures every frame) into a
  * renderbuffer of ours, an ordinary one, and read from there. What is bound is put back.
  */
+static void peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out);
 static void
 peek_pixels(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
 {
-	GLint read = 0, draw = 0, buffer = 0, box[4];
-	GLboolean boxed;
-
 	if (w <= 0 || h <= 0) {
 		return;
 	}
@@ -1485,6 +1486,16 @@ peek_pixels(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out
 		glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, out);
 		return;
 	}
+	peek_bound(e, x, y, w, h, out);
+}
+
+/* peek_pixels() from whatever framebuffer is bound for reading */
+static void
+peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
+{
+	GLint read = 0, draw = 0, buffer = 0, box[4];
+	GLboolean boxed;
+
 	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
 	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
 	glGetIntegerv(GL_RENDERBUFFER_BINDING, &buffer);
@@ -1514,6 +1525,181 @@ peek_pixels(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out
 	if (boxed) {
 		glEnable(GL_SCISSOR_TEST);
 		glScissor(box[0], box[1], box[2], box[3]);
+	}
+}
+
+/*
+ * gltrace_shot=1 (with gltrace_place): pictures for the trace, as the GPU has them. At the end of the first and the
+ * last frame traced, the display's picture (whole, made smaller until it fits, and the place traced at its full
+ * size); at the end of each traced frame, the first texture of each draw listed there that was not taken yet (up to
+ * SHOT_TEXTURES of them). Each into /var/tmp/sweetshot-N.txt (the outbox takes /var/tmp/sweet*): a line saying what
+ * it is, then its pixels (red, green, blue, opacity; rows from the bottom up, as OpenGL has them) compressed by zlib,
+ * in base64. Read through peek_bound() (a copy by the GPU first: no unpacking of a surface's memory).
+ */
+#define SHOT_TEXTURES   8
+#define SHOT_MAX        12
+#define SHOT_BYTES      (800u << 10)    /* of base64 at most: what the outbox keeps of a file is its last 1 MB */
+static int trace_shot;
+static unsigned shots_taken;
+static struct { GLuint texture; GLsizei width, height; bool taken; } shot_want[SHOT_TEXTURES];
+static unsigned shot_wanted;
+
+static bool
+texture_pixels(struct eagl *e, GLuint texture, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
+{
+	GLint read = 0;
+	bool readable;
+
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+	readable = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == 0x8cd5;   /* GL_FRAMEBUFFER_COMPLETE */
+	if (readable) {
+		peek_bound(e, x, y, w, h, out);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	return readable;
+}
+
+static void
+shot_take(struct eagl *e, const char *what, GLuint texture, GLint x, GLint y, GLsizei w, GLsizei h)
+{
+	static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	uint8_t *all, *small = NULL, *packed = NULL;
+	uLongf packed_size = 0;
+	unsigned step = 1;
+	char path[64];
+	FILE *f;
+
+	if (shots_taken >= SHOT_MAX || w <= 0 || h <= 0 || (all = malloc((size_t)w * (size_t)h * 4)) == NULL) {
+		return;
+	}
+	if (!texture_pixels(e, texture, x, y, w, h, all)) {
+		say("gl-at: shot of %s, texture %u (%d x %d): it cannot be read (not a picture a framebuffer takes)\n", what,
+		    texture, w, h);
+		free(all);
+		return;
+	}
+	for (; step <= 16; step *= 2) {
+		size_t sw = (size_t)w / step, sh = (size_t)h / step, n = sw * sh * 4;
+
+		free(small);
+		free(packed);
+		small = malloc(n);
+		packed_size = compressBound((uLong)n);
+		packed = malloc(packed_size);
+		if (small == NULL || packed == NULL) {
+			break;
+		}
+		for (size_t r = 0; r < sh; r++) {
+			for (size_t c = 0; c < sw; c++) {
+				memcpy(small + (r * sw + c) * 4, all + ((r * step) * (size_t)w + c * step) * 4, 4);
+			}
+		}
+		if (compress2(packed, &packed_size, small, (uLong)n, 6) != Z_OK) {
+			packed_size = 0;
+			break;
+		}
+		if ((packed_size + 2) / 3 * 4 <= SHOT_BYTES) {
+			break;
+		}
+	}
+	free(all);
+	snprintf(path, sizeof(path), "/var/tmp/sweetshot-%02u.txt", shots_taken);
+	if (packed_size != 0 && step <= 16 && small != NULL && (f = fopen(path, "w")) != NULL) {
+		fprintf(f, "sweetshot %u: frame %u, %s: texture %u at %d,%d, %d x %d, one pixel in %u (%d x %d kept); RGBA rows "
+		    "bottom up, zlib, %lu bytes, base64:\n", shots_taken, e->frames + 1, what, texture, x, y, w, h, step,
+		    w / (int)step, h / (int)step, (unsigned long)packed_size);
+		for (uLongf i = 0; i < packed_size; i += 3) {
+			uint32_t v = (uint32_t)packed[i] << 16 | (i + 1 < packed_size ? (uint32_t)packed[i + 1] << 8 : 0) |
+			    (i + 2 < packed_size ? packed[i + 2] : 0);
+
+			fputc(digits[v >> 18 & 63], f);
+			fputc(digits[v >> 12 & 63], f);
+			fputc(i + 1 < packed_size ? digits[v >> 6 & 63] : '=', f);
+			fputc(i + 2 < packed_size ? digits[v & 63] : '=', f);
+			if (i % 57 == 54) {
+				fputc('\n', f);
+			}
+		}
+		fprintf(f, "\nsweetshot %u end\n", shots_taken);
+		fclose(f);
+		say("gl-at: shot %u: %s, texture %u at %d,%d, %d x %d (one pixel in %u): %s\n", shots_taken, what, texture, x, y,
+		    w, h, step, path);
+		shots_taken++;
+	}
+	free(small);
+	free(packed);
+}
+
+/* (trace_placed_draw) a draw listed: its first texture, to be taken at the end of the frame */
+static void
+shot_note(GLuint texture, GLint width, GLint height)
+{
+	if (!trace_shot || texture == 0 || width < 16 || height < 16 || shot_wanted >= SHOT_TEXTURES) {
+		return;
+	}
+	for (unsigned i = 0; i < shot_wanted; i++) {
+		if (shot_want[i].texture == texture) {
+			return;
+		}
+	}
+	shot_want[shot_wanted].texture = texture;
+	shot_want[shot_wanted].width = width;
+	shot_want[shot_wanted].height = height;
+	shot_want[shot_wanted].taken = false;
+	shot_wanted++;
+}
+
+/* (frame_end) the pictures of a traced frame */
+static void
+shots_at_frame_end(struct eagl *e)
+{
+	struct image *display = NULL;
+
+	if (!trace_shot || !trace_placing || !e->in_frame) {
+		return;                 /* (a frame can be flushed more than once: its pictures are taken at the first) */
+	}
+	for (unsigned i = 0; i < shot_wanted; i++) {
+		if (!shot_want[i].taken) {
+			shot_want[i].taken = true;
+			shot_take(e, "the first texture of a draw listed", shot_want[i].texture, 0, 0, shot_want[i].width,
+			    shot_want[i].height);
+		}
+	}
+	if (trace_left != trace_frames - 1 && trace_left != 0) {
+		return;
+	}
+	for (unsigned i = 0; i < e->image_count; i++) {
+		struct image *image = &e->images[i];
+
+		if (image->target && image->drawn && (display == NULL ||
+		    (uint64_t)image->width * (uint64_t)image->height > (uint64_t)display->width * (uint64_t)display->height)) {
+			display = image;
+		}
+	}
+	if (display == NULL) {
+		return;
+	}
+	shot_take(e, "the display's picture", display->texture, 0, 0, display->width, display->height);
+	{
+		/* the place traced, at full size: its columns, and its rows counted from the top and from the bottom */
+		GLint x0 = (GLint)trace_place[0], x1 = (GLint)trace_place[2], y0 = (GLint)trace_place[1], y1 = (GLint)trace_place[3];
+		GLint low = y0 < display->height - y1 ? y0 : display->height - y1, high = y1 > display->height - y0 ? y1 :
+		    display->height - y0;
+
+		x0 = x0 < 0 ? 0 : x0;
+		x1 = x1 > display->width ? display->width : x1;
+		low = low < 0 ? 0 : low;
+		high = high > display->height ? display->height : high;
+		if (x1 > x0 && high > low) {
+			shot_take(e, "the display's picture, the place traced", display->texture, x0, low, x1 - x0, high - low);
+		}
 	}
 }
 
@@ -1825,6 +2011,9 @@ trace_placed_draw(struct eagl *e, GLenum mode, GLenum type, const void *indices,
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
 		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &format);
 		image = image_of(e, e->bound[unit]);
+		if (unit == 0) {
+			shot_note(e->bound[unit], width, height);
+		}
 		used += (size_t)snprintf(textures + used, sizeof(textures) - used, " [%u] %u (%d x %d, %#x%s)", unit, e->bound[unit],
 		    width, height, (unsigned)format, image == NULL ? "" : image->shared ? ", a surface's memory" :
 		    image->wrapped ? ", a copy of wrapped memory" : ", a copy of a surface");
@@ -4556,6 +4745,7 @@ install(void)
 		}
 		trace_lit = strstr(arguments, "gltrace_lit=1") != NULL;
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
+		trace_shot = strstr(arguments, "gltrace_shot=1") != NULL;
 		trace_shaders = strstr(arguments, "gltrace_shaders=1") != NULL;
 		function_numbers = strstr(arguments, "glnumbers=1") != NULL;
 		trace_uniforms_on = strstr(arguments, "gltrace_uniforms=1") != NULL;

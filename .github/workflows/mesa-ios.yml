@@ -63,7 +63,7 @@ jobs:
           python3 tools/sweetgl/mkeagl.py tools/sweetgl/eagl_slots.txt mesa-25.0.7/src/mapi/glapi/registry/gl.xml \
             obj/exported-gl.txt tools/sweetgl/eagl.c > obj/eagl_gen.h
           $C -O2 -dynamiclib -install_name /usr/local/lib/libsweet-gl.dylib -Iobj -Itools/sweetgl \
-            -Wno-deprecated-declarations -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc \
+            -Wno-deprecated-declarations -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc -lz \
             out/usr/local/lib/libOSMesa.8.dylib -o out/usr/local/lib/libsweet-gl.dylib \
             tools/sweetgl/eagl.c tools/sweetgl/gl_osmesa.c tools/sweetgl/ca_hooks.c 2>&1 | grep -v "warning: " | head -80
           test -f out/usr/local/lib/libsweet-gl.dylib
