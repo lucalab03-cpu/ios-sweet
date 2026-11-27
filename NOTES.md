@@ -1791,3 +1791,11 @@ turns out to be Metal's.
 - Still unexplained: About opened with the scaler off (aj), not with it on (ak, fix2). drop-fix3: glargs back to the
   round-ao set (glwait=0 glblit=0 glstats=1 glcensus=1) + sweetstack 60 Preferences SpringBoard (stacks at 1/2/3 min
   while About is stuck).
+- Round fix3: **About's main thread in _SCNetworkInterfaceCopyAllWithPreferences -> SCDynamicStoreNotifyWait**
+  (sweetstack, named on the phone), a PreferencesUI thread in the same call: the 2026-11-24 hang (configd's
+  InterfaceNamer waits for IOKit quiet; then D22AP busy forever, fixed by sweetquiet=20). Now About hangs only with
+  the scaler on -> suspect the scaler (its user clients' termination?) keeps IOKit busy. SpringBoard idle in its
+  run loop. The backboardd crash at 07:45 (power key) was again the trace: the first backboardd read the old glargs
+  (race with the dropbox install; later launches read the new one).
+- drop-fix4: root.cmd `restart backboardd.orig /var/sweet/glargs` (against the race) + `sweetbusy
+  /var/tmp/sweetbusy.txt 60` (busy services by name at 60 and 120 s) + the round-ao glargs.
