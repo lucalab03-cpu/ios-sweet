@@ -1781,3 +1781,13 @@ turns out to be Metal's.
   client surfaces is a GL-path item of its own.
 - Red translucent rectangle over the clock came back at boot this time (without glstats/glcensus): intermittent, not
   those flags.
+- **Correction (round ak, payload-ak with 0167):** no scaler request was asynchronous (15 requests, all synchronous
+  SpringBoard copies 207x448->828x1792 / 104x224->207x448): the async hypothesis was wrong (0167 harmless). The
+  backboardd SIGSEGVs of rounds aj and ak were **my trace**: eagl's crash recorder: trace_pixels -> glReadPixels ->
+  util_format_b8g8r8a8_unorm_unpack (same as round am's gltrace_look). gltrace_at=119 restarts with every backboardd
+  launch -> a crash loop every ~2 min (the "SpringBoard restarts", stuck wallpaper section, apps not opening). So
+  "without the scaler backboardd crashes" was wrong too. **Rule: no gltrace without gltrace_place; never readback
+  on BGRA (trace_pixels) until fixed.**
+- Still unexplained: About opened with the scaler off (aj), not with it on (ak, fix2). drop-fix3: glargs back to the
+  round-ao set (glwait=0 glblit=0 glstats=1 glcensus=1) + sweetstack 60 Preferences SpringBoard (stacks at 1/2/3 min
+  while About is stuck).
