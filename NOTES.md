@@ -1871,3 +1871,12 @@ turns out to be Metal's.
 - drop-fix10: eagl gltrace_shot=1 (shot_take: textures of listed draws + display whole/crop on the first/last traced
   frame, zlib+base64 in /var/tmp/sweetshot-NN.txt; decoder tools/sweetshot/sweetshot.py). mesa-ios 46043668783,
   bundle 46044415090. First drop with the waiting wrapper: should need ONE boot.
+
+### 2026-11-27 19:40 — fix11 observed; drop-fix12 (stale panel shadows)
+- fix11 (glshot_every=15): only 2 moments (fetched early). Display picture (texture 10 = surface 2) and its 0156
+  shadow (texture 12, 720x1604) read one after the other at frame 621 and 984 show **different frames** (widgets in
+  different places): the shadow was not redrawn. shadow_draw drew only for surfaces in the kernel's last-four-swapped
+  list, while sweet_fb_shadow_take uses a registered shadow at every swap -> the panel got older frames (judder,
+  likely the moving-edge bars). Display buffers this boot: surfaces 2 and 4 (double-buffered; textures 1/10 and 3/7).
+- eagl fix: a surface with a shadow has it drawn every time ("not among the last four swapped ... drawn anyway" logged
+  8x). mesa-ios 46049018371, bundle 46049667444 (sweet-bundle-fix12), glargs as fix11.
