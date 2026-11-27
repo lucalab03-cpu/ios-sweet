@@ -1843,3 +1843,11 @@ turns out to be Metal's.
   wait (glwait=0). drop-fix7 = glargs `glwait=1 glsums=1 glblit=0 glstats=1 glcensus=1` (both off at once; two boots:
   the first backboardd reads glargs before the dropbox installs it). If the strip goes, split them; if not, the pool
   buffers (pixel3 target_carry) are next.
+- Round fix7 (glwait=1 glsums=1): **strip still there** -> neither the 1/8-row check nor the missing GPU wait.
+  Frame stats in motion: ~35 ms a frame (was 15-28 ms with glwait=0): slower, reverted. Video (17:44): the strip =
+  vertical bars at the battery widget's left edge; then the widget's content goes (first ring and "100%" missing,
+  the box stays). Widget content is drawn by another process into a surface: bars at the left edge suggest a surface
+  read with the wrong bytes-per-row; missing content suggests a surface not refreshed.
+- drop-fix8: glargs `glwait=0 glblit=0 glstats=1 glcensus=1 gltrace_at=150 gltrace_frames=20
+  gltrace_place=0,250,300,900` (placed lines only: no readback, see eagl frame_begin/trace_placed_look); user on the
+  widgets page at 2:30. "gl-at: ... texture filled from surface ... bytes a row" gives the strides.
