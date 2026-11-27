@@ -1,0 +1,153 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -252,6 +252,14 @@ public:
+ 	bool          fAsync;         /* copy on the presenter thread as soon as the GPU is done (sweetfb_sync=2, 0141) */
+ 	uint64_t      fStatT0, fStatSwaps, fStatCopies, fStatDropped, fStatCopyUs, fStatCopyMax, fStatWaitUs;
+ 	uint64_t      fStatSync, fStatWaited, fStatWaitMax, fStatSkipped;
++	/* 0169: the copy into the panel after the overlay engine's frame done, not at any point of the scan */
++	IOMemoryMap  *fOvlMap;
++	volatile uint32_t *fOvl;        /* disp_ovl0's registers */
++	bool          fTearFree;        /* sweetfb_tearfree (default 1) and the frame-done bit seen at start */
++	uint32_t      fTearMisses;      /* waits in a row that saw no frame done (5: given up) */
++	uint64_t      fStatTearUs, fStatTearMax, fStatTearMissed;
++	void          tearFreeStart(void);
++	void          waitScanout(void);
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void addClient(IOMobileFramebufferUserClient *client);
+@@ -429,9 +437,100 @@ AppleCLCD::start(IOService *provider)
+ 	    "vsync %s\n", fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH,
+ 	    fScale ? "scaled" : "unscaled", fDotPitch, fVsyncOld ? "old layout" : "time, time, count");
+ 	sweet_ovl_layers(fPhys, (uint64_t)fRowBytes * fHeight, fWidth, fHeight, fRowBytes);
++	tearFreeStart();
+ 	return true;
+ }
+ 
++/*
++ * Patch 0169: tearing. The copy into the panel memory (0156: ~1.3 ms, one to one) ran as soon as a frame's GPU work
++ * was done, at any point of the panel's scan of that same memory: the overlay engine read the top of one frame and the
++ * bottom of the next, and what moved sideways showed steps (fix13, 2026-11-27: every picture of the composed frame was
++ * clean, the panel showed bars at the left edge of moving widgets). The overlay engine (disp_ovl0, as in Linux's
++ * mtk_disp_ovl.c: INTEN 0x4, INTSTA 0x8, bit 1 frame complete) sets its frame-done status at the end of each frame it
++ * sends, whether or not the interrupt is on. The presenter clears it, waits for it (at most 25 ms) and copies then:
++ * the copy, top down, is ~12 times faster than the scan and starts in the blanking, so it stays ahead of the scan.
++ * At start the bit is watched for 100 ms: its period is logged (the panel's real refresh), and with no frame done
++ * seen this stays off. sweetfb_tearfree=0: off.
++ */
++void
++AppleCLCD::tearFreeStart(void)
++{
++	int on = 1;
++	IOMemoryDescriptor *md;
++
++	PE_parse_boot_argn("sweetfb_tearfree", &on, sizeof(on));
++	if (!on || (md = IOMemoryDescriptor::withPhysicalAddress(0x1400b000ULL, 0x1000, kIODirectionInOut)) == NULL) {
++		return;
++	}
++	fOvlMap = md->map(kIOMapInhibitCache);
++	md->release();
++	if (fOvlMap == NULL) {
++		IOLog("SWEET FB: 0169 disp_ovl0 cannot be mapped: frames copied at any time\n");
++		return;
++	}
++	fOvl = (volatile uint32_t *)fOvlMap->getVirtualAddress();
++	uint32_t inten = fOvl[0x4 / 4], first = fOvl[0x8 / 4], seen = 0;
++	uint64_t t0 = mach_absolute_time(), last = 0, sum = 0, ns, now;
++
++	fOvl[0x8 / 4] = 0;
++	for (;;) {
++		now = mach_absolute_time();
++		absolutetime_to_nanoseconds(now - t0, &ns);
++		if (ns > 100 * NSEC_PER_MSEC) {
++			break;
++		}
++		if ((fOvl[0x8 / 4] & 2) != 0) {
++			fOvl[0x8 / 4] = 0;
++			if (last != 0) {
++				absolutetime_to_nanoseconds(now - last, &ns);
++				sum += ns / 1000;
++			}
++			last = now;
++			seen++;
++		}
++		IODelay(50);
++	}
++	fTearFree = seen >= 2;
++	IOLog("SWEET FB: 0169 disp_ovl0 inten %#x intsta %#x: %u frames done in 100 ms, one every %llu us: %s\n", inten,
++	    first, seen, seen >= 2 ? sum / (seen - 1) : 0, fTearFree ? "frames copied into the panel after a frame done" :
++	    "no frame done seen, frames copied at any time");
++}
++
++/* (presenter thread, fPresentLock held) until the overlay engine has sent a frame, so the copy starts in the blanking */
++void
++AppleCLCD::waitScanout(void)
++{
++	uint64_t t0, now, ns;
++
++	if (!fTearFree || fOvl == NULL) {
++		return;
++	}
++	t0 = mach_absolute_time();
++	fOvl[0x8 / 4] = 0;
++	for (;;) {
++		if ((fOvl[0x8 / 4] & 2) != 0) {
++			fTearMisses = 0;
++			break;
++		}
++		now = mach_absolute_time();
++		absolutetime_to_nanoseconds(now - t0, &ns);
++		if (ns > 25 * NSEC_PER_MSEC) {
++			fStatTearMissed++;
++			if (++fTearMisses >= 5) {
++				fTearFree = false;
++				IOLog("SWEET FB: 0169 no frame done in five waits of 25 ms: frames copied at any time from now on\n");
++			}
++			break;
++		}
++		delay_for_interval(100, NSEC_PER_USEC);
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	fStatTearUs += ns / 1000;
++	if (ns / 1000 > fStatTearMax) {
++		fStatTearMax = ns / 1000;
++	}
++}
++
+ void
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+@@ -559,13 +658,15 @@ AppleCLCD::presenterLoop(void)
+ 		memcpy(rec, fPending, SWEET_FB_SWAP_REC_SIZE);
+ 		fDirty = false;
+ 		IOLockUnlock(fLock);
++		waitScanout();          /* 0169 */
++		uint64_t t15 = mach_absolute_time();
+ 		present(rec);
+ 		IOLockUnlock(fPresentLock);
+ 		uint64_t t2 = mach_absolute_time();
+ 
+ 		absolutetime_to_nanoseconds(t1 - t0, &ns);
+ 		fStatWaitUs += ns / 1000;
+-		absolutetime_to_nanoseconds(t2 - t1, &ns);
++		absolutetime_to_nanoseconds(t2 - t15, &ns);   /* (0169: the copy alone, without the wait for the scan) */
+ 		fStatCopyUs += ns / 1000;
+ 		if (ns / 1000 > fStatCopyMax) {
+ 			fStatCopyMax = ns / 1000;
+@@ -590,11 +691,14 @@ AppleCLCD::stats(void)
+ 		return;
+ 	}
+ 	IOLog("SWEET FB: in %llu ms: %llu swaps, %llu frames shown (%llu replaced by a newer one), copy %llu us average "
+-	    "%llu longest (source rows read %llu us), GPU wait %llu us average; GPU-scaled %u, scaled here %u\n", ns / 1000000,
++	    "%llu longest (source rows read %llu us), GPU wait %llu us average; GPU-scaled %u, scaled here %u; scan wait %llu us "
++	    "average %llu longest, %llu missed (0169 %s)\n", ns / 1000000,
+ 	    fStatSwaps, fStatCopies,
+ 	    fStatDropped, fStatCopies ? fStatCopyUs / fStatCopies : 0, fStatCopyMax,
+ 	    fStatCopies ? sweet_fb_rowread_us / fStatCopies : 0, fStatCopies ? fStatWaitUs / fStatCopies : 0,
+-	    sweet_fb_shadow_used, sweet_fb_shadow_scaled);
++	    sweet_fb_shadow_used, sweet_fb_shadow_scaled, fStatCopies ? fStatTearUs / fStatCopies : 0, fStatTearMax,
++	    fStatTearMissed, fTearFree ? "on" : "off");
++	fStatTearUs = fStatTearMax = fStatTearMissed = 0;
+ 	sweet_fb_rowread_us = 0;
+ 	sweet_fb_shadow_used = sweet_fb_shadow_scaled = 0;
+ 	fStatT0 = now;
