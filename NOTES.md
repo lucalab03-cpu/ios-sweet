@@ -1924,3 +1924,23 @@ turns out to be Metal's.
   p50 17.1 ms, p90 27.8 ms; 194 us/draw.
 - fix15 (shim): only imports in the SUBMIT's BO list, once a frame. 0171 (kernel): vsync from the panel
   (sweetfb_vsync_div 1 = 90 Hz, 2 = 45 Hz; default 0 = 60 Hz timer as before). Payloads to try: an (60), an90, an45.
+
+### 2026-11-27 23:10 — profiles (fix17/18): what the render thread waits on; payload-ao, drop-fix19
+- sweetstack prof works (names from the phone; shared-cache symbols are <redacted> on this build, our libs by offset).
+  backboardd display thread, 1500 samples (25 ms): running ~1/3. Running: QuartzCore ~20%, SUBMIT/WAIT_BO ioctls
+  (jm_submit_jc, panfrost_bo_cache_fetch -> kmod_bo_wait) ~17%, surface_changed ~7%. **Waiting inside SUBMIT: 184
+  samples (~12% of the time)** = kernel 0136's "sweetmaliahead" limit (8 chains ahead; log: "a client is 8 chains
+  ahead of the GPU: its SUBMITs now wait for the oldest" x6) with ~28 chains a frame. payload-ao = payload-an +
+  sweetmaliahead=32 (the maximum, SWEET_AHEAD_MAX).
+- **aggregated[73] at 100% of a CPU for the whole boot** (constantly-running daemon) -> drop-fix19 root.cmd
+  `sweetjob remove com.apple.aggregated` (services table). nanotimekitcompaniond respawns on IPC and exits(0) every
+  few seconds (user agent: sweetjob handles LaunchDaemons only).
+- User (fix18 boot): icons repeated along their path, flashing squares, a small home screen top-left, then normal:
+  dirty cache lines of zero-filled new surfaces written back over GPU output (fix14 stopped cleaning GPU-only
+  imports) -> fix19 shim: GPU-only imports cleaned once when marked/imported (mesa 46072510022, bundle 46073409678).
+- 0169's wait adds ~11 ms average at 60 Hz (scan wait 10.9 ms average); payload-an-nt (sweetfb_tearfree=0): frame
+  times similar.
+
+| Service | Off since | Why | Back on when |
+|---|---|---|---|
+| com.apple.aggregated | drop-fix19 | 100% of a CPU, constantly running analytics daemon | CPU budget allows / analytics needed |
