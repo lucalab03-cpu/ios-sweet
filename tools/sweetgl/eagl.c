@@ -3947,6 +3947,97 @@ solid_clear(struct eagl *e, GLenum mode, GLenum type, const void *indices, GLint
 	return true;
 }
 
+
+/*
+ * fix25: a draw into the display's picture, scissored to the box it covers. CoreAnimation goes back to the display's
+ * picture some ten times a frame on the widgets page (fix24's trace: 141 draws, ~40 changes of framebuffer: every
+ * material behind a widget reads what is under it, so the GPU has to end the display's pass, and start it again after),
+ * and each new pass loaded every tile of the 828 x 1792 picture and wrote every one back, for a draw of 120 x 56. The
+ * GPU driver renders only the box its passes' viewport and scissor reach (Panfrost's batch bounds), so each draw
+ * here is given a scissor of its own corners (through CoreAnimation's matrix), a few pixels wider. glscissorfit=0: off.
+ */
+static int scissor_fit_on = 1;
+static bool fit_boxed;
+static GLint fit_box[4];
+
+static bool
+scissor_fit(struct eagl *e, GLenum type, const void *indices, GLint first, GLsizei count)
+{
+	struct image *image;
+	const GLfloat *m = e->matrix;
+	GLint view[4], size;
+	GLsizei stride;
+	float low[2] = { 1e30f, 1e30f }, high[2] = { -1e30f, -1e30f };
+	int x0, y0, x1, y1;
+
+	if (!scissor_fit_on || m == NULL || count <= 0 || count > 4096 || e->framebuffer == 0 || e->colour == 0 ||
+	    (image = image_of(e, e->colour)) == NULL || !image->target || image->width < 600 || image->height < 1200 ||
+	    e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2) {
+		return false;
+	}
+	size = e->arrays[0].size;
+	stride = e->arrays[0].stride != 0 ? e->arrays[0].stride : (GLsizei)(4 * size);
+	for (GLsizei i = 0; i < count; i++) {
+		unsigned vertex = indices == NULL ? (unsigned)(first + i) : type == GL_UNSIGNED_SHORT ?
+		    ((const uint16_t *)indices)[i] : type == GL_UNSIGNED_BYTE ? ((const uint8_t *)indices)[i] :
+		    ((const uint32_t *)indices)[i];
+		float v[4] = { 0, 0, 0, 1 };
+
+		memcpy(v, (const uint8_t *)e->arrays[0].pointer + (size_t)vertex * (size_t)stride, (size_t)(size < 4 ? size : 4) * 4);
+		float w = m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3];
+
+		if (!(w > 1e-6f)) {
+			return false;           /* (behind the eye, or no matrix of ours: leave it whole) */
+		}
+		float x = (m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3]) / w;
+		float y = (m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3]) / w;
+
+		if (!(x > -1e6f && x < 1e6f && y > -1e6f && y < 1e6f)) {
+			return false;
+		}
+		low[0] = x < low[0] ? x : low[0];
+		high[0] = x > high[0] ? x : high[0];
+		low[1] = y < low[1] ? y : low[1];
+		high[1] = y > high[1] ? y : high[1];
+	}
+	glGetIntegerv(GL_VIEWPORT, view);
+	x0 = view[0] + (int)((low[0] + 1) * 0.5f * (float)view[2]) - 3;
+	x1 = view[0] + (int)((high[0] + 1) * 0.5f * (float)view[2]) + 4;
+	y0 = view[1] + (int)((low[1] + 1) * 0.5f * (float)view[3]) - 3;
+	y1 = view[1] + (int)((high[1] + 1) * 0.5f * (float)view[3]) + 4;
+	fit_boxed = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_SCISSOR_BOX, fit_box);
+	if (fit_boxed) {
+		/* (within the scissor CoreAnimation has set) */
+		x0 = x0 > fit_box[0] ? x0 : fit_box[0];
+		y0 = y0 > fit_box[1] ? y0 : fit_box[1];
+		x1 = x1 < fit_box[0] + fit_box[2] ? x1 : fit_box[0] + fit_box[2];
+		y1 = y1 < fit_box[1] + fit_box[3] ? y1 : fit_box[1] + fit_box[3];
+	}
+	x0 = x0 > view[0] ? x0 : view[0];
+	y0 = y0 > view[1] ? y0 : view[1];
+	x1 = x1 < view[0] + view[2] ? x1 : view[0] + view[2];
+	y1 = y1 < view[1] + view[3] ? y1 : view[1] + view[3];
+	if (x1 <= x0 || y1 <= y0) {
+		x1 = x0 + 1;            /* (nothing of it on the picture: a box of one pixel, not the whole) */
+		y1 = y0 + 1;
+	}
+	if (!fit_boxed) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+	glScissor(x0, y0, x1 - x0, y1 - y0);
+	return true;
+}
+
+static void
+scissor_unfit(void)
+{
+	glScissor(fit_box[0], fit_box[1], fit_box[2], fit_box[3]);
+	if (!fit_boxed) {
+		glDisable(GL_SCISSOR_TEST);
+	}
+}
+
 static void
 my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 {
@@ -3970,14 +4061,27 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 		/* glskip=N: nothing is drawn, so that what this program puts there can be seen missing */
 	} else if (solid_clear(e, mode, 0, NULL, first, count)) {
 		/* fix20: a clear instead */
-	} else if (group_draw_begin(e, enabled)) {
-		glDrawArrays(mode, first, count);
-		group_draw_end(e, enabled);
 	} else {
-		plain = plain_draw_begin(e, enabled);
-		glDrawArrays(mode, first, count);
-		if (plain) {
-			plain_draw_end(e, enabled);
+		/* fix25: the scissor around the draw only (what group_draw_begin and plain_draw_begin do first is theirs) */
+		bool fitted;
+
+		if (group_draw_begin(e, enabled)) {
+			fitted = false;         /* (a group's draws are its own business) */
+			glDrawArrays(mode, first, count);
+			if (fitted) {
+				scissor_unfit();
+			}
+			group_draw_end(e, enabled);
+		} else {
+			plain = plain_draw_begin(e, enabled);
+			fitted = scissor_fit(e, 0, NULL, first, count);
+			glDrawArrays(mode, first, count);
+			if (fitted) {
+				scissor_unfit();
+			}
+			if (plain) {
+				plain_draw_end(e, enabled);
+			}
 		}
 	}
 	if (trace_listed) {
@@ -4012,14 +4116,27 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 		/* glskip=N: see my_glDrawArrays */
 	} else if (solid_clear(e, mode, type, indices, 0, count)) {
 		/* fix20: a clear instead */
-	} else if (group_draw_begin(e, enabled)) {
-		glDrawElements(mode, count, type, indices);
-		group_draw_end(e, enabled);
 	} else {
-		plain = plain_draw_begin(e, enabled);
-		glDrawElements(mode, count, type, indices);
-		if (plain) {
-			plain_draw_end(e, enabled);
+		/* fix25: the scissor around the draw only (what group_draw_begin and plain_draw_begin do first is theirs) */
+		bool fitted;
+
+		if (group_draw_begin(e, enabled)) {
+			fitted = false;         /* (a group's draws are its own business) */
+			glDrawElements(mode, count, type, indices);
+			if (fitted) {
+				scissor_unfit();
+			}
+			group_draw_end(e, enabled);
+		} else {
+			plain = plain_draw_begin(e, enabled);
+			fitted = scissor_fit(e, type, indices, 0, count);
+			glDrawElements(mode, count, type, indices);
+			if (fitted) {
+				scissor_unfit();
+			}
+			if (plain) {
+				plain_draw_end(e, enabled);
+			}
 		}
 	}
 	if (trace_listed) {
@@ -5143,6 +5260,7 @@ install(void)
 		trace_shot = strstr(arguments, "gltrace_shot=1") != NULL;
 		gpu_only_on = strstr(arguments, "glgpuonly=0") == NULL;
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
+		scissor_fit_on = strstr(arguments, "glscissorfit=0") == NULL;
 		if ((argument = strstr(arguments, "glshot_every=")) != NULL) {
 			shot_every = strtoull(argument + 13, NULL, 10) * 1000000ull;
 			shot_next = now_us() + 60000000ull;
