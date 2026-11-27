@@ -1686,3 +1686,17 @@ turns out to be Metal's.
   see whether CA asks for it.
 - Seen in the photos (GL list): stripes on the left edge of the battery widgets (same as the wake strip), CC sliders
   too light with stripes.
+
+## GPU PLAN, ORDER BY IMPORTANCE (agreed with the user 2026-11-27)
+1. Black previews/snapshots (wallpaper gallery and editor, app-switcher snapshots): 0164, then guacamole's CPU
+   AppleM2ScalerCSCDriver if the IOKit trace asks for it.
+2. Left-edge glitch strip (wake, battery widgets): reproducible on the widgets page now.
+3. Fluidity: 99% of frames < 16.7 ms in animations (per-frame times, percentiles every round; profile).
+4. Metal, everyday apps: Messages (M1), Photos + assetsd (M2), Safari (M3).
+5. Metal, every stock app (M11) incl. Maps/Weather/Wallet (M9), camera preview (M7), video presentation (M8).
+6. Control Center: vibrancy, slider stripes, sb3 shadow (CA function 40).
+7. MPS / Core Image: Photo + Pride wallpapers (M5), photo editing (M6), Astronomy (M4).
+8. Games and third-party apps: OpenGL ES in apps (EAGL), Metal 2/3 (M10).
+9. Automatic GPU frequency (no fix_target_opp_index each boot).
+10. Metal apps' frame times and shader-compile stutter (M12).
+11. 90 Hz.
