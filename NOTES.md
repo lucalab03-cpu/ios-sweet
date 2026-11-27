@@ -1749,3 +1749,14 @@ turns out to be Metal's.
   with `rm -rf drop-X`.**
 - drop-fix1 = mesa 45878203042 + metal2 45805702530 + panvk 45701349534 (from bundle ao) + pbwrap 45969931918 + heic
   45910940696 + var: gl, sweet-boot.list (ao), glargs (round ai trace), root.cmd (sweetcaprobe later 120).
+- Round fix1 observed (right drop at last: libsweet-gl 366720, root.cmd 48): **red gradient still on the lock screen**
+  (and in the editor's/gallery's previews, which show the lock screen); home, search, today view normal again
+  (the magenta/red there was the stale libsweet-gl). sweetcaprobe: IOSurfaceAcceleratorCreate 0, Transfer 0 but the
+  destination reads 00 (kernel: "#5 sweetcaprobe ... copied in 1061 us" -> a visibility problem to look at);
+  **CARenderServerRenderDisplay(0,"LCD") = 1 but 64/64 black**, and backboardd never called the scaler for it: the
+  snapshot is drawn by backboardd's GL path (eagl) into the client's surface and comes out black. Scaler used by
+  SpringBoard (8 copies, 22 ms each at 828x1792). The trace (gltrace_at=150) went to sweetgl.log but the outbox's
+  last 1 MB held only later glstats lines. Power off not tried yet.
+- Round fix2: drop-fix2 = glargs `glwait=0 glblit=0 gltrace_at=119 gltrace_frames=4 gltrace_shaders=1
+  gltrace_uniforms=1` (no glstats/glcensus: the trace stays in the last 1 MB; all draws of 4 frames, which include
+  sweetcaprobe's snapshot at 120 s and the lock screen's red band) + root.cmd (sweetcaprobe later 120). payload-ai.
