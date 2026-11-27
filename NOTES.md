@@ -1944,3 +1944,15 @@ turns out to be Metal's.
 | Service | Off since | Why | Back on when |
 |---|---|---|---|
 | com.apple.aggregated | drop-fix19 | 100% of a CPU, constantly running analytics daemon | CPU budget allows / analytics needed |
+
+### 2026-11-28 00:05 — fix20-25: GPU work per frame
+- fix20-22: CA's one-colour full-viewport draws (program body `gl_FragData[0] = color;`, e.g. programs 3/50/70)
+  made scissored glClears (no fragment pass, no preload): ~2 a frame (750-840 per 10 s). Best windows p50 9-11 ms.
+- User: the widgets page is slow even standing on it. fix24 trace (gltrace_function now fired from census_draw):
+  a widgets-page frame = 141 draws, ~40 framebuffer changes; the display picture's pass resumes ~10 times a frame
+  (each material reads what is under it: CA copies display regions into small FBs, programs 36/38/70/72), each resume
+  preloading and storing all 828x1792 tiles.
+- fix25: every draw into a display-sized target (not group draws) scissored to its transformed corners (+3 px,
+  within CA's scissor) so Panfrost's batch bounds -- and its preload/writeback -- shrink to what is drawn.
+  glscissorfit=0: off. mesa 46079795603, bundle 46080231333 (sweet-bundle-fix25).
+- To do later (user): wallpaper gallery thumbnails grey/black while wallpapers apply fine (Metal item M4/M5).
