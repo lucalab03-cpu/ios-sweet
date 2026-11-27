@@ -79,6 +79,7 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <dlfcn.h>
+#include <pthread.h>
 
 #include "redwood_gl.h"
 #include <fcntl.h>
@@ -1221,6 +1222,25 @@ frame_begin(struct eagl *e)
 	}
 	e->in_frame = true;
 	e->began = now_us();
+	{
+		/*
+		 * fix16: the render thread on a big core (kernel 0170 binds a thread when it names itself). CoreAnimation can
+		 * draw from a new thread later on (one profile of payload-an's boot had the display thread on the small cores
+		 * again): a thread that draws a frame for the first time names itself again, with its own name, so the kernel
+		 * sees it.
+		 */
+		static pthread_t last;
+		pthread_t self = pthread_self();
+
+		if (self != last) {
+			char name[64] = "";
+
+			last = self;
+			if (pthread_getname_np(self, name, sizeof(name)) == 0 && name[0] != 0) {
+				(void)pthread_setname_np(name);
+			}
+		}
+	}
 	eagl_tracing = e->frames + 1 >= trace_first && e->frames + 1 <= trace_last;
 	if ((trace_at != 0 && e->began >= trace_at) || (trace_draws != 0 && e->last_draws >= trace_draws) || trace_function_met) {
 		trace_left = trace_frames;      /* (once) */
@@ -1331,6 +1351,43 @@ frame_end(struct eagl *e, bool finished)
 	after = now_us();
 	e->in_frame = false;
 	e->frames++;
+	{
+		/*
+		 * fix16: every frame's time (its first GL call to its hand-over), every 10 s: how many, and the 50th, 90th and
+		 * 99th percentile and the longest, of the frames with something drawn (the lines every 20 frames show one in
+		 * twenty), and how many took longer than a 60 Hz and an 90 Hz refresh.
+		 */
+		static unsigned bucket[101], n, over16, over11;
+		static uint64_t since, longest;
+		uint64_t took = after - e->began;
+
+		if (e->draws > 0) {
+			bucket[took / 1000 < 100 ? took / 1000 : 100]++;
+			n++;
+			over16 += took > 16667;
+			over11 += took > 11111;
+			longest = took > longest ? took : longest;
+		}
+		if (since == 0) {
+			since = after;
+		}
+		if (after - since >= 10000000 && n != 0) {
+			unsigned p[3] = { 0, 0, 0 }, want[3] = { n / 2, n * 9 / 10, n * 99 / 100 }, seen = 0;
+
+			for (unsigned b = 0, k = 0; b <= 100 && k < 3; b++) {
+				seen += bucket[b];
+				while (k < 3 && seen > want[k]) {
+					p[k++] = b;
+				}
+			}
+			say("redwood-gl: frames in %llu ms: %u drawn; ms p50 %u p90 %u p99 %u, longest %llu us; %u over 16.7 ms, %u over "
+			    "11.1 ms\n", (after - since) / 1000, n, p[0], p[1], p[2], longest, over16, over11);
+			memset(bucket, 0, sizeof(bucket));
+			n = over16 = over11 = 0;
+			longest = 0;
+			since = after;
+		}
+	}
 	if ((e->frames & 63) == 0) {
 		/* kern.redwood.touch_lat (live), every 64 frames; boot-arg touch_lat=1 keeps it on */
 		static int boot_value = -1;
