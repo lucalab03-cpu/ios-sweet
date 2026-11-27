@@ -1732,3 +1732,7 @@ turns out to be Metal's.
   up in red. Promoted to GL item 2 (before the left strip). Round ai traces it: glargs gltrace_at=150
   gltrace_frames=3 gltrace_place=0,0,828,500 gltrace_shaders=1 gltrace_uniforms=1 (no gltrace_look: it crashed
   backboardd in round am). drop-ai = sweet-bundle-ah tools (sweetcaprobe) + glargs + root.cmd (sweetcaprobe later 120).
+- GPU item 9 split (user: "togliamoci il punto 7 se è rapido"): (a) no manual command: the OPP line goes into the
+  phone's /data/local/tmp/go-ios.sh (not in git; user runs: backup to go-ios.sh.bak, `sed -i '2i echo 0 >
+  /proc/gpufreqv2/fix_target_opp_index'` if absent); (b) real DVFS from iOS (MFG PLL + Vgpu through the PMIC +
+  thermal limits) stays in the list: today the GPU runs at a fixed 823 MHz set by Android.
