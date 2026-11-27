@@ -1,0 +1,71 @@
+diff --git a/bsd/kern/proc_info.c b/bsd/kern/proc_info.c
+--- a/bsd/kern/proc_info.c
++++ b/bsd/kern/proc_info.c
+@@ -212,6 +212,59 @@
+ extern int cansignal(struct proc *, kauth_cred_t, struct proc *, int);
+ extern int proc_get_rusage(proc_t proc, int flavor, user_addr_t buffer, int is_zombie);
+ 
++/*
++ * ios-sweet 0170: the window server's render thread on a big core. The MT6768's CPUs 0-5 are Cortex-A55s and 6-7
++ * Cortex-A75s (mpidr 0x600/0x700), and this kernel schedules them as equals. fix13's profile (sweetprof): CoreAnimation's
++ * "com.apple.coreanimation.display.primary" thread in backboardd took 76% of one CPU during motion, almost all of it on
++ * CPUs 0 and 1, while the GPU was busy 11% of the time: frames of 100 draws took ~20 ms of that thread. A thread that
++ * names itself with a name in boot-arg sweetbig (comma-separated, default that one; "-": none) is bound to CPU
++ * sweetbig_cpu (default 6; the panel presenter is on 7, 0146).
++ */
++extern processor_t cpu_to_processor(int cpu);
++extern processor_t thread_bind(processor_t processor);
++extern int ml_get_max_cpu_number(void);
++extern boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_arg);
++
++static void
++sweet_thread_named(const char *name)
++{
++	static char wanted[256];
++	static int cpu = -2;
++	size_t length = strlen(name);
++
++	if (cpu == -2) {
++		int c = 6;
++
++		if (!PE_parse_boot_argn("sweetbig", wanted, sizeof(wanted))) {
++			strlcpy(wanted, "com.apple.coreanimation.display.primary", sizeof(wanted));
++		}
++		(void)PE_parse_boot_argn("sweetbig_cpu", &c, sizeof(c));
++		cpu = c;
++	}
++	if (cpu < 0 || cpu > ml_get_max_cpu_number() || length == 0 || wanted[0] == '-') {
++		return;
++	}
++	for (const char *at = wanted; *at != '\0';) {
++		const char *end = strchr(at, ',');
++		size_t n = end != NULL ? (size_t)(end - at) : strlen(at);
++
++		if (n == length && strncmp(at, name, n) == 0) {
++			processor_t p = cpu_to_processor(cpu);
++
++			if (p != PROCESSOR_NULL) {
++				(void)thread_bind(p);
++				printf("SWEET BIG: thread \"%s\" of %s[%d] bound to CPU %d\n", name, proc_best_name(current_proc()),
++				    proc_pid(current_proc()), cpu);
++			}
++			return;
++		}
++		if (end == NULL) {
++			break;
++		}
++		at = end + 1;
++	}
++}
++
+ #define CHECK_SAME_USER         TRUE
+ #define NO_CHECK_SAME_USER      FALSE
+ 
+@@ -3156,6 +3209,7 @@
+ 
+ 		if (!error) {
+ 			bsd_setthreadname(ut, name_buf);
++			sweet_thread_named(name_buf);   /* ios-sweet 0170 */
+ 		}
+ 	}
+ 	break;
