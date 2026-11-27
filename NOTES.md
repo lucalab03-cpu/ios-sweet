@@ -1889,3 +1889,14 @@ turns out to be Metal's.
   per-draw overhead in eagl/Mesa, to profile.
 - fix13: shots only in frames with >= glshot_draws (40) draws, every 8 s from 45 s; whole picture at 1/4 + left 360
   columns at full size; zlib level 1, size chosen first. mesa-ios 46052336042, bundle 46052945621.
+
+### 2026-11-27 21:15 — fix13 observed: the composed frames are clean
+- 9 pictures in motion (frames 348-2155, 11:55-11:56: widgets page, Settings list, home pages, App Library), whole
+  picture + left 360 columns at full/half size: **no bars, widget content present** in every one. Shot cost now fine.
+- So the bars arise after composition: 0156 shadow (matched the display in fix12) -> kernel memcpy into the panel
+  memory at 0x78200000 (cached map, cleaned per frame, 0148) -> OVL L0 scanout. The kernel's "vsync" is a timer
+  (IOTimerEventSource), not the panel's: the panel copy (~1.3 ms) runs at any point of the scan -> **tearing** during
+  motion (an edge moving sideways shows steps = bars at the moving widget's left edge). Fix direction: tear-free
+  present -- copy synchronized to the real scanout (DSI/OVL frame-done or line counter) or OVL L0 page flip between two
+  frames inside the bootloader fb region (if it holds two). Same work is needed for 90 Hz. To confirm with a
+  slow-motion video of the bars.
