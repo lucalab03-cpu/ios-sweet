@@ -903,8 +903,23 @@ shadow_draw(struct eagl *e, struct image *image)
 	for (int i = 4; i < 8; i++) {
 		swapped |= shadow_info[i] == id;
 	}
-	if (!swapped) {
+	/*
+	 * 2026-11-27 (fix12): a surface that has a shadow has it named to the kernel, which copies that shadow to the panel
+	 * at every swap of the surface. If the surface had fallen out of the kernel's list of the last four swapped (it
+	 * keeps four, one in, one out) its shadow was not drawn again, and the panel was given an older frame -- seen in
+	 * fix11's pictures: the display's picture and its shadow, taken one after the other, showed the widgets in two
+	 * different places. So a surface with a shadow has it drawn every time; the list only decides who gets one.
+	 */
+	if (!swapped && image->shadow == NULL) {
 		return;
+	}
+	if (!swapped) {
+		static unsigned unlisted;
+
+		if (unlisted++ < 8) {
+			say("redwood-gl: surface %u is not among the last four swapped (%u %u %u %u): its shadow drawn anyway\n", id,
+			    shadow_info[4], shadow_info[5], shadow_info[6], shadow_info[7]);
+		}
 	}
 	if (image->shadow == NULL) {
 		image->shadow = shadow_surface(pw, ph);
