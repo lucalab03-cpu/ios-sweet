@@ -1227,6 +1227,8 @@ frame_begin(struct eagl *e)
 static void frame_functions(struct eagl *e);
 static void (*sweet_frame_mark)(void);   /* ios-sweet: sweet_drm_frame_mark() of the GPU shim inside libOSMesa */
 static void shots_at_frame_end(struct eagl *e);
+static struct image *timed_shot_due(struct eagl *e);
+static void timed_shot_take(struct eagl *e, struct image *display);
 static void
 frame_end(struct eagl *e, bool finished)
 {
@@ -1267,6 +1269,7 @@ frame_end(struct eagl *e, bool finished)
 		}
 	}
 	waited = now_us();
+	struct image *timed = timed_shot_due(e);       /* (glshot_every=SECONDS: taken below, once it is out) */
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn) {
 			copied += !e->images[i].shared && !e->images[i].private_target;
@@ -1275,6 +1278,9 @@ frame_end(struct eagl *e, bool finished)
 				show_texture(e, &e->images[i]);
 			}
 		}
+	}
+	if (timed != NULL) {
+		timed_shot_take(e, timed);
 	}
 	if (!e->in_frame) {
 		return;
@@ -1537,7 +1543,7 @@ peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
  * in base64. Read through peek_bound() (a copy by the GPU first: no unpacking of a surface's memory).
  */
 #define SHOT_TEXTURES   8
-#define SHOT_MAX        12
+#define SHOT_MAX        32
 #define SHOT_BYTES      (800u << 10)    /* of base64 at most: what the outbox keeps of a file is its last 1 MB */
 static int trace_shot;
 static unsigned shots_taken;
@@ -1605,7 +1611,7 @@ shot_take(struct eagl *e, const char *what, GLuint texture, GLint x, GLint y, GL
 			packed_size = 0;
 			break;
 		}
-		if ((packed_size + 2) / 3 * 4 <= SHOT_BYTES) {
+		if ((packed_size + 2) / 3 * 4 <= (shot_every != 0 ? shot_budget : SHOT_BYTES)) {
 			break;
 		}
 	}
@@ -1654,6 +1660,49 @@ shot_note(GLuint texture, GLint width, GLint height)
 	shot_want[shot_wanted].height = height;
 	shot_want[shot_wanted].taken = false;
 	shot_wanted++;
+}
+
+/*
+ * glshot_every=SECONDS (glshot_from=SECONDS, 60 if not given): from that long after the window server started, at
+ * most every SECONDS, the display's picture as drawn, and the panel-sized copy of it the display is given (0156's
+ * shadow), once that copy is made; up to SHOT_MAX pictures in all. For what shows only now and then: the status bar's
+ * clock in each says when it was.
+ */
+static uint64_t shot_every, shot_next;
+static unsigned shot_budget = 500u << 10;      /* (base64 bytes a picture: shot_take, here smaller than SHOT_BYTES) */
+
+static struct image *
+timed_shot_due(struct eagl *e)
+{
+	struct image *display = NULL;
+	uint64_t now;
+
+	if (shot_every == 0 || shots_taken + 2 > SHOT_MAX || !e->in_frame || (now = now_us()) < shot_next) {
+		return NULL;
+	}
+	for (unsigned i = 0; i < e->image_count; i++) {
+		struct image *image = &e->images[i];
+
+		if (image->target && image->drawn && (display == NULL ||
+		    (uint64_t)image->width * (uint64_t)image->height > (uint64_t)display->width * (uint64_t)display->height)) {
+			display = image;
+		}
+	}
+	if (display != NULL && display->width >= 600) {
+		shot_next = now + shot_every;
+		return display;
+	}
+	return NULL;
+}
+
+static void
+timed_shot_take(struct eagl *e, struct image *display)
+{
+	shot_take(e, "the display's picture (glshot_every)", display->texture, 0, 0, display->width, display->height);
+	if (display->shadow_texture != 0 && shadow_info[0] != 0) {
+		shot_take(e, "the panel's copy of it (0156 shadow)", display->shadow_texture, 0, 0, (GLsizei)shadow_info[0],
+		    (GLsizei)shadow_info[1]);
+	}
 }
 
 /* (frame_end) the pictures of a traced frame */
@@ -4746,6 +4795,13 @@ install(void)
 		trace_lit = strstr(arguments, "gltrace_lit=1") != NULL;
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
 		trace_shot = strstr(arguments, "gltrace_shot=1") != NULL;
+		if ((argument = strstr(arguments, "glshot_every=")) != NULL) {
+			shot_every = strtoull(argument + 13, NULL, 10) * 1000000ull;
+			shot_next = now_us() + 60000000ull;
+			if ((argument = strstr(arguments, "glshot_from=")) != NULL) {
+				shot_next = now_us() + strtoull(argument + 12, NULL, 10) * 1000000ull;
+			}
+		}
 		trace_shaders = strstr(arguments, "gltrace_shaders=1") != NULL;
 		function_numbers = strstr(arguments, "glnumbers=1") != NULL;
 		trace_uniforms_on = strstr(arguments, "gltrace_uniforms=1") != NULL;
