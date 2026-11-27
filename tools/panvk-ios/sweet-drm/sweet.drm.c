@@ -1199,7 +1199,17 @@ sweet_drm_host_gpu_only(void *address)
 	for (unsigned j = 0, seen = 0; j < HOSTS && seen < host_count; j++) {
 		if (hosts[j].address != NULL) {
 			seen++;
-			hosts[j].gpu_only |= hosts[j].address == address;
+			if (hosts[j].address == address && !hosts[j].gpu_only) {
+				/*
+				 * fix19: cleaned once, now. A new surface is zeroed by a processor before CoreAnimation draws into
+				 * it: dirty lines of those zeros stayed in the caches (fix14 stopped cleaning such surfaces) and
+				 * were written back at any later time over what the GPU had drawn -- flashing squares, icons
+				 * repeated along their way, a small home screen in a corner (user, 2026-11-27 22:46).
+				 */
+				sys_dcache_flush(hosts[j].address, (size_t)hosts[j].size);
+				host_flushed_bytes += hosts[j].size;
+				hosts[j].gpu_only = 1;
+			}
 		}
 	}
 	pthread_mutex_unlock(&host_lock);
@@ -1218,6 +1228,10 @@ host_note(uint32_t handle, void *address, uint64_t size)
 			hosts[i].gpu_only = 0;
 			for (unsigned k = 0; k < gpu_only_count; k++) {
 				hosts[i].gpu_only |= gpu_only_at[k] == address;
+			}
+			if (hosts[i].gpu_only) {
+				sys_dcache_flush(address, (size_t)size);        /* (fix19: once, as it comes) */
+				host_flushed_bytes += size;
 			}
 			host_count++;
 			break;
