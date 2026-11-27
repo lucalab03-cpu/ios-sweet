@@ -1772,3 +1772,12 @@ turns out to be Metal's.
 - payload-aj = payload-ai + sweetscaler=0 (sweetiolog removed for length, 577 chars): the test of the hypothesis.
 - **0167**: completion sent to the wake port (sendAsyncResult64) for async requests, logged ("asynchronous ...
   completion sent").
+- payload-aj observed (scaler off): **About opens** (the hang was the scaler). But backboardd crashed twice (SIGSEGV,
+  far 0x255928004 inside a read-only mapping 0x24a000000-0x280000000, pc in a large dylib of ours = Mesa/eagl), when
+  the user pressed power on the lock screen and when opening Settings after closing apps from the switcher; SpringBoard
+  then ends with "backboardd respawn" (looked like a SpringBoard restart). Reading: without the scaler CA falls back to
+  drawing into the client's (SpringBoard's) snapshot surface, mapped read-only in backboardd -> write fault. Same path
+  as the black render-server snapshot. Way forward: scaler on + 0167 (xnu 46022059947); the write into read-only
+  client surfaces is a GL-path item of its own.
+- Red translucent rectangle over the clock came back at boot this time (without glstats/glcensus): intermittent, not
+  those flags.
