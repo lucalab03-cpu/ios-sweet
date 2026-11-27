@@ -40,6 +40,19 @@
 
 #include "xf86drm.h"
 
+/* fix26: what libsweet-gl says is being drawn, written down with each SUBMIT while it is not empty */
+static char chain_tag[160];
+__attribute__((visibility("default"))) void sweet_drm_chain_tag(const char *tag);
+__attribute__((visibility("default"))) void
+sweet_drm_chain_tag(const char *tag)
+{
+	if (tag == NULL) {
+		chain_tag[0] = 0;
+	} else {
+		snprintf(chain_tag, sizeof(chain_tag), "%s", tag);
+	}
+}
+
 /* OpenGL ES self-coherency (below, at the host imports) */
 static int gl_self_coherent;
 static void hosts_flush(const uint32_t *handles, uint32_t count);
@@ -881,6 +894,22 @@ drmIoctl(int fd, unsigned long request, void *arg)
 	if (number == 0x48 && IOCPARM_LEN(request) >= 12) {
 		((uint32_t *)arg)[2] = 1;
 		return 0;
+	}
+	if (number == PANFROST_SUBMIT_NR && chain_tag[0] != 0) {
+		/* fix26: while libsweet-gl traces, which framebuffer each chain draws into (kernel 0172 names the slow ones) */
+		static FILE *chains;
+		uint64_t jc;
+		uint32_t req;
+
+		memcpy(&jc, arg, sizeof(jc));
+		memcpy(&req, (const uint8_t *)arg + 36, sizeof(req));
+		if (chains == NULL) {
+			chains = fopen("/var/tmp/sweetdrm-chains.log", "a");
+		}
+		if (chains != NULL) {
+			fprintf(chains, "jc %#llx %s %s\n", (unsigned long long)jc, (req & 1) ? "fragment" : "vertex/tiler", chain_tag);
+			fflush(chains);
+		}
 	}
 	if (gl_self_coherent && number == PANFROST_SUBMIT_NR) {
 		/* struct drm_panfrost_submit: u64 bo_handles at 24, u32 bo_handle_count at 32 (fix15) */

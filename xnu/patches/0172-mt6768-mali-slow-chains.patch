@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -744,6 +744,19 @@ finish_job(uint32_t s, uint32_t status, uint64_t now)
+ 	struct queued_job *job = &q->jobs[q->head];
+ 	uint64_t took = now - job->started;
+ 
++	/*
++	 * Patch 0172: which chains are slow. fix25's widgets page had the GPU busy all the time with chains of up to 32 ms;
++	 * the chain's address names it, and libsweet-gl's shim writes down, while a trace runs, which framebuffer each
++	 * fragment chain it sends draws into (/var/tmp/sweetdrm-chains.log). 200 lines a boot.
++	 */
++	{
++		static uint32_t told;
++
++		if (abs_to_us(took) >= 8000 && told < 200) {
++			told++;
++			printf("SWEET MALI: chain %#llx on slot %u took %llu us\n", job->chain, s, abs_to_us(took));
++		}
++	}
+ 	if (slots[s ^ 1].running && qstats.bothSince != 0) {
+ 		qstats.both += now - MAX(qstats.bothSince, job->started);
+ 		qstats.bothSince = 0;

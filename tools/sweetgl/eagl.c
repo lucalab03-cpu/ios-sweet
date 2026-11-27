@@ -1510,6 +1510,36 @@ count_spans(struct eagl *e, GLenum mode, GLsizei count)
 	}
 }
 
+/* fix26: the shim's chain tag (sweet_drm_chain_tag): while a trace runs, what each SUBMIT draws into */
+static void (*chain_tag_fn)(const char *);
+static bool chain_tagged;
+
+static void
+chain_tag(struct eagl *e)
+{
+	static bool looked;
+	char tag[160];
+
+	if (!looked) {
+		looked = true;
+		chain_tag_fn = (void (*)(const char *))dlsym(RTLD_DEFAULT, "sweet_drm_chain_tag");
+	}
+	if (chain_tag_fn == NULL) {
+		return;
+	}
+	if (!trace_placing) {
+		if (chain_tagged) {
+			chain_tag_fn(NULL);
+			chain_tagged = false;
+		}
+		return;
+	}
+	snprintf(tag, sizeof(tag), "frame %u draw %u into %u (texture %u) program %u", e->frames + 1, e->draws + 1, e->framebuffer,
+	    e->colour, e->program);
+	chain_tag_fn(tag);
+	chain_tagged = true;
+}
+
 /* Something is about to be drawn into the framebuffer that is bound. */
 static void
 drawing(struct eagl *e)
@@ -1517,6 +1547,7 @@ drawing(struct eagl *e)
 	struct image *image;
 
 	frame_begin(e);
+	chain_tag(e);
 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
 		image->drawn = image->painted = true;
 		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
