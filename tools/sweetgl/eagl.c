@@ -1563,6 +1563,7 @@ peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
 static int trace_shot;
 static unsigned shots_taken;
 static uint64_t shot_every, shot_next;          /* glshot_every= (timed_shot_due) */
+static unsigned shot_draws = 40;                   /* glshot_draws=: a frame with at least that many draws */
 static unsigned shot_budget = 500u << 10;      /* (base64 bytes a picture when timed: smaller than SHOT_BYTES) */
 static struct { GLuint texture; GLsizei width, height; bool taken; } shot_want[SHOT_TEXTURES];
 static unsigned shot_wanted;
@@ -1692,7 +1693,8 @@ timed_shot_due(struct eagl *e)
 	struct image *display = NULL;
 	uint64_t now;
 
-	if (shot_every == 0 || shots_taken + 2 > SHOT_MAX || !e->in_frame || (now = now_us()) < shot_next) {
+	if (shot_every == 0 || shots_taken + 2 > SHOT_MAX || !e->in_frame || e->draws < shot_draws ||
+	    (now = now_us()) < shot_next) {
 		return NULL;
 	}
 	for (unsigned i = 0; i < e->image_count; i++) {
@@ -1713,11 +1715,13 @@ timed_shot_due(struct eagl *e)
 static void
 timed_shot_take(struct eagl *e, struct image *display)
 {
+	/* fix13: only frames with motion in them (glshot_draws=, 40 draws by default; fix12's went to a still screen), the
+	 * whole picture small and its left part at full size (the bars are at the left edge of what moves) */
+	shot_budget = 300u << 10;
 	shot_take(e, "the display's picture (glshot_every)", display->texture, 0, 0, display->width, display->height);
-	if (display->shadow_texture != 0 && shadow_info[0] != 0) {
-		shot_take(e, "the panel's copy of it (0156 shadow)", display->shadow_texture, 0, 0, (GLsizei)shadow_info[0],
-		    (GLsizei)shadow_info[1]);
-	}
+	shot_budget = 900u << 10;
+	shot_take(e, "the display's picture, its left part (glshot_every)", display->texture, 0, 0,
+	    display->width > 360 ? 360 : display->width, display->height);
 }
 
 /* (frame_end) the pictures of a traced frame */
@@ -4813,6 +4817,9 @@ install(void)
 		if ((argument = strstr(arguments, "glshot_every=")) != NULL) {
 			shot_every = strtoull(argument + 13, NULL, 10) * 1000000ull;
 			shot_next = now_us() + 60000000ull;
+			if ((argument = strstr(arguments, "glshot_draws=")) != NULL) {
+				shot_draws = (unsigned)strtoul(argument + 13, NULL, 10);
+			}
 			if ((argument = strstr(arguments, "glshot_from=")) != NULL) {
 				shot_next = now_us() + strtoull(argument + 12, NULL, 10) * 1000000ull;
 			}
