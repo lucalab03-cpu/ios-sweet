@@ -3793,8 +3793,12 @@ solid_note_program(GLuint program)
 			continue;
 		}
 		glGetShaderSource(shaders[i], length + 1, NULL, source);
-		bool plain = strstr(source, "gl_FragData[0] = color;") != NULL && strstr(source, "texture") == NULL &&
-		    strstr(source, "sampler") == NULL;
+		/*
+		 * (fix22) the body of CoreAnimation's main and nothing else: the source as linked also has declarations
+		 * common to every program (samplers among them) and our wrapper after it (fix21's log: programs 3, 50, 70)
+		 */
+		const char *body = strstr(source, "void main(void) {");
+		bool plain = body != NULL && strncmp(body, "void main(void) {\n  gl_FragData[0] = color;\n}", 45) == 0;
 		static unsigned told;
 
 		if (plain) {
