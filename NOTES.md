@@ -1806,3 +1806,14 @@ turns out to be Metal's.
   in SpringBoard). Power off (0165) still untested.
 - drop-fix5 (glargs unchanged on the phone, no restart line): `sweetstack 60 configd Preferences` -> what configd
   (InterfaceNamer) waits on while About hangs.
+
+### 2026-11-27 17:10 — power off works (0165); About's real cause: no IONetworkStack (0168)
+- Round fix5: **Settings > Shut Down > slide: the phone powered off** (0165 PSCI SYSTEM_OFF confirmed).
+- sweetstack of configd while About hangs: every thread idle in its run loop, "InterfaceNamer thread" included.
+  configd-1405 Plugins/InterfaceNamer/ifnamer.c: quietCallback returns "No network stack object" while S_connect is
+  NULL (IONetworkStack never opened); only the stack timer (WaitStackTimeout 300 s) posts "*TIMEOUT*", which is what
+  __wait_for_IOKit_to_quiesce (SCNetworkInterface.c) waits for besides *QUIET*/*COMPLETE*. Our kernel has no
+  IONetworkingFamily (only lo0/gif0/stf0/utun*). So **About opens only ~5 min after boot**; the "scaler" correlation
+  was timing (user opened About later in au/aj). pixel3-ios 0173 says the same: wifid and SpringBoard wait behind it.
+- **0168**: IONetworkStack stand-in (pixel3 MiniIONetworkStack.cpp, from HackiOS, APSL; S7 0314 has it too),
+  matched from KernelConfigTables on IOResources; logs "SWEET: IONetworkStack registered" and who opens it.

@@ -1,0 +1,137 @@
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -20,6 +20,7 @@
+ iokit/Kernel/arm/SweetAccel.cpp                                      optional iokitcpp
+ iokit/Kernel/arm/SweetAMFI.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/SweetM2Scaler.cpp                               optional iokitcpp
++iokit/Kernel/arm/SweetNetworkStack.cpp                           optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -61,6 +61,11 @@
+     "     'IOClass'         = AppleM2ScalerCSCDriver;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = AppleM2ScalerCSCDriver;"
++    "   },"
++    "   {"
++    "     'IOClass'         = IONetworkStack;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IONetworkStack;"
+     "   },"
+     "   {"
+     "     'IOClass'         = IOWatchdog;"
+diff --git a/iokit/Kernel/arm/SweetNetworkStack.cpp b/iokit/Kernel/arm/SweetNetworkStack.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetNetworkStack.cpp
+@@ -0,0 +1,106 @@
++/*
++ * ios-sweet 0168 (2026-11-27): IONetworkStack stand-in, from pixel3-ios 0173 MiniIONetworkStack.cpp (itself after
++ * HackiOS's iokit/Kernel/MiniIONetworkStack.cpp, APSL 2.0; the Galaxy S7 port carries the same in its 0314).
++ * Why here: Settings > General > About hangs in _SCNetworkInterfaceCopyAllWithPreferences -> SCDynamicStoreNotifyWait
++ * (sweetstack, round fix3/fix5) while configd's InterfaceNamer sits idle: with no IONetworkStack its quietCallback
++ * says "No network stack object" and publishes nothing; only the 300 s stack timer ("*TIMEOUT*") lets the callers go
++ * (configd-1405 Plugins/InterfaceNamer/ifnamer.c). Matched from KernelConfigTables (IOResources), not started by hand.
++ * Their header follows.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++/*
++ * MiniIONetworkStack: a stand-in for IONetworkStack of Apple's IONetworkingFamily, as seen by
++ * configd's interface namer.
++ *
++ * The real one gives the BSD names (en0, en1, ...) to the IONetworkInterface objects of the
++ * drivers, when the interface namer asks. Here interfaces are made with the BSD interface KPI
++ * (bsd/dev/redwood_net.c) and are born with their names, so there is never anything to name.
++ * But the namer wants this object all the same: until it has opened it, it does not say in
++ * configd's store that the registry has gone quiet (the key Plugin:InterfaceNamer, "*QUIET*"),
++ * and gives up only after five minutes ("*TIMEOUT*"). SystemConfiguration's
++ * SCNetworkInterfaceCopyAll() waits for one of the two, and with it whoever asks for the list of
++ * interfaces: wifid as soon as it has a device, and behind wifid SpringBoard.
++ *
++ * So: the service, a user client that can be opened, and a refusal of the naming request.
++ */
++
++#include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <sys/systm.h>
++#include <sys/proc.h>
++
++class IONetworkStack : public IOService
++{
++	OSDeclareDefaultStructors(IONetworkStack);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IONetworkStack, IOService);
++
++bool
++IONetworkStack::start(IOService * provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "IONetworkStackUserClient");
++	setName("IONetworkStack");
++	registerService();
++	IOLog("SWEET: IONetworkStack registered (stand-in, for configd's interface namer)\n");
++	return true;
++}
++
++class IONetworkStackUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(IONetworkStackUserClient);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IONetworkStackUserClient, IOUserClient);
++
++bool
++IONetworkStackUserClient::start(IOService * provider)
++{
++	char who[32] = "?";
++
++	if (!IOUserClient::start(provider)) {
++		return false;
++	}
++	/* whether the registry is quiet at this moment is what the namer goes on to ask */
++	proc_selfname(who, sizeof(who));
++	IOLog("MiniIONetworkStack: opened by %s; the registry's busy state is %u\n", who,
++	    (unsigned) IOService::getServiceRoot()->getBusyState());
++	return true;
++}
++
++IOReturn
++IONetworkStackUserClient::clientClose(void)
++{
++	if (!isInactive()) {
++		terminate();
++	}
++	return kIOReturnSuccess;
++}
++
++/* "Name this interface" (a dictionary: IONetworkStackUserCommand, IOPathMatch, IOInterfaceUnit). */
++IOReturn
++IONetworkStackUserClient::setProperties(OSObject * properties)
++{
++	static unsigned said;
++
++	if (said++ < 4) {
++		IOLog("MiniIONetworkStack: asked to name an interface: there are none of that kind\n");
++	}
++	return kIOReturnUnsupported;
++}
++#endif /* SWEET */
