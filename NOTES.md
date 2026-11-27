@@ -1799,3 +1799,10 @@ turns out to be Metal's.
   (race with the dropbox install; later launches read the new one).
 - drop-fix4: root.cmd `restart backboardd.orig /var/sweet/glargs` (against the race) + `sweetbusy
   /var/tmp/sweetbusy.txt 60` (busy services by name at 60 and 120 s) + the round-ao glargs.
+- Round fix4 (2nd boot, no restart): sweetbusy at 60/120 s: **IOKit quiet, 0 busy** -> the "scaler keeps IOKit busy"
+  idea is wrong. About still hangs (user). Table: About opens without the scaler (au: payload-ae; aj: sweetscaler=0),
+  hangs with it (ai, fix2, ak, fix3, fix4). Settings > Shut Down showed the slider once (Cancel -> passcode field),
+  not the second time; power+volume chords reach iOS (overlapping downs logged) but no slider: new item (button chords
+  in SpringBoard). Power off (0165) still untested.
+- drop-fix5 (glargs unchanged on the phone, no restart line): `sweetstack 60 configd Preferences` -> what configd
+  (InterfaceNamer) waits on while About hangs.
