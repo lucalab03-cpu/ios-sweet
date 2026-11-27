@@ -1,4 +1,4 @@
-# ios-sweet: handoff for a new chat (2026-11-27)
+# ios-sweet: handoff for a new chat (2026-11-28)
 
 Give this file to a new Claude chat with the repo attached (github.com/lucalab03-cpu/ios-sweet). The long history is in
 `NOTES.md` (read the last sections first); rules for agents in `AGENTS.md`.
@@ -8,7 +8,8 @@ Give this file to a new Claude chat with the repo attached (github.com/lucalab03
   720x1604 panel, eMMC. Native XNU (xnu-8796) booted from Android through a small shim; drivers are kernel patches
   in `xnu/patches/`. The phone presents itself as iPhone X (iPhone10,3).
 - **Goal of the user:** a phone for every day, smooth like a real iPhone; later iOS 27; in the end a flashable zip like
-  an Android ROM. Current focus: **the GPU at 60 fps** and, since round am, **the black wallpaper** (lock and home).
+  an Android ROM. Current focus: **the GPU path**, in the order of NOTES.md's "GPU PLAN, ORDER BY IMPORTANCE"
+  (2026-11-27); the stock wallpaper is on screen since round aw, and the work is now on fluidity (frame times).
 - **User:** speaks Italian (answer in Italian), not a developer; wants honesty about what to expect, few boots, few
   tests, straight to the point. Decide from the logs' numbers, not from impressions; verify causes in source code
   before writing a fix; build-check carefully (CI failures cost a round).
@@ -25,41 +26,53 @@ Give this file to a new Claude chat with the repo attached (github.com/lucalab03
 - User's rule (2026-11-26): everything that works on an iPhone must work in the end; switching a service off is only
   temporary. Keep NOTES.md's table "Services switched off in the iOS root" current (how, why, back on when).
 - User's rule: read the references (other ports) first, before working out a cause alone.
+- User's rule (2026-11-27): everything that belongs to the Metal phase is done, all of it (NOTES.md "METAL PHASE:
+  EVERYTHING", items M1-M12); an item closes only with a log/photo showing it working.
 - GitHub artifacts cannot be downloaded from the agent's sandbox: **the user downloads the bundle zip from GitHub
   Actions and uploads it** to the chat.
 - Cancel push-triggered CI runs one by one (a bulk cancel loop was refused). Push first, then dispatch.
+- **Every drop gets a name never used before** (drop-fixN, then a new series), and the user's commands start with
+  `rm -rf drop-X` (2026-11-27: reused names merged old files into the drop; rounds ag/ah/ai ran stale builds).
+- GL trace: never read pixels straight from a surface-memory (BGRA) texture (`trace_pixels` -> glReadPixels crashed
+  backboardd in rounds am/aj/ak); readback only through eagl's `peek_pixels` GPU copy (fix9, safe), and a gltrace
+  always with `gltrace_place` (a `gltrace_at` restarts with every backboardd launch).
 
 ## How a round works
 1. Build on CI (`gh api repos/lucalab03-cpu/ios-sweet/actions/workflows/X.yml/dispatches -f ref=main ...`):
    - `xnu.yml` (kernel, `-f 'inputs[runner]=macos-15-intel'`), `mesa-ios.yml` (Mesa 25.0.7 Gallium Panfrost OSMesa +
      libsweet-gl + backboardd-wrap + sweetinject), `metal2.yml` (SweetMTLDriver / metal2vulkan bridge),
      `panvk-ios.yml` (PanVK, Mesa 26.2.7), `pbwrap.yml` (sweet-boot and the phone-side tools: sweetroot, sweetjob,
-     sweetwk, sweetls, sweetstack, sweetlogcatch...).
+     sweetwk, sweetls, sweetstack (incl. `prof`), sweetbusy, sweetcaprobe, sweetlogcatch...), `heic.yml` (sweetheic:
+     libde265 1.0.15 + libheif 1.19.5, LGPL, built from source).
    - `bundle.yml` inputs: `xnu_run panvk_run metal2_run pbwrap_run mesa_run name` -> artifact `sweet-bundle-NAME`.
 2. User uploads the bundle zip. Agent makes:
    - **payload** (only if the kernel, boot-args or ADT change):
      `python3 tools/repayload.py OLD.bin KERNEL NEW.bin [--expect TEXT] [--set name=value] [--set name=]
      [--adt-str /PATH:PROP=TEXT] [--adt-bytes /PATH:PROP=HEX]` (keeps ADT + boot-args; `--set name=` takes a
-     boot-arg out; the ADT options set or add a property).
-   - **drop**: bundle `drop/` + `var/sweet/gl` (enables GL) + `var/sweet/glargs` + `var/sweet/root.cmd`, zipped
-     (plus per-round files such as `var/sweet/outbox.list`, `usr/local/etc/sweet-boot.list`, `sym-*.in`).
+     boot-arg out; the ADT options set or add a property). Boot-args are length-limited (~577 chars seen).
+   - **drop** (new name every time): bundle `drop/` + `var/sweet/gl` (enables GL) + `var/sweet/glargs` +
+     `var/sweet/root.cmd`, zipped (plus per-round files such as `var/sweet/outbox.list`,
+     `usr/local/etc/sweet-boot.list`, `sym-*.in`).
 3. User, on the PC with the phone in Android/adb:
    ```
+   rm -rf drop-X
    adb push payload-X.bin /data/local/tmp/
    unzip -o drop-X.zip -d drop-X
    python3 pack-dropbox.py dropbox.map.json drop-X
-   adb shell "echo 0 > /proc/gpufreqv2/fix_target_opp_index"
    adb shell "sh /data/local/tmp/go-ios.sh payload-X.bin"
    ```
-   The drop is installed after backboardd has started. Since round an sweetroot restarts backboardd.orig when glargs
-   is newer (`restart NAME FILE`), so a GL change needs one boot; launchd.plist changes (sweetjob remove/env/log)
-   take effect from the next boot -> **two boots** for those.
+   The GPU OPP line (`echo 0 > /proc/gpufreqv2/fix_target_opp_index`) goes into the phone's go-ios.sh (user's
+   step, not in git; until then run it by hand). Since fix9/fix10 backboardd-wrap waits (max 600 s) for sweet-boot
+   to apply a new dropbox generation (`/var/tmp/sweetboot.ready`), so **one boot a drop** for GL changes;
+   launchd.plist changes (sweetjob remove/env/log) still take effect from the next boot.
 4. User sends `fetchNNN.txt` (collected `/var/tmp/sweet*` logs) and `log-area.bin` (kernel log: u64 write pointer at
    offset 16, text from offset 4096). Useful: `SWEET FB: in N ms: N swaps ... copy N us ... GPU-scaled N`, `CRASH`
    lines, `PRF` profiler lines (symbolise libOSMesa/libsweet-gl with llvm-nm of the bundle's dylibs, kernel with nm of
    `kernel.development.sweet`; `PRF KC` lines = interrupted kernel frames, 0161), `sweetgl.log` (libsweet-gl, incl.
-   its crash recorder and glstats/glcensus/gltrace output), `sweetca.log` (CoreAnimation hooks), `sweetls.log`,
-   sweetstack's stacks, and files named in `/var/sweet/outbox.list` (last 1 MB each, e.g. a whole boot's launchd.log).
+   its crash recorder, frame lines with percentiles and KB cleaned, glstats/glcensus/gltrace output), `sweetca.log`
+   (CoreAnimation hooks), `sweetls.log`, sweetstack's stacks / `sweetstack prof` profiles (names from the phone;
+   shared-cache symbols are <redacted> on this build), `/var/tmp/sweetshot-NN.txt` pictures (decoder
+   `tools/sweetshot/sweetshot.py`), and files named in `/var/sweet/outbox.list` (last 1 MB each).
 - Mesa source can be printed from CI: `mesa-src.yml` (helper script `mesasrc.sh 'cmd' 25.0.7`).
 
 ## Graphics stack today
@@ -68,93 +81,124 @@ Give this file to a new Claude chat with the repo attached (github.com/lucalab03
   `DYLD_INSERT_LIBRARIES` into the untouched `backboardd.orig` by `tools/inject/backboardd-wrap.c` when
   `/var/sweet/gl` exists (two crashes in a row -> no library). Apps' Metal: SweetMTLDriver -> metal2vulkan -> PanVK.
 - **CoreAnimation function hooks** (`tools/sweetgl/ca_hooks.c`, from the Galaxy S7 port wardevsa/ios-a5xelte, MIT;
-  QuartzCore 20H392 addresses from pixel3-ios; round ao): eagl now draws CA's functions (vibrancy, colour matrices:
+  QuartzCore 20H392 addresses from pixel3-ios; round ao): eagl draws CA's functions (vibrancy, colour matrices:
   20 c4p, 28 ds8, 45 vcm, 53 hom) with their programs; 61 edr / 66 lub not drawn (neutral). `glhooks=0` turns it off,
-  `glsb3=1` gives function 40 a shader. This removed the red lock-screen veil and brought back the CC glyphs.
+  `glsb3=1` gives function 40 a shader. A vcm draw without its numbers is no longer drawn as a picture (the
+  intermittent red rectangle over the clock; `glvcmplain=1` = as before; not seen since, round fix6).
+- **Presenting to the panel**: 0156 GPU-scaled shadows (828x1792 -> 720x1604), now **two shadows a surface in turn**
+  (fix14: the GPU had redrawn the shadow the kernel was still copying = the left-edge bars, gone), a shadowed surface
+  has its shadow drawn every time (fix12); the kernel copies into the panel after disp_ovl0's frame done (0169,
+  `sweetfb_tearfree=0` off). **The panel really runs at 90 Hz** (0169: one frame done every 11007 us); CA is still
+  paced by a 60 Hz timer unless 0171's `sweetfb_vsync_div` (1 = 90 Hz, 2 = 45 Hz) is set.
+- **Cache maintenance in the shim** (sweet-drm): CA's own 'BGRA' targets are GPU-only, not cleaned every frame (fix14,
+  `glgpuonly=0` off), but cleaned once when imported (fix19, against stale zero lines); other imports cleaned only if
+  named in a SUBMIT's BO list, once a frame (fix15).
+- **Draw-cost work in eagl**: fix20-22 CA's one-colour full-viewport draws (program body `gl_FragData[0] = color;`,
+  e.g. programs 3/50/70) become scissored glClears (`glsolid=0` off; ~2 a frame); fix25 every draw into a
+  display-sized target (not group draws) gets a scissor of its transformed corners (+3 px, within CA's scissor) so
+  Panfrost's batch bounds, preload and writeback shrink to what is drawn (`glscissorfit=0` off; not yet booted).
 - Kernel patches (graphics and support), latest first:
-  **0163** AppleMobileFileIntegrity IOService (selector 6) + AMFI 0x5f: every cdhash in a trust cache (pixel3-ios
-  0164; registered, nobody has asked selector 6 yet), **0162** boot-arg `sweetenv` adds environment variables to named
-  programs (launchd strips DYLD_/OS_ACTIVITY_ ones), **0161** profiler keeps the interrupted kernel lr/fp chain
-  (`PRF KC`; verified), **0160** accelerator requests answered in the kernel (`sweetacceld=1` forwards to
-  sweetaccel-d again; sweetaccel-d no longer started), **0159** SUBMIT marks imported buffers from a list (was ~1/3
-  of backboardd's kernel time; works), **0158** point ovl0 L0 at the framebuffer when Android's layers are still on
-  at the jump (`sweetovltake=0` off; not exercised yet), **0157** WAIT_BO per buffer (works: Mesa's BO cache hits),
-  **0156** GPU-scaled "shadow" frames (828x1792 -> 720x1604, display copies 1:1; sysctl `sweetmali.fbshadow`),
-  **0154** IOSurfaceWrapClientImage + IOSurfaceAddress wraps (pixel3-ios), **0153** "AMFI" MAC policy (DYLD_INSERT,
-  app extensions), **0151** self-coherent clients.
-- Mesa (`tools/mesa-ios/patch-mesa.py`): 4e `pan_fb_preload.c` padding descriptor overflow fixed (the old backboardd
-  SIGSEGV); **4f** cached BOs keep their mapping (unmapped only in `panfrost_bo_free`). sweet-drm answers MADVISE
-  (0x48) itself.
+  **0171** vsync notifications from the panel's frames done (`sweetfb_vsync_div`, `sweetfb_vsync_us`; default 0 = old
+  60 Hz timer), **0170** CA's render thread bound to a big core (`sweetbig`, `sweetbig_cpu`, default CPU 6; works),
+  **0169** panel copy after disp_ovl0's frame done (works; adds ~11 ms average wait at 60 Hz),
+  **0168** IONetworkStack stand-in (pixel3/HackiOS MiniIONetworkStack; configd's InterfaceNamer no longer waits 300 s:
+  Settings > About opens at once; works), **0167** scaler completion for async transfers (harmless; no request was
+  async), **0166** AppleM2ScalerCSCDriver CPU stand-in (guacamole 0262; `sweetscaler=0` off; SpringBoard uses it),
+  **0165** PSCI power off/restart (`sweethalt=0` off; Settings > Shut Down powers off, confirmed),
+  **0164** IOSurface limits maxima (guacamole 0214: PosterBoard's snapshot surfaces were refused),
+  **0163** AppleMobileFileIntegrity IOService (selector 6) + AMFI 0x5f trust caches, **0162** boot-arg `sweetenv`,
+  **0161** profiler keeps the interrupted kernel lr/fp chain (`PRF KC`), **0160** accelerator requests answered in the
+  kernel, **0159** SUBMIT marks imported buffers from a list, **0158** ovl0 L0 to the framebuffer at the jump (not
+  exercised yet), **0157** WAIT_BO per buffer, **0156** GPU-scaled shadow frames, **0154** IOSurfaceWrapClientImage +
+  IOSurfaceAddress wraps, **0153** "AMFI" MAC policy, **0151** self-coherent clients. 0136's `sweetmaliahead`
+  (chains a client may be ahead of the GPU) is 32 in payload-ao (was 8).
+- Mesa (`tools/mesa-ios/patch-mesa.py`): 4e `pan_fb_preload.c` padding descriptor overflow fixed; **4f** cached BOs
+  keep their mapping. sweet-drm answers MADVISE (0x48) itself.
 - libsweet-gl / eagl: mode 3 with the shim cleaning host imports (`SWEET_GL_SELF_COHERENT`, `sweet_drm_frame_mark`),
-  crash recorder, shadows; big copied surfaces checksummed one eighth of their rows a frame (from the S7 port;
-  `glsums=1` = old way); any remaining 'b3a8'/'w30r' wide-colour target drawn into a private RGBA8 texture (`glwide=0`
-  refuses them). Base glargs `glwait=0 glblit=0`; diagnostics per round: `glstats=1`, `glcensus=1`,
-  `gltrace_draws/frames/place/shaders` (`gltrace_look` crashed backboardd on the display's BGRA surface: do not use).
-- ADT: `/product:artwork-display-gamut = sRGB` since payload-ab (iPhone X's P3 made iOS use BGRA10_XR targets; finding
-  from Jesvi-iOS): no 'b3a8'/'w30r' targets any more. MobileGestalt cache moved aside once (.sweetbak kept).
+  crash recorder, shadows; big copied surfaces checksummed one eighth of their rows a frame (`glsums=1` = old way);
+  wide-colour targets into a private RGBA8 texture (`glwide=0` refuses them). Base glargs
+  `glwait=0 glblit=0 glstats=1 glcensus=1` (glwait=1 glsums=1 tried in fix7: ~35 ms a frame, reverted). Diagnostics:
+  `gltrace_at/frames/place/shaders/uniforms`, `gltrace_look=1` (safe through peek_pixels), `gltrace_shot=1`,
+  `glshot_every=SECONDS` + `glshot_draws=N` (pictures only of frames with >= N draws, zlib level 1),
+  `gltrace_function` (triggered from census_draw, fix24).
+- ADT: `/product:artwork-display-gamut = sRGB` since payload-ab; `/chosen mac-address-wifi0/-bluetooth0/-ethernet0`
+  since payload-ae (without them MobileGestalt/installd crawled and LaunchServices never finished rebuilding).
 - Presented display 828x1792 @2x (`sweetfb_w/h`), 414x896 points; 750x1624 one-to-one was tried (payload-u): black
   lock screen.
 
-## Measured (latest rounds ag-at, 2026-11-26)
-- GL: ~215-220 us of CPU per draw (was ~500 before Mesa 4f); 16.6-18 ms a frame at 76-81 draws, up to 424 swaps/10 s
-  (round aj); 10.3 ms a frame average at 19 draws after 200 frames (round ao). Panel copy ~1.3 ms, all frames
-  GPU-scaled. User (round ao): "seems a stable 60 fps".
-- System CPU: launchd 110% -> 0-9%, mediaserverd 47% -> 0%, vmd gone, idle CPUs 2-12% busy (round al). Causes were
-  vmd spinning (no telephony) and mediaserverd looking up `com.apple.BTAudioHALPlugin.xpc` ~2200 times/s (bluetoothd
-  off). Both switched off (see NOTES.md's services table).
-- Crashes: none in backboardd since round ag; Settings' `sharedMemorySize` crash fixed (metal2); MobileSMS/
-  MobileSlideShow sig 6 (uncaught ObjC exceptions, round aj) not seen in round al.
-- Control Center (round ap): glyphs on the round buttons, Siri's blue aura gone. Still wrong: CC background light
-  grey/white over the black wallpaper (should be dark), white slider fills with diagonal stripes, pull-down animation
-  white; a vertical glitch strip on the left in the app switcher.
-- **Wallpaper still black** (lock and home). Found so far:
-  - iOS 16's wallpapers exist only for 375w-812h/393w-852h/430w-932h @3x; `sweetwk retarget` gave 9 Wallpaper.plist
-    our class 414w-896h@2x~iphone (round an). Not enough alone.
-  - PosterBoard assertion (`!_stateLock_switcherConfiguration`) gone after `sweetwk posterreset` (round ap), but no
-    poster extension is ever launched.
-  - Cause on the Pixel 3 port (same 20H392, "migr5"): LaunchServices built without the system's extension records ->
-    0163 + a database rebuild (sweetls). Round as: sweetls' entitlements OK; `registerPlugin:` hung installd and
-    Settings (removed in at). Round at: the rebuild started (7 plug-ins known, was 1) but did not return in ~9 min;
-    lsd 1-3 % (the S7 saw 125-130 %), SpringBoard stuck (white bar, UI frozen); driverkitd started every 10 s and
-    jetsam-killed (47 times).
-  - **HEIC decode test: 1380x1812, 0 of 2500560 pixels lit** (no Apple HEVC hardware), as on the S7: even with
-    posters back, the stock pictures must be converted to PNG (on the phone).
-  - Likely cause of the slow rebuild (from coreycusick/ios-hotdogg = ios-guacamole/flame tools; not yet verified
-    here): our `/chosen` lacks `mac-address-wifi0/-bluetooth0/-ethernet0`, so MobileGestalt waits 5 s for a Wi-Fi
-    controller on every query and installd asks once per bundle.
-- Safari: last reported in round af (a few seconds to open; WebKit's GPU process on Metal/PanVK); not re-measured.
+## Measured (latest rounds au-fix24, 2026-11-27)
+- **Wallpaper on screen** (round aw, user photos): stock iOS 16 wallpaper on lock and home screen; CC, App Library and
+  widgets blur over it; since fix14 it shows at once at start. Chain: sweetls entitlements, /chosen mac-address-*,
+  LaunchServices rebuilt (round au: "database rebuilt: 1, 128 s", plug-ins 155 -> 413), all 48 stock HEIC pictures
+  converted to PNG on the phone by sweetheic (16/16 in 24 s; ImageIO check 2427437 pixels lit, was 0), PosterBoard
+  store reset. All poster extensions run; only "Colors" (GradientPoster) can be set from the gallery, others black.
+- Still black: gallery / lock-screen editor previews (0164 turned them grey -> black: a surface exists, nothing drawn)
+  and `CARenderServerRenderDisplay` snapshots (1 returned, 64/64 black; backboardd draws them by GL into the client's
+  surface). S7's notes: the gallery needs Metal on iOS 16 (PosterBoard opens AGXAccelerator) -> Metal item.
+- **Left-edge bars gone** (fix14). Not caused by the 1/8-row check, the GPU wait, stale pool buffers or (only)
+  tearing: the composed frames were clean in every picture (fix13); the cause was the shared shadow.
+- GL frame times in motion: ~194-245 us of CPU per draw; busy frames p50 15.5-18.7 ms, p90 27.8-81 ms (fix14/0170
+  rounds); 57 draws ~12-15 ms, 100 draws ~20 ms. User: stutter moving between widgets and apps. fix14's frame lines
+  showed ~200 MB cleaned a frame (~28 SUBMITs a frame) -> fix15.
+- Render thread profile (sweetstack prof, fix17/18, 1500 samples): running ~1/3: QuartzCore ~20%, SUBMIT/WAIT_BO
+  ~17%, surface_changed ~7%; **waiting inside SUBMIT ~12%** (sweetmaliahead=8 hit) -> payload-ao. Earlier (fix13):
+  the shim's DC CIVAC loop was 25% of the thread -> fix14. Render thread on CPU 6 with 0170 (2933/3412 samples).
+- fix20-22: ~2 one-colour draws a frame made clears (750-840 per 10 s); best windows p50 9-11 ms.
+- User: the widgets page is slow even standing still on it. fix24 trace: a widgets-page frame = 141 draws, ~40
+  framebuffer changes; the display's pass resumes ~10 times a frame (each material reads what is under it: CA copies
+  display regions into small FBs, programs 36/38/70/72), each resume preloading and storing all 828x1792 -> fix25.
+- 0169's copy wait: scan wait 10.9 ms average at 60 Hz; payload-an-nt (tearfree off): frame times similar.
+- System: **aggregated at 100% of a CPU the whole boot** -> removed in drop-fix19; axassetsd removed (TTS audio units
+  crash loop gone, round fix6); driverkitd removed (round au). nanotimekitcompaniond respawns every few seconds (user
+  agent; sweetjob handles LaunchDaemons only).
+- Working now: Settings > About at once (0168), power off from Settings (0165), the scaler for SpringBoard (0166:
+  207x448 -> 828x1792 in ~22 ms), home screen with iOS's stock layout and battery widgets.
+- Crash loops left: AegirPoster (Astronomy, NSInvalidArgumentException, ~every 1.5 s; likely no MTLDevice: guess),
+  assetsd (sig 6, Photos), lskdd exit(92) ~1/s (sweetnull'd in payload-af). Not reproduced recently: MobileSMS /
+  MobileSlideShow ObjC exceptions (sweetscan on them since payload-af).
+- Other open items seen: purple "aura" between app-switcher cards; power+volume opens Siri (invisible) instead of the
+  power-off slider, and apps do not open while it is up; fix18 boot showed flashing squares/repeated icons (fixed in
+  fix19's shim, not yet confirmed on the phone); CC slider fills too light with stripes.
+- Safari: last reported in round af; not re-measured.
 
 ## In flight when this was written
-- Round **au** (built, not booted): **payload-ae** = payload-ad (kernel with 0162/0163; payload-ae's kernel rebuilt
-  byte-identical as a check) + `/chosen` mac-address-wifi0/-bluetooth0/-ethernet0 (locally administered
-  02:53:57:45:45:0x, `repayload.py --adt-bytes`). payload-ad's boot-arg changes vs payload-ac: sweetscan out, `sweetprof=backboardd.orig`,
-  `sweetnull=PosterBoard,CollectionsPoster`, `sweetenv=PosterBoard|CollectionsPoster:OS_ACTIVITY_DT_MODE=YES`.
-  Drop from bundle 45908144640 (pbwrap 45908060967): `sweetjob remove com.apple.driverkitd` (from the next boot),
-  sweetstack (named stacks of lsd, sweetls, installd, SpringBoard, driverkitd at 150/300/450 s), sweetls as in round
-  at (no registerPlugin:, 20-minute watchdog). Check: sweetls "database rebuilt: 1" and the plug-in count (the S7
-  went 1 -> 515), lsd CPU during the rebuild, driverkitd not started, SpringBoard not stuck, a poster extension
-  launched in launchd.log.
+- Last payload: **payload-ao** = payload-an (kernel with 0169-0171) + `sweetmaliahead=32`. Payloads an90/an45 (0171 at
+  90/45 Hz) were planned; no result for them is recorded.
+- Bundles of the day's last drops: fix19 (46073409678: shim cleans GPU-only imports once; root.cmd `sweetjob remove
+  com.apple.aggregated`), fix20 (46075636013), fix21 (46076751870), fix22 (46077806339), fix24 (46079312887).
+- **drop-fix25** (b373989, scissor-fit into display-sized targets): mesa 46079795603, **bundle 46080231333
+  (sweet-bundle-fix25)**; not booted yet. To check: frame times on the widgets page against fix24's, and whether
+  fix19 removed the flashing squares (not recorded as confirmed).
+- To do later (user): wallpaper gallery thumbnails grey/black while wallpapers apply fine (Metal item M4/M5).
 
-## Next steps (agreed order)
-1. Wallpaper: read round au; if the rebuild completes, poster extensions and the wallpaper gallery should come back.
-   Then on-phone HEIC -> PNG of the stock wallpapers (software decoder libheif + libde265, widths padded to x8 as the
-   S7 learned; the same decoder could serve Photos). If the rebuild still stalls: sweetstack's stacks say where.
-2. Control Center materials: dark background over the wallpaper, striped slider fills / noise hatching, switcher
-   glitch strip (functions 61 edr / 66 lub are left undrawn; whether they matter is not known).
-3. Cut remaining per-draw CPU in Mesa (~215 us: drmIoctl, u_vbuf, draw validation, a new batch per FBO switch).
-   90 Hz once frames are steadily < 11 ms.
-4. Metal path for apps/Safari: metal2vulkan shadow-texture copies (measured earlier).
-5. Wi-Fi (hakios-mt6768 has a CONNSYS plan for MT6768), audio, haptics, battery (Open Mapple MediaTek drivers); switch
-   the services in NOTES.md's table back on as their hardware works (cellular, Bluetooth, audio, video decode).
-6. Later: flashable zip; iOS 27 (identity iPhone11-class, newer XNU; see Scion's iOS16+27 kernel tree,
-   UniXNU-sheng's Metal on iOS 26/27). The user decided: Mapple USB link not wanted.
+## Next steps (agreed order: NOTES.md "GPU PLAN, ORDER BY IMPORTANCE")
+1. Black previews/snapshots (gallery, lock-screen editor, app-switcher snapshots): per the S7 the gallery is a Metal
+   item (PosterBoard opens AGXAccelerator, never seen in sweetmtl2.log); the render-server snapshot is drawn by eagl
+   into the client's surface (read-only in backboardd) and comes out black: a GL-path item of its own.
+2. (Left-edge strip: done in fix14.)
+3. **Fluidity** (current work): 99% of frames < 16.7 ms in animations. Read fix25 (sweet-bundle-fix25); fewer render-pass restarts, per-draw CPU (~200 us), SUBMIT waits (sweetmaliahead=32), then CA paced from the
+   panel (0171, 90 Hz panel) instead of the 60 Hz timer.
+4. Metal, everyday apps: Messages (M1), Photos + assetsd (M2), Safari (M3).
+5. Metal, every stock app (M11) incl. Maps/Weather/Wallet (M9), camera preview (M7), video presentation (M8).
+6. Control Center: vibrancy, slider stripes, sb3 shadow (CA function 40); purple aura in the switcher.
+7. MPS / Core Image: Photo + Pride wallpapers (M5), photo editing (M6), Astronomy (M4).
+8. Games and third-party apps: OpenGL ES in apps (EAGL), Metal 2/3 (M10).
+9. GPU frequency: (a) OPP line in go-ios.sh (user's step); (b) real DVFS from iOS (MFG PLL + Vgpu + thermal) stays;
+   today a fixed 823 MHz set by Android.
+10. Metal apps' frame times and shader-compile stutter (M12).
+11. 90 Hz (the panel already runs at 90 Hz; frames must be steadily < 11 ms).
+- Outside the GPU list: button chords (power+volume -> slider, not Siri) and Siri's invisible UI; Wi-Fi (hakios-mt6768
+  CONNSYS plan), audio, haptics, battery (Open Mapple); services in NOTES.md's table back on as their hardware works;
+  later flashable zip and iOS 27 (identity iPhone11-class, newer XNU; Scion's iOS16+27 kernel tree, UniXNU-sheng's
+  Metal on iOS 26/27). The user decided: Mapple USB link not wanted.
 
 ## References (cloned locally by the previous chat; re-clone as needed)
 - hakios-mt6768 (same SoC), hakios-a22-5g (MT6768; docs/x6826b-wallpaper.md: gradient-only wallpaper = no HEIC
   decode), Jesvi-iOS / HakiOS (eagl.c origin, inject.c CA hooks for iOS 16.5, display gamut),
   pixel3-ios (same iOS 20H392, built on ios-sweet's SweetSurface: 0154, CAEnableDeepFramebuffer, eagl port,
-  docs/LOG.md "migr5" = our wallpaper symptoms, their 0164 = our 0163),
+  docs/LOG.md "migr5" = our wallpaper symptoms, their 0164 = our 0163, 0173 IONetworkStack, target_carry),
   **wardevsa/ios-a5xelte branch herolte** (Galaxy S7, Mali-T880, iOS 16.7.16: same eagl lineage, ca_hooks.c,
-  hero-run LaunchServices rebuild, wallpapers as PNG), **coreycusick/ios-hotdogg** (ios-guacamole/flame tools:
-  mkadt.py /chosen mac-addresses, `lsreg -r`), open-mapple (MediaTek), nullarc (surface keep cache),
+  hero-run LaunchServices rebuild, wallpapers as PNG, HEROLTE_PROGRESS 18k19/18k21), **coreycusick/ios-hotdogg**
+  (ios-guacamole/flame tools: mkadt.py /chosen mac-addresses, `lsreg -r`, caprobe, 0214 IOSurface maxima, 0262
+  scaler stand-in, MPS notes), open-mapple (MediaTek), nullarc (surface keep cache),
   tracker: hackios.appaiproxy.com (?tab=repos; the Moto G05 page is only ours). Last checked 2026-11-26 18:45 and 2026-11-27 00:05.
