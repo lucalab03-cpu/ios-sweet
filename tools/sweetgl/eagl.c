@@ -1547,6 +1547,8 @@ peek_bound(struct eagl *e, GLint x, GLint y, GLsizei w, GLsizei h, uint8_t *out)
 #define SHOT_BYTES      (800u << 10)    /* of base64 at most: what the outbox keeps of a file is its last 1 MB */
 static int trace_shot;
 static unsigned shots_taken;
+static uint64_t shot_every, shot_next;          /* glshot_every= (timed_shot_due) */
+static unsigned shot_budget = 500u << 10;      /* (base64 bytes a picture when timed: smaller than SHOT_BYTES) */
 static struct { GLuint texture; GLsizei width, height; bool taken; } shot_want[SHOT_TEXTURES];
 static unsigned shot_wanted;
 
@@ -1668,8 +1670,6 @@ shot_note(GLuint texture, GLint width, GLint height)
  * shadow), once that copy is made; up to SHOT_MAX pictures in all. For what shows only now and then: the status bar's
  * clock in each says when it was.
  */
-static uint64_t shot_every, shot_next;
-static unsigned shot_budget = 500u << 10;      /* (base64 bytes a picture: shot_take, here smaller than SHOT_BYTES) */
 
 static struct image *
 timed_shot_due(struct eagl *e)
