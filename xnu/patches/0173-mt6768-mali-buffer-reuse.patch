@@ -1,6 +1,8 @@
-Patch 0173: the buffers a client closes are handed out again instead of being allocated, wired and zeroed;
-their pages go into the GPU's tables a physical run at a time instead of 4 KB; and the imported pages are
-stored to memory once per group of SUBMITs (boot-arg sweetmalistore=1: before every SUBMIT, as before).
+Patch 0173: a buffer a client closes is handed out again instead of being allocated, wired and entered into the
+GPU's tables, its pages go in a physical run at a time instead of 4 KB, and the imported pages are stored to
+memory once per group of SUBMITs (boot-arg sweetmalistore=1: before every SUBMIT, as before).
+The reuse is only for a buffer that had no mapping alive at the close (the kernel's retain count of its memory
+is 1), it keeps the same GPU address (so the tables need no update), and it is zeroed before it goes out again.
 Boot 2026-11-28: on the widget page a CREATE_BO cost 7.1 ms and a SUBMIT 310 us against 53 us at boot.
 
 diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
@@ -27,9 +29,9 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	uint64_t                   fInvalidated[2];     /* what had finished when its imported pages were last invalidated */
  	uint64_t                   fAhead[SWEET_AHEAD_MAX];     /* its newest chains' fences, a ring (patch 0136) */
  	uint32_t                   fAheadAt, fAheadWaits;
-+	struct {                                /* 0173: what a GEM_CLOSE gave back, for the next CREATE_BO of that size */
++	struct {                                /* 0173: what a GEM_CLOSE gave back, unmapped, for the next CREATE_BO of that size */
 +		IOBufferMemoryDescriptor * memory;
-+		uint64_t size;
++		uint64_t size, address;         /* address: still in the GPU's tables, handed out again with the memory */
 +	} fFree[SWEET_MALI_FREE];
 +	bool                       fImportedStored;     /* 0173: the imported pages are in memory for the chains queued since */
  
@@ -44,7 +46,17 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	return fBuffers != NULL && fSyncobjs != NULL && fImported != NULL;
  }
  
-@@ -336,8 +346,25 @@
+@@ -324,8 +334,8 @@
+ 			IOLog("SweetMali: the chains using a buffer did not finish in 2 s; it goes anyway\n");
+ 		}
+ 	}
+-	sweet_mali_unmap(b->address, b->size);
+ 	if (b->imported != NULL) {
++		sweet_mali_unmap(b->address, b->size);
+ 		uint16_t index = (uint16_t)(b - fBuffers);
+ 
+ 		for (uint32_t k = 0; fImported != NULL && k < fImportedCount; k++) {
+@@ -336,8 +346,33 @@
  		}
  		b->imported->complete();
  		b->imported->release();
@@ -52,27 +64,35 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
 -		b->memory->release();
 +	} else if (b->memory != NULL) {
 +		/*
-+		 * Patch 0173: kept for the next CREATE_BO of this size, which then does not allocate, wire nor zero it again
-+		 * (2026-11-28, widget page: 7.1 ms a creation with about 0.8 of them a frame). Nothing of the program writes
-+		 * through an old handle: Mesa's buffer cache drops the mapping before it closes the buffer.
++		 * Patch 0173: kept for the next CREATE_BO of this size -- its pages still wired, its GPU address still in the
++		 * tables -- only when **no mapping of it is alive**: the kernel holds a reference to the memory for every
++		 * IOConnectMapMemory64 and drops it when the program unmaps, so a count of 1 is this client's own and nobody can
++		 * write through the old handle any more. A buffer whose mapping is still alive is given back as before, and a
++		 * kept one is zeroed before it goes out again (createBO): a program sees the empty buffer a fresh one would be.
 +		 */
-+		if (b->size <= SWEET_MALI_KEEP_MAX) {
++		bool kept = false;
++
++		if (b->memory->getRetainCount() == 1 && b->size <= SWEET_MALI_KEEP_MAX) {
 +			for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
 +				if (fFree[k].memory == NULL) {
 +					fFree[k].memory = b->memory;
 +					fFree[k].size = b->size;
++					fFree[k].address = b->address;
 +					b->memory = NULL;
++					b->address = 0;       /* the address stays in the tables for the buffer that takes it */
++					kept = true;
 +					break;
 +				}
 +			}
 +		}
-+		if (b->memory != NULL) {
-+			b->memory->release();         /* too big to keep, or no room: it goes back to the system */
++		if (!kept) {
++			sweet_mali_unmap(b->address, b->size);
++			b->memory->release();         /* a mapping still alive, too big to keep, or no room */
 +		}
  	}
  	bzero(b, sizeof(*b));
  }
-@@ -412,11 +439,25 @@
+@@ -412,11 +447,25 @@
  		    request->address, request->size, wired);
  	}
  	b->address = sweet_mali_address(request->size);
@@ -100,7 +120,7 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	}
  	if (b->address == 0 || !mapped) {
  		if (b->address != 0) {
-@@ -447,7 +488,7 @@
+@@ -447,7 +496,7 @@
  	uint64_t size = round_page_64(request->size);
  	IOBufferMemoryDescriptor * memory;
  	struct sweet_mali_buffer * b = NULL;
@@ -109,19 +129,26 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  
  	if (size == 0 || size > SWEET_MALI_BUFFER_MAX) {
  		return kIOReturnBadArgument;
-@@ -462,19 +503,48 @@
+@@ -462,33 +511,75 @@
  	 * board ("illegal PA"). The program's mapping and the kernel's are both cached, so they see the same
  	 * data; what the GPU reads or wrote is made right by cache maintenance around each job (submit()).
  	 */
 -	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
 -	    (vm_size_t) size, PAGE_SIZE);
-+	/* Patch 0173: a buffer this size that was closed goes out again, its memory still wired. */
++	/*
++	 * Patch 0173: a buffer of this size that a client closed goes out again -- memory still wired, GPU address still
++	 * in the tables, so no allocation, no page wiring and no address-space update. It was kept only because no mapping
++	 * of it was alive at the close (freeBuffer), and it is zeroed below: the program gets the same empty buffer a new
++	 * one would be.
++	 */
 +	reused = false;
 +	memory = NULL;
 +	for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
 +		if (fFree[k].memory != NULL && fFree[k].size == size) {
 +			memory = fFree[k].memory;
++			b->address = fFree[k].address;
 +			fFree[k].memory = NULL;
++			fFree[k].address = 0;
 +			reused = true;
 +			break;
 +		}
@@ -134,47 +161,70 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  		IOLog("SweetMali: no memory for a buffer of %llu bytes\n", size);
  		return kIOReturnNoMemory;
  	}
- 	b->address = sweet_mali_address(size);
+-	b->address = sweet_mali_address(size);
 -	/* every 4 KB of it: the GPU's pages, a quarter of the kernel's 16 KB ones */
 -	for (uint64_t offset = 0; offset < size && mapped && b->address != 0; offset += 4096) {
-+	/*
-+	 * Patch 0173: a whole physical run at a time. getPhysicalSegment says how long the run at this offset is (the kernel's
-+	 * pages are 16 KB, the GPU's 4 KB), so a 6 MB buffer is a handful of calls into the tables instead of 1536.
-+	 */
-+	for (uint64_t offset = 0; offset < size && mapped && b->address != 0; ) {
- 		IOByteCount length = 0;
- 		addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
+-		IOByteCount length = 0;
+-		addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
++	if (!reused) {
++		b->address = sweet_mali_address(size);
++		/*
++		 * Patch 0173: a whole physical run at a time. getPhysicalSegment says how long the run at this offset is (the
++		 * kernel's pages are 16 KB, the GPU's 4 KB), so a 6 MB buffer is a handful of calls into the tables, not 1536.
++		 */
++		for (uint64_t offset = 0; offset < size && mapped && b->address != 0; ) {
++			IOByteCount length = 0;
++			addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
  
 -		mapped = phys != 0 && sweet_mali_map(b->address + offset, phys);
-+		if (phys == 0 || length == 0) {
-+			mapped = false;
-+			break;
+-	}
+-	if (b->address == 0 || !mapped) {
+-		if (b->address != 0) {
+-			sweet_mali_unmap(b->address, size);
++			if (phys == 0 || length == 0) {
++				mapped = false;
++				break;
++			}
++			length &= ~(IOByteCount) PAGE_MASK;
++			if (length > size - offset) {
++				length = (IOByteCount)(size - offset);
++			}
++			if (length == 0) {
++				mapped = false;
++				break;
++			}
++			mapped = sweet_mali_map_run(b->address + offset, phys, length);
++			offset += length;
+ 		}
+-		bzero(b, sizeof(*b));
+-		memory->release();
+-		IOLog("SweetMali: a buffer of %llu bytes cannot be entered into the GPU's address space\n", size);
+-		return kIOReturnNoMemory;
++		if (b->address == 0 || !mapped) {
++			if (b->address != 0) {
++				sweet_mali_unmap(b->address, size);
++			}
++			bzero(b, sizeof(*b));
++			memory->release();
++			IOLog("SweetMali: a buffer of %llu bytes cannot be entered into the GPU's address space\n", size);
++			return kIOReturnNoMemory;
 +		}
-+		length &= ~(IOByteCount) PAGE_MASK;
-+		if (length > size - offset) {
-+			length = (IOByteCount)(size - offset);
-+		}
-+		if (length == 0) {
-+			mapped = false;
-+			break;
-+		}
-+		mapped = sweet_mali_map_run(b->address + offset, phys, length);
-+		offset += length;
++		sweet_mali_mapped();
++	} else {
++		/* what the program wrote through the old handle, gone: a fresh buffer is zero */
++		bzero(memory->getBytesNoCopy(), size);
  	}
- 	if (b->address == 0 || !mapped) {
- 		if (b->address != 0) {
-@@ -490,7 +560,9 @@
- 	 * The kernel made the pages zero through its own cached mapping: out of the caches once, now. With write-combined
- 	 * mappings (the default) the program's writes reach memory directly, so nothing is cleaned around each job.
+-	sweet_mali_mapped();
+ 	/*
+-	 * The kernel made the pages zero through its own cached mapping: out of the caches once, now. With write-combined
+-	 * mappings (the default) the program's writes reach memory directly, so nothing is cleaned around each job.
++	 * The pages are zero and in the processor's caches (the kernel's own writes above): out of them once, now. With
++	 * write-combined mappings (the default) the program's writes reach memory directly, so nothing is cleaned around
++	 * each job.
  	 */
--	sweet_mali_to_memory(memory->getBytesNoCopy(), size);
-+	if (!reused) {
-+		sweet_mali_to_memory(memory->getBytesNoCopy(), size);
-+	}
+ 	sweet_mali_to_memory(memory->getBytesNoCopy(), size);
  	b->memory = memory;
- 	b->size = size;
- 	request->offset = b->address;
-@@ -661,6 +733,22 @@
+@@ -661,6 +752,22 @@
  	return answer != 0;
  }
  
@@ -197,7 +247,7 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  /* How many chains a queued client may have in front of the GPU (patch 0136): boot-arg sweetmaliahead, default 8. */
  static uint32_t
  sweet_mali_ahead(void)
-@@ -787,10 +875,21 @@
+@@ -787,10 +894,21 @@
  	 * The processor's writes to imported pages, and (sweetmaliwc=0) to the small buffers the chain names, to memory.
  	 * Not for a self-coherent client (0151): it cleans exactly the pages a command uses, by address, before the commit.
  	 */
@@ -222,7 +272,7 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	}
  	const bool cleanNamed = !sweet_mali_write_combined();
  	for (uint32_t i = 0; cleanNamed && i < count; i++) {
-@@ -861,6 +960,7 @@
+@@ -861,6 +979,7 @@
  			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
  		}
  	}
@@ -230,7 +280,7 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	return ret;
  }
  
-@@ -884,6 +984,11 @@
+@@ -884,6 +1003,11 @@
  	    copyin((user_addr_t) request->handles, handles, n * sizeof(uint32_t)) != 0) {
  		return kIOReturnBadArgument;
  	}
@@ -242,14 +292,17 @@ diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
  	for (;;) {
  		uint64_t fences[SWEET_SYNC_HANDLES_MAX];
  		uint32_t done = 0, first = n, pending = 0, unsubmitted = 0;
-@@ -1047,6 +1152,12 @@
+@@ -1047,6 +1171,15 @@
  	if (fBuffers != NULL) {
  		IOFreeData(fBuffers, SWEET_MALI_BUFFERS * sizeof(struct sweet_mali_buffer));
  		fBuffers = NULL;
 +		for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
 +			if (fFree[k].memory != NULL) {
-+				fFree[k].memory->release();     /* 0173: what no CREATE_BO took back */
++				/* 0173: their pages go back to the system: the GPU's tables must not keep them */
++				sweet_mali_unmap(fFree[k].address, fFree[k].size);
++				fFree[k].memory->release();
 +				fFree[k].memory = NULL;
++				fFree[k].address = 0;
 +			}
 +		}
  	}

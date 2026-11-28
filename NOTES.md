@@ -2034,3 +2034,16 @@ turns out to be Metal's.
   `--set sweetmalistore=1`.
 - Correzione ai numeri di ieri: CREATE_BO era **0,8 a frame** (non 7,6) e WAIT_BO **67 a frame** (non 675); i ms a
   frame erano giusti.
+
+### 2026-11-28 17:25 — 0173: il riuso ha una regola che si puo' verificare
+- Un buffer torna in un handle nuovo **solo se al GEM_CLOSE nessuna mappatura era viva**: il kernel tiene un riferimento
+  al descrittore per ogni `IOConnectMapMemory64` e lo lascia con l'unmap, quindi `getRetainCount() == 1` significa che
+  l'unico riferimento e' quello del client. Se il conto e' >1 il buffer viene smappato e restituito al sistema, come
+  prima (nessun riuso).
+- Il buffer tenuto **conserva il suo indirizzo GPU** (le voci restano nelle tabelle, `sweet_mali_unmap` non viene
+  chiamata), quindi il riuso non fa ne' allocazione ne' mapping ne' `as0_update`; ed **e' azzerato** (`bzero` + 
+  `sweet_mali_to_memory`) prima di uscire, quindi il programma vede il buffer vuoto che un CREATE_BO nuovo gli darebbe.
+- `free()` (uscita del client) smappa e rilascia quello che nessuno ha ripreso: le voci delle tabelle non devono
+  restare appese a pagine tornate al sistema.
+- Se una catena non e' finita entro i 2 s di `freeBuffer`, il buffer si riusa lo stesso: la GPU puo' leggerne il
+  contenuto nuovo. Prima era peggio (le pagine tornavano al sistema sotto la GPU), ma resta un caso da tenere d'occhio.
