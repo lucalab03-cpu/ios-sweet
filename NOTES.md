@@ -2000,3 +2000,19 @@ turns out to be Metal's.
   `libsweet-gl+0xb7bc` (fine frame di eagl) o `libsweet-gl+0x15020` <- QuartzCore `0x182970` (i render di CA).
 - **Nessun avvio nuovo serve per la pagina widget**: il log continua ad appendere finche' iOS gira. Basta usare il
   telefono 30-60 s sulla pagina widget e rifare il fetch (fetchult19 + log-area.bin).
+
+### 2026-11-28 16:40 — la pagina widget (fetchult19): 14 frame/s, e i SUBMIT costano 18 ms a frame
+- Finestra della pagina widget (l'ultima del log, 10 s): 8236 SUBMIT (**58 a frame**), 2556 ms di SUBMIT in 10 s =
+  **310 us l'uno** contro 53 us al boot; CREATE_BO 110 (7,6 a frame) a **7,1 ms** l'uno (punta 45 ms); WAIT_BO 9451 a
+  38 us (2,6 ms a frame); SYNCOBJ_WAIT 17 ms/s; GEM_CLOSE 30 a 1,7 ms. Totale thread di disegno **442 ms/s = 44 %**
+  del tempo di parete. I frame della stessa pagina: 142 in 10 s, **p50 48 p90 71 p99 100 ms**.
+- La finestra "ahead" del kernel (8 catene, 0136) **non e' mai scattata**: nessun "chains ahead of the GPU" nel log.
+  Non e' la coda.
+- Dentro `submit()` (0135:886) c'e' un ciclo che, **a ogni submit, fa kIOMemoryIncoherentIOStore di tutti i buffer
+  importati** (0..size), non solo di quelli che la catena nomina. Con 58 submit a frame la stessa superficie viene
+  riscritta in memoria 58 volte: e' il primo sospetto per i 310 us (al boot gli importati sono quasi puliti/assenti,
+  53 us). Da provare con fix31: pulire gli importati **una volta per gruppo di submit** (dopo l'ultima attesa del
+  client), con un boot-arg per tornare al comportamento di adesso.
+- `createBO` (0123:511 con 0128) resta com'e': `IOBufferMemoryDescriptor` nuovo (memoria azzerata) e mappatura **ogni
+  4 KB**, ignorando la lunghezza del run fisico. 7,1 ms a creazione = 15 % del frame. fix31: riusare i buffer liberi
+  (stessa dimensione) invece di allocare, e mappare i run interi.
