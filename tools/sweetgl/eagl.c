@@ -4039,8 +4039,13 @@ scissor_fit(struct eagl *e, GLenum type, const void *indices, GLint first, GLsiz
 	float low[2] = { 1e30f, 1e30f }, high[2] = { -1e30f, -1e30f };
 	int x0, y0, x1, y1;
 
-	if (!scissor_fit_on || e->framebuffer == 0 || e->colour == 0 || (image = image_of(e, e->colour)) == NULL ||
-	    !image->target || image->width < 600 || image->height < 1200) {
+	/*
+	 * fix29: every framebuffer, not only the display's (fix28's chains: the battery widgets were drawn into a texture
+	 * of CoreAnimation's the size of the screen, 828 x 1792, a box of 140 x 145 in it, 34 ms a batch: every tile of it
+	 * loaded and stored for that box)
+	 */
+	(void)image;
+	if (!scissor_fit_on || e->framebuffer == 0) {
 		return false;
 	}
 	if (m == NULL) {
