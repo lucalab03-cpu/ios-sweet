@@ -1289,6 +1289,7 @@ frame_begin(struct eagl *e)
 static void frame_functions(struct eagl *e);
 static void (*sweet_frame_mark)(void);   /* ios-sweet: sweet_drm_frame_mark() of the GPU shim inside libOSMesa */
 static void shots_at_frame_end(struct eagl *e);
+static void chain_batch_end(struct eagl *e, const char *why);
 static struct image *timed_shot_due(struct eagl *e);
 static void timed_shot_take(struct eagl *e, struct image *display);
 static void
@@ -1299,6 +1300,9 @@ frame_end(struct eagl *e, bool finished)
 	unsigned copied = 0, in_place = 0;
 
 	clear_now(e);
+	if (e->in_frame) {
+		chain_batch_end(e, "frame end");        /* fix28 */
+	}
 	shots_at_frame_end(e);  /* (gltrace_shot=1) */
 	shadow_look();          /* ios-sweet 0156: which surfaces the display swaps, and the panel's size */
 	before = now_us();
@@ -1540,10 +1544,38 @@ chain_tag(struct eagl *e)
 		}
 		return;
 	}
-	snprintf(tag, sizeof(tag), "frame %u draw %u into %u (texture %u) program %u", e->frames + 1, e->draws + 1, e->framebuffer,
-	    e->colour, e->program);
+	(void)tag;                      /* (fix28: tagged per batch, at each change of framebuffer: chain_batch_end) */
+}
+
+/*
+ * fix28: while a trace runs, every change of framebuffer ends the batch there and then (glFlush), with the tag naming
+ * it -- framebuffer, texture, its size, the draws it holds -- so that each chain the kernel finds slow (0172) is one
+ * batch of known draws. (Mesa sends a batch only when something needs what it drew: fix26's tags named the draw that
+ * caused the sending, not what was sent.)
+ */
+static unsigned batch_first_draw;
+
+static void
+chain_batch_end(struct eagl *e, const char *why)
+{
+	char tag[160];
+	GLint w = 0, h = 0;
+	struct image *image = e->colour != 0 ? image_of(e, e->colour) : NULL;
+
+	if (!trace_placing || chain_tag_fn == NULL) {
+		batch_first_draw = e->draws + 1;
+		return;
+	}
+	if (image != NULL) {
+		w = image->width;
+		h = image->height;
+	}
+	snprintf(tag, sizeof(tag), "frame %u batch into %u (texture %u, %d x %d) draws %u-%u (%s)", e->frames + 1, e->framebuffer,
+	    e->colour, w, h, batch_first_draw, e->draws, why);
 	chain_tag_fn(tag);
 	chain_tagged = true;
+	glFlush();
+	batch_first_draw = e->draws + 1;
 }
 
 /* Something is about to be drawn into the framebuffer that is bound. */
@@ -4541,6 +4573,9 @@ my_glBindFramebuffer(void *context, GLenum target, GLuint framebuffer)
 		eagl_trace("glBindFramebuffer(%#x, %u)\n", target, framebuffer);
 	}
 	clear_now(e);                   /* (a clear put off is of what was drawn into until now) */
+	if (target != GL_READ_FRAMEBUFFER && framebuffer != e->framebuffer) {
+		chain_batch_end(e, "next framebuffer");       /* fix28 */
+	}
 	glBindFramebuffer(target, framebuffer);
 	if (target == GL_READ_FRAMEBUFFER) {
 		EAGL_LEAVE(e, 0x1508);
