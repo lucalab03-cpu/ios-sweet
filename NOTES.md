@@ -1967,3 +1967,18 @@ turns out to be Metal's.
   waits/SUBMITs >= 1 ms, every 10 s into /var/tmp/sweetdrm-time.log. Drop without census/trace, with a render
   thread prof. mesa 46138487646, bundle 46138819370 (sweet-bundle-fix30), payload-ap.
 - To do later (user): wallpaper gallery thumbnails grey/black while wallpapers apply fine (Metal item M4/M5).
+
+### 2026-11-28 16:05 — the fix30 round, ready to boot (drop script + a reader for its log)
+- Bundle sweet-bundle-fix30 (run 46138819370, mesa 46138487646) is on GitHub; payload-ap is already on the phone
+  (/data/local/tmp, 11:08). No new payload: the kernel has not changed since fix26 (0172).
+- tools/drops/make-fix30.sh BUNDLE.zip [OUT] [PREV-DROP]: checks the bundle (SHA256SUMS, "sweetdrm-time.log" in
+  libOSMesa, 0172 in the kernel), makes drop-fix30 (bundle's drop/ + var/sweet/gl, glargs "glwait=0 glblit=0
+  glstats=1", root.cmd = apply + the two profiles of fix19/20) and zips it. Made portable because the Windows PC has
+  no zip and no strings: python's zipfile walks the tree, grep -a counts the markers. Tried on a made-up bundle.
+- tools/sweetdrm-time.py TIME.log [--all]: fix30's log into a table per request (calls, calls/s, us a call and
+  **ms/s on the render thread** vs the other threads) plus the heaviest of the >= 1 ms wait stacks, summed over the
+  windows; only the last boot unless --all. Tried on a made-up two-boot log.
+- Next: the user downloads sweet-bundle-fix30, runs make-fix30.sh, boots payload-ap + drop-fix30 (one boot), then
+  sends fetchNNN.txt and log-area.bin. sweetdrm-time.py on /var/tmp/sweetdrm-time.log decides fix31: if SUBMIT and
+  WAIT_BO take most of the render thread's ms/s the ~0.2 ms a draw is our shim/kernel path (batches per framebuffer
+  change: ~40 a widgets frame), if not it is CoreAnimation's own draws, and the fix is elsewhere.
