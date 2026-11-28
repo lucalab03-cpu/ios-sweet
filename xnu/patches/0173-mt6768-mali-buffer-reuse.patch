@@ -1,0 +1,288 @@
+Patch 0173: the buffers a client closes are handed out again instead of being allocated, wired and zeroed;
+their pages go into the GPU's tables a physical run at a time instead of 4 KB; and the imported pages are
+stored to memory once per group of SUBMITs (boot-arg sweetmalistore=1: before every SUBMIT, as before).
+Boot 2026-11-28: on the widget page a CREATE_BO cost 7.1 ms and a SUBMIT 310 us against 53 us at boot.
+
+diff -ruN a/iokit/Kernel/arm/SweetMali.cpp b/iokit/Kernel/arm/SweetMali.cpp
+--- a/iokit/Kernel/arm/SweetMali.cpp
++++ b/iokit/Kernel/arm/SweetMali.cpp
+@@ -40,6 +40,7 @@
+ bool sweet_mali_parameter(uint32_t which, uint64_t * value);
+ uint64_t sweet_mali_address(uint64_t size);
+ bool sweet_mali_map(uint64_t gpu, uint64_t phys);
++bool sweet_mali_map_run(uint64_t gpu, uint64_t phys, uint64_t size);   /* 0173: a whole run, one lock */
+ void sweet_mali_mapped(void);
+ void sweet_mali_unmap(uint64_t gpu, uint64_t size);
+ void sweet_mali_to_memory(const void * start, uint64_t size);
+@@ -162,6 +163,8 @@
+ #define SWEET_MALI_BUFFERS      4096
+ #define SWEET_MALI_BUFFER_MAX   (256ull << 20)
+ #define SWEET_MALI_SYNCOBJS     4096
++#define SWEET_MALI_FREE         16      /* patch 0173: freed buffers a client keeps, ready to be handed out again */
++#define SWEET_MALI_KEEP_MAX     (16ull << 20)   /* 0173: only up to this size is kept (16 x 16 MB at most a client) */
+ #define SWEET_MALI_FLUSH_MAX    (8ull << 20)    /* buffers up to this size are cleaned and invalidated around each job */
+ 
+ struct sweet_mali_buffer {
+@@ -246,6 +249,11 @@
+ 	uint64_t                   fInvalidated[2];     /* what had finished when its imported pages were last invalidated */
+ 	uint64_t                   fAhead[SWEET_AHEAD_MAX];     /* its newest chains' fences, a ring (patch 0136) */
+ 	uint32_t                   fAheadAt, fAheadWaits;
++	struct {                                /* 0173: what a GEM_CLOSE gave back, for the next CREATE_BO of that size */
++		IOBufferMemoryDescriptor * memory;
++		uint64_t size;
++	} fFree[SWEET_MALI_FREE];
++	bool                       fImportedStored;     /* 0173: the imported pages are in memory for the chains queued since */
+ 
+ 	struct sweet_mali_buffer * buffer(uint32_t handle);
+ 	void freeBuffer(struct sweet_mali_buffer * b);
+@@ -283,6 +291,8 @@
+ 	fBuffers = IONewZeroData(struct sweet_mali_buffer, SWEET_MALI_BUFFERS);
+ 	fSyncobjs = IONewZeroData(struct sweet_syncobj, SWEET_MALI_SYNCOBJS);
+ 	fImported = IONewZeroData(uint16_t, SWEET_MALI_BUFFERS);
++	bzero(fFree, sizeof(fFree));
++	fImportedStored = false;
+ 	return fBuffers != NULL && fSyncobjs != NULL && fImported != NULL;
+ }
+ 
+@@ -336,8 +346,25 @@
+ 		}
+ 		b->imported->complete();
+ 		b->imported->release();
+-	} else {
+-		b->memory->release();
++	} else if (b->memory != NULL) {
++		/*
++		 * Patch 0173: kept for the next CREATE_BO of this size, which then does not allocate, wire nor zero it again
++		 * (2026-11-28, widget page: 7.1 ms a creation with about 0.8 of them a frame). Nothing of the program writes
++		 * through an old handle: Mesa's buffer cache drops the mapping before it closes the buffer.
++		 */
++		if (b->size <= SWEET_MALI_KEEP_MAX) {
++			for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
++				if (fFree[k].memory == NULL) {
++					fFree[k].memory = b->memory;
++					fFree[k].size = b->size;
++					b->memory = NULL;
++					break;
++				}
++			}
++		}
++		if (b->memory != NULL) {
++			b->memory->release();         /* too big to keep, or no room: it goes back to the system */
++		}
+ 	}
+ 	bzero(b, sizeof(*b));
+ }
+@@ -412,11 +439,25 @@
+ 		    request->address, request->size, wired);
+ 	}
+ 	b->address = sweet_mali_address(request->size);
+-	for (uint64_t offset = 0; offset < request->size && mapped && b->address != 0; offset += 4096) {
++	/* Patch 0173: whole physical runs, as in createBO (the caller's pages are a few large runs too). */
++	for (uint64_t offset = 0; offset < request->size && mapped && b->address != 0; ) {
+ 		IOByteCount length = 0;
+ 		addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
+ 
+-		mapped = phys != 0 && sweet_mali_map(b->address + offset, phys);
++		if (phys == 0 || length == 0) {
++			mapped = false;
++			break;
++		}
++		length &= ~(IOByteCount) PAGE_MASK;
++		if (length > request->size - offset) {
++			length = (IOByteCount)(request->size - offset);
++		}
++		if (length == 0) {
++			mapped = false;
++			break;
++		}
++		mapped = sweet_mali_map_run(b->address + offset, phys, length);
++		offset += length;
+ 	}
+ 	if (b->address == 0 || !mapped) {
+ 		if (b->address != 0) {
+@@ -447,7 +488,7 @@
+ 	uint64_t size = round_page_64(request->size);
+ 	IOBufferMemoryDescriptor * memory;
+ 	struct sweet_mali_buffer * b = NULL;
+-	bool mapped = true;
++	bool mapped = true, reused;
+ 
+ 	if (size == 0 || size > SWEET_MALI_BUFFER_MAX) {
+ 		return kIOReturnBadArgument;
+@@ -462,19 +503,48 @@
+ 	 * board ("illegal PA"). The program's mapping and the kernel's are both cached, so they see the same
+ 	 * data; what the GPU reads or wrote is made right by cache maintenance around each job (submit()).
+ 	 */
+-	memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
+-	    (vm_size_t) size, PAGE_SIZE);
++	/* Patch 0173: a buffer this size that was closed goes out again, its memory still wired. */
++	reused = false;
++	memory = NULL;
++	for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
++		if (fFree[k].memory != NULL && fFree[k].size == size) {
++			memory = fFree[k].memory;
++			fFree[k].memory = NULL;
++			reused = true;
++			break;
++		}
++	}
++	if (memory == NULL) {
++		memory = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared,
++		    (vm_size_t) size, PAGE_SIZE);
++	}
+ 	if (memory == NULL) {
+ 		IOLog("SweetMali: no memory for a buffer of %llu bytes\n", size);
+ 		return kIOReturnNoMemory;
+ 	}
+ 	b->address = sweet_mali_address(size);
+-	/* every 4 KB of it: the GPU's pages, a quarter of the kernel's 16 KB ones */
+-	for (uint64_t offset = 0; offset < size && mapped && b->address != 0; offset += 4096) {
++	/*
++	 * Patch 0173: a whole physical run at a time. getPhysicalSegment says how long the run at this offset is (the kernel's
++	 * pages are 16 KB, the GPU's 4 KB), so a 6 MB buffer is a handful of calls into the tables instead of 1536.
++	 */
++	for (uint64_t offset = 0; offset < size && mapped && b->address != 0; ) {
+ 		IOByteCount length = 0;
+ 		addr64_t phys = memory->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
+ 
+-		mapped = phys != 0 && sweet_mali_map(b->address + offset, phys);
++		if (phys == 0 || length == 0) {
++			mapped = false;
++			break;
++		}
++		length &= ~(IOByteCount) PAGE_MASK;
++		if (length > size - offset) {
++			length = (IOByteCount)(size - offset);
++		}
++		if (length == 0) {
++			mapped = false;
++			break;
++		}
++		mapped = sweet_mali_map_run(b->address + offset, phys, length);
++		offset += length;
+ 	}
+ 	if (b->address == 0 || !mapped) {
+ 		if (b->address != 0) {
+@@ -490,7 +560,9 @@
+ 	 * The kernel made the pages zero through its own cached mapping: out of the caches once, now. With write-combined
+ 	 * mappings (the default) the program's writes reach memory directly, so nothing is cleaned around each job.
+ 	 */
+-	sweet_mali_to_memory(memory->getBytesNoCopy(), size);
++	if (!reused) {
++		sweet_mali_to_memory(memory->getBytesNoCopy(), size);
++	}
+ 	b->memory = memory;
+ 	b->size = size;
+ 	request->offset = b->address;
+@@ -661,6 +733,22 @@
+ 	return answer != 0;
+ }
+ 
++/*
++ * Patch 0173: when the imported pages are stored to memory around a SUBMIT -- boot-arg sweetmalistore, default 0.
++ * 0: once per group of SUBMITs, at the first one after the client waited for its chains. 1: before every SUBMIT, as
++ * every kernel did up to 0172.
++ */
++static uint32_t
++sweet_mali_store_each(void)
++{
++	static int each = -1;
++
++	if (each < 0 && !PE_parse_boot_argn("sweetmalistore", &each, sizeof(each))) {
++		each = 0;
++	}
++	return each != 0 ? 1 : 0;
++}
++
+ /* How many chains a queued client may have in front of the GPU (patch 0136): boot-arg sweetmaliahead, default 8. */
+ static uint32_t
+ sweet_mali_ahead(void)
+@@ -787,10 +875,21 @@
+ 	 * The processor's writes to imported pages, and (sweetmaliwc=0) to the small buffers the chain names, to memory.
+ 	 * Not for a self-coherent client (0151): it cleans exactly the pages a command uses, by address, before the commit.
+ 	 */
+-	for (uint32_t i = 0; !fSelfCoherent && i < SWEET_MALI_BUFFERS; i++) {
+-		if (fBuffers[i].imported != NULL) {
+-			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOStore, 0, fBuffers[i].size);
++	/*
++	 * Patch 0173: once per group of SUBMITs, not before every one of them. A widget frame sends ~58 chains to this loop
++	 * with the same imported pages every time (2026-11-28, widget page: 310 us a SUBMIT, against 53 us at boot); the
++	 * pages go back to the processor only when the client waits for its chains, and it writes them again after that.
++	 * boot-arg sweetmalistore=1 keeps the old way, a store before every SUBMIT.
++	 */
++	if (!fSelfCoherent && (!fImportedStored || sweet_mali_store_each() != 0)) {
++		for (uint32_t k = 0; fImported != NULL && k < fImportedCount; k++) {
++			struct sweet_mali_buffer * ib = &fBuffers[fImported[k]];
++
++			if (ib->imported != NULL) {
++				ib->imported->performOperation(kIOMemoryIncoherentIOStore, 0, ib->size);
++			}
+ 		}
++		fImportedStored = true;
+ 	}
+ 	const bool cleanNamed = !sweet_mali_write_combined();
+ 	for (uint32_t i = 0; cleanNamed && i < count; i++) {
+@@ -861,6 +960,7 @@
+ 			fBuffers[i].imported->performOperation(kIOMemoryIncoherentIOFlush, 0, fBuffers[i].size);
+ 		}
+ 	}
++	fImportedStored = false;              /* 0173: the processor has its pages back */
+ 	return ret;
+ }
+ 
+@@ -884,6 +984,11 @@
+ 	    copyin((user_addr_t) request->handles, handles, n * sizeof(uint32_t)) != 0) {
+ 		return kIOReturnBadArgument;
+ 	}
++	/*
++	 * Patch 0173: after a wait for chains the imported pages belong to the processor again, which writes them before
++	 * its next SUBMIT: that SUBMIT is where they are stored to memory (once, not before every one of the group).
++	 */
++	fImportedStored = false;
+ 	for (;;) {
+ 		uint64_t fences[SWEET_SYNC_HANDLES_MAX];
+ 		uint32_t done = 0, first = n, pending = 0, unsubmitted = 0;
+@@ -1047,6 +1152,12 @@
+ 	if (fBuffers != NULL) {
+ 		IOFreeData(fBuffers, SWEET_MALI_BUFFERS * sizeof(struct sweet_mali_buffer));
+ 		fBuffers = NULL;
++		for (uint32_t k = 0; k < SWEET_MALI_FREE; k++) {
++			if (fFree[k].memory != NULL) {
++				fFree[k].memory->release();     /* 0173: what no CREATE_BO took back */
++				fFree[k].memory = NULL;
++			}
++		}
+ 	}
+ 	if (fImported != NULL) {
+ 		IOFreeData(fImported, SWEET_MALI_BUFFERS * sizeof(uint16_t));
+diff -ruN a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -451,6 +451,27 @@
+ 	return done;
+ }
+ 
++/*
++ * Patch 0173: a whole physically contiguous run of a buffer into the GPU's tables, taking the lock once instead of once
++ * per 4 KB. A 6 MB buffer is 1536 pages: the lock alone was a large part of a CREATE_BO (2026-11-28, widget page: 7.1 ms
++ * a creation). The caller still calls sweet_mali_mapped() once when the buffer is in.
++ */
++bool
++sweet_mali_map_run(uint64_t gpu, uint64_t phys, uint64_t size)
++{
++	bool done = true;
++
++	lck_mtx_lock(&mali_lock);
++	for (uint64_t at = 0; at < size; at += 4096) {
++		if (!map_page(gpu + at, phys + at)) {
++			done = false;
++			break;
++		}
++	}
++	lck_mtx_unlock(&mali_lock);
++	return done;
++}
++
+ static bool queue_on(void);
+ static void queue_hold_idle(void);
+ static void queue_release(void);

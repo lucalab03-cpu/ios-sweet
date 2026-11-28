@@ -2016,3 +2016,21 @@ turns out to be Metal's.
 - `createBO` (0123:511 con 0128) resta com'e': `IOBufferMemoryDescriptor` nuovo (memoria azzerata) e mappatura **ogni
   4 KB**, ignorando la lunghezza del run fisico. 7,1 ms a creazione = 15 % del frame. fix31: riusare i buffer liberi
   (stessa dimensione) invece di allocare, e mappare i run interi.
+
+### 2026-11-28 17:05 — fix31 scritto (kernel 0173), aspetta il giro xnu
+- Tre cose in `iokit/Kernel/arm/SweetMali.cpp` + una in `bsd/dev/sweet_mali.c`:
+  1. **riuso**: `freeBuffer` tiene fino a 16 buffer liberati <= 16 MB in `fFree[]`, e `createBO` della stessa dimensione
+     li riusa invece di allocare (via anche l'azzeramento: `sweet_mali_to_memory` solo per la memoria nuova);
+  2. **run interi**: `sweet_mali_map_run(gpu, phys, size)` in `sweet_mali.c` mappa un run fisico sotto **un solo lock**,
+     e `createBO`/`importHost` avanzano con la lunghezza che `getPhysicalSegment` restituisce (non piu' 4 KB fissi:
+     un buffer da 6 MB era 1536 `getPhysicalSegment` + 1536 lock/unlock);
+  3. **store degli importati una volta per gruppo**: `fImportedStored` viene messo a false solo quando il client
+     **aspetta** (`syncobjWait`, e la coda del SUBMIT diretto), non a ogni WAIT_BO (Mesa ne fa ~67 a frame per la cache:
+     azzerarlo anche li' avrebbe rimesso uno store per submit). Boot-arg **`sweetmalistore=1`** = una store prima di
+     ogni SUBMIT, come fino alla 0172.
+- Niente drop nuovo: il dropbox fix30 resta, il giro e' solo kernel. `tools/drops/make-fix31.sh BUNDLE.zip payload-ap.bin`
+  costruisce `payload-fix31.bin` con `tools/repayload.py --expect sweetmalistore`.
+- Da guardare nel prossimo log: SUBMIT da 310 us e CREATE_BO da 7,1 ms; se la pagina widget va meglio ma sfarfalla,
+  `--set sweetmalistore=1`.
+- Correzione ai numeri di ieri: CREATE_BO era **0,8 a frame** (non 7,6) e WAIT_BO **67 a frame** (non 675); i ms a
+  frame erano giusti.
