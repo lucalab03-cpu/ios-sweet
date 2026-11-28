@@ -1955,4 +1955,15 @@ turns out to be Metal's.
 - fix25: every draw into a display-sized target (not group draws) scissored to its transformed corners (+3 px,
   within CA's scissor) so Panfrost's batch bounds -- and its preload/writeback -- shrink to what is drawn.
   glscissorfit=0: off. mesa 46079795603, bundle 46080231333 (sweet-bundle-fix25).
+- fix26-28 (chain tags): sweet_drm_chain_tag() + kernel 0172 (payload-ap: chains >= 8 ms logged) joined by jc.
+  fix28 found the widgets page's 34 ms fragment batches: each widget drawn into a screen-sized CA texture
+  (828x1792, not an IOSurface) for a ~140x145 box, so scissor_fit (images only) did not apply.
+- fix29: scissor_fit for every framebuffer. Observed: the widget-texture batches no longer reach 8 ms; slow chains
+  median 29 -> 8.4 ms, >30 ms 98 -> 52. But frame stats unchanged (p50 14-17, p90 38-75 ms) and the GPU is only
+  ~40 % busy in active windows (fix28 and fix29 alike): frames are not GPU-bound. Remaining slow: display batch
+  draws 106-114 (program 48 lines + program 74 platter 338x338), 8-36 ms. Note: sweetstack.log and other
+  /var/tmp files keep earlier boots' sections; take the last one (the prof in fetch16 was fix19's).
+- fix30: sweet.drm.c times every SweetMali call (render thread vs others) and records Mesa stacks of render-thread
+  waits/SUBMITs >= 1 ms, every 10 s into /var/tmp/sweetdrm-time.log. Drop without census/trace, with a render
+  thread prof. mesa 46138487646, bundle 46138819370 (sweet-bundle-fix30), payload-ap.
 - To do later (user): wallpaper gallery thumbnails grey/black while wallpapers apply fine (Metal item M4/M5).
