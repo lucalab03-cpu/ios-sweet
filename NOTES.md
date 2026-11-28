@@ -1982,3 +1982,21 @@ turns out to be Metal's.
   sends fetchNNN.txt and log-area.bin. sweetdrm-time.py on /var/tmp/sweetdrm-time.log decides fix31: if SUBMIT and
   WAIT_BO take most of the render thread's ms/s the ~0.2 ms a draw is our shim/kernel path (batches per framebuffer
   change: ~40 a widgets frame), if not it is CoreAnimation's own draws, and the fix is elsewhere.
+
+### 2026-11-28 16:20 — fix30 observed: le chiamate al kernel sono ~6,7 ms di un frame da 17 ms
+- Avvio fix30 (dropbox generation 1795878693341 applicata; `sweetdrm-time.log` presente). 5 finestre, 60,5 s: sono
+  pero' **tutte del boot** (nessuna interazione: la fine mostra 290 frame in 10 s, p50 17 p90 33 p99 66 ms, 106-132
+  disegni a frame), quindi i pesi della pagina widget devono ancora arrivare.
+- Thread di disegno, tempo dentro le chiamate SweetMali: **179 ms/s** in media, 205 ms/s nell'ultima finestra (~18-20 %
+  del tempo di parete). Per frame (a 29 frame/s): SUBMIT 39 a frame x 53 us = **2,1 ms**; WAIT_BO 43 x 41 us = **1,8
+  ms**; CREATE_BO (0x42) ~5 a frame x 3,7 ms = **1,9 ms**, con punte da 43 ms; GEM_CLOSE (0x09) ~3,6 x 0,6 ms = 0,2
+  ms (punte 26 ms); SYNCOBJ_WAIT 0,45 ms; IMPORT_HOST 0,24 ms; SYNCOBJ_CREATE/DESTROY/TRANSFER ~1 per SUBMIT, 30-40
+  us l'uno. Totale **~6,7 ms su un frame da 17 ms**; il resto e' Mesa (validazione dei disegni) e QuartzCore.
+- **Il ciclo di vita dei buffer costa quanto i SUBMIT**: create+close ~2,1 ms a frame. In createBO (0123:511) il
+  kernel mappa **ogni 4 KB** con `getPhysicalSegment` + `sweet_mali_map`, ignorando la lunghezza del run fisico che
+  `getPhysicalSegment` restituisce (un buffer da 6 MB = 1536 giri e 1536 voci di tabella), su memoria azzerata alla
+  creazione. Da qui fix31: riusare i buffer invece di ricrearli, e mappare i run interi.
+- Le attese da >= 1 ms: 263 in 60 s, 53,8 ms/s, massima 45,7 ms; gli stack entrano tutti in libOSMesa e finiscono in
+  `libsweet-gl+0xb7bc` (fine frame di eagl) o `libsweet-gl+0x15020` <- QuartzCore `0x182970` (i render di CA).
+- **Nessun avvio nuovo serve per la pagina widget**: il log continua ad appendere finche' iOS gira. Basta usare il
+  telefono 30-60 s sulla pagina widget e rifare il fetch (fetchult19 + log-area.bin).
