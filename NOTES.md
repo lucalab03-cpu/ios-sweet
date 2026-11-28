@@ -2047,3 +2047,16 @@ turns out to be Metal's.
   restare appese a pagine tornate al sistema.
 - Se una catena non e' finita entro i 2 s di `freeBuffer`, il buffer si riusa lo stesso: la GPU puo' leggerne il
   contenuto nuovo. Prima era peggio (le pagine tornavano al sistema sotto la GPU), ma resta un caso da tenere d'occhio.
+
+### 2026-11-28 17:30 — fix31 osservato: il kernel non e' piu' il collo di bottiglia, e la pagina lagga ancora
+- Nuova sessione (riavvio con 0173): finestra attiva 240 SUBMIT/s a **51 us** (erano 310), importati presenti (14),
+  thread di disegno **62 ms/s** contro 398. Cadono allocazione/mappatura dei buffer: CREATE_BO 7,1 -> 2,65 ms (resta
+  l'azzeramento dei buffer riusati).
+- Ma l'utente sente ancora lag. I frame: p50 **7 ms** (finestra da 141 frame), p90 59, p99 100, punte 200-450 ms. Il
+  tempo non e' piu' nelle chiamate SweetMali (6 % del tempo di parete): o e' Mesa (lavoro CPU per disegno) o sono le
+  attese fra un frame e l'altro / la presentazione.
+- **`sweetmaliahead=32` era gia' nei boot-args di payload-ap**: la prova "ahead" non serve, il payload-fix31-ahead era
+  identico a payload-fix31 (stesso sha). Nessuna finestra ahead scattata finora.
+- fix32 = drop di sola misura (`drop-fix32.zip`): `glargs` con `touch_lat=1` (riga `tl: g` per frame: inizio e fine,
+  in us) e `glslow=20000` (riga `tl: slow NOME US at US` per ogni chiamata GL da 20 ms in su). Nessun build nuovo:
+  servono `sweet-bundle-fix30.zip` (che ha `drop/`) e il dropbox fix30 per l'outbox.list.
