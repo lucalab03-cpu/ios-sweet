@@ -169,6 +169,7 @@ static long eagl_missing(void *context, unsigned offset);
 #define EAGL_GEN_DECLARATIONS
 #include "eagl_gen.h"
 static unsigned solid_clears;                   /* fix20: one-colour draws made clears (solid_clear) */
+static unsigned fit_yes, fit_no[8];              /* fix27: draws into the display scissored, and why not */
 #undef EAGL_GEN_DECLARATIONS
 
 static void
@@ -1384,6 +1385,11 @@ frame_end(struct eagl *e, bool finished)
 			say("redwood-gl: frames in %llu ms: %u drawn; ms p50 %u p90 %u p99 %u, longest %llu us; %u over 16.7 ms, %u over "
 			    "11.1 ms; %u one-colour draws made clears\n", (after - since) / 1000, n, p[0], p[1], p[2], longest, over16,
 			    over11, solid_clears);
+			say("redwood-gl: draws into the display scissored to their box: %u; not: %u no matrix, %u too many corners, %u "
+			    "positions not floats, %u behind the eye, %u out of range; %u group draws\n", fit_yes, fit_no[0], fit_no[1],
+			    fit_no[2], fit_no[3], fit_no[4], fit_no[5]);
+			fit_yes = 0;
+			memset(fit_no, 0, sizeof(fit_no));
 			solid_clears = 0;
 			memset(bucket, 0, sizeof(bucket));
 			n = over16 = over11 = 0;
@@ -4001,9 +4007,20 @@ scissor_fit(struct eagl *e, GLenum type, const void *indices, GLint first, GLsiz
 	float low[2] = { 1e30f, 1e30f }, high[2] = { -1e30f, -1e30f };
 	int x0, y0, x1, y1;
 
-	if (!scissor_fit_on || m == NULL || count <= 0 || count > 4096 || e->framebuffer == 0 || e->colour == 0 ||
-	    (image = image_of(e, e->colour)) == NULL || !image->target || image->width < 600 || image->height < 1200 ||
-	    e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2) {
+	if (!scissor_fit_on || e->framebuffer == 0 || e->colour == 0 || (image = image_of(e, e->colour)) == NULL ||
+	    !image->target || image->width < 600 || image->height < 1200) {
+		return false;
+	}
+	if (m == NULL) {
+		fit_no[0]++;
+		return false;
+	}
+	if (count <= 0 || count > 4096) {
+		fit_no[1]++;
+		return false;
+	}
+	if (e->arrays[0].pointer == NULL || e->arrays[0].type != GL_FLOAT || e->arrays[0].size < 2) {
+		fit_no[2]++;
 		return false;
 	}
 	size = e->arrays[0].size;
@@ -4018,12 +4035,14 @@ scissor_fit(struct eagl *e, GLenum type, const void *indices, GLint first, GLsiz
 		float w = m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3];
 
 		if (!(w > 1e-6f)) {
+			fit_no[3]++;
 			return false;           /* (behind the eye, or no matrix of ours: leave it whole) */
 		}
 		float x = (m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3]) / w;
 		float y = (m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3]) / w;
 
 		if (!(x > -1e6f && x < 1e6f && y > -1e6f && y < 1e6f)) {
+			fit_no[4]++;
 			return false;
 		}
 		low[0] = x < low[0] ? x : low[0];
@@ -4057,6 +4076,7 @@ scissor_fit(struct eagl *e, GLenum type, const void *indices, GLint first, GLsiz
 		glEnable(GL_SCISSOR_TEST);
 	}
 	glScissor(x0, y0, x1 - x0, y1 - y0);
+	fit_yes++;
 	return true;
 }
 
@@ -4098,6 +4118,7 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 
 		if (group_draw_begin(e, enabled)) {
 			fitted = false;         /* (a group's draws are its own business) */
+			fit_no[5]++;
 			glDrawArrays(mode, first, count);
 			if (fitted) {
 				scissor_unfit();
@@ -4153,6 +4174,7 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 
 		if (group_draw_begin(e, enabled)) {
 			fitted = false;         /* (a group's draws are its own business) */
+			fit_no[5]++;
 			glDrawElements(mode, count, type, indices);
 			if (fitted) {
 				scissor_unfit();
