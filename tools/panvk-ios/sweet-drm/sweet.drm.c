@@ -23,7 +23,9 @@
  *
  * The IOKit calls are declared here: the iOS SDK has no IOKitLib.h.
  */
+#include <dlfcn.h>
 #include <errno.h>
+#include <execinfo.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -295,8 +297,163 @@ drmOpenWithType(const char *name, const char *busid, int type)
 	return open("/dev/null", O_RDWR | O_CLOEXEC);
 }
 
+/*
+ * fix30: where the kernel calls' time goes, every 10 s into /var/tmp/sweetdrm-time.log: per request, the time spent
+ * in it on CoreAnimation's render thread and on the others, and for the waits of a millisecond or more on the
+ * render thread who waited (Mesa's stack, image+offset, symbolised on the PC). fix29 left the GPU 40 % busy while
+ * the frames took 15 to 75 ms: the render thread waits for it somewhere.
+ */
+#define TIME_STACKS 48
+#define TIME_DEPTH  9
+struct time_stat { uint64_t us, n, max; };
+static struct time_stat time_calls[2][256];
+static struct { void *pc[TIME_DEPTH]; uint64_t n, us, max; } time_stacks[TIME_STACKS];
+static pthread_mutex_t time_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t time_last_us;
+static __thread int time_render;             /* 0 not looked at, 1 the render thread, 2 another */
+static int call_raw(unsigned number, void *data, size_t size);
+
+static uint64_t now_ns(void);
+
+static uint64_t
+time_us(void)
+{
+	return now_ns() / 1000;
+}
+
+static int
+time_is_render(void)
+{
+	char name[64] = { 0 };
+
+	/* libsweet-gl names the thread again when it changes (fix16): looked at again every 4096 calls */
+	static __thread unsigned looks;
+	if (time_render == 0 || (++looks & 4095) == 0) {
+		pthread_getname_np(pthread_self(), name, sizeof(name));
+		time_render = strcmp(name, "com.apple.coreanimation.display.primary") == 0 ? 1 : 2;
+	}
+	return time_render == 1;
+}
+
+static void
+time_stack_note(uint64_t us)
+{
+	void *pc[TIME_DEPTH + 3];
+	int n = backtrace(pc, TIME_DEPTH + 3), free_at = -1;
+
+	/* the first three are this function, call() and the wait in this file */
+	if (n <= 3) {
+		return;
+	}
+	for (int i = 0; i < TIME_STACKS; i++) {
+		if (time_stacks[i].n == 0) {
+			if (free_at < 0) {
+				free_at = i;
+			}
+			continue;
+		}
+		int same = 1;
+		for (int k = 0; k < TIME_DEPTH && same; k++) {
+			same = time_stacks[i].pc[k] == (k + 3 < n ? pc[k + 3] : NULL);
+		}
+		if (same) {
+			time_stacks[i].n++;
+			time_stacks[i].us += us;
+			if (us > time_stacks[i].max) {
+				time_stacks[i].max = us;
+			}
+			return;
+		}
+	}
+	if (free_at >= 0) {
+		for (int k = 0; k < TIME_DEPTH; k++) {
+			time_stacks[free_at].pc[k] = k + 3 < n ? pc[k + 3] : NULL;
+		}
+		time_stacks[free_at].n = 1;
+		time_stacks[free_at].us = us;
+		time_stacks[free_at].max = us;
+	}
+}
+
+static void
+time_report(uint64_t now)
+{
+	FILE *f = fopen("/var/tmp/sweetdrm-time.log", "a");
+
+	if (f == NULL) {
+		return;
+	}
+	fprintf(f, "=== kernel calls in %llu ms (pid %d)\n", (unsigned long long)(now - time_last_us) / 1000, getpid());
+	for (int r = 0; r < 2; r++) {
+		for (int i = 0; i < 256; i++) {
+			struct time_stat *t = &time_calls[r][i];
+			if (t->n != 0) {
+				fprintf(f, "%s %#x: %llu calls, %llu us, longest %llu us\n", r == 0 ? "render" : "others", i,
+				    (unsigned long long)t->n, (unsigned long long)t->us, (unsigned long long)t->max);
+			}
+		}
+	}
+	for (int done = 0; done < 10; done++) {
+		int best = -1;
+		for (int i = 0; i < TIME_STACKS; i++) {
+			if (time_stacks[i].n != 0 && (best < 0 || time_stacks[i].us > time_stacks[best].us)) {
+				best = i;
+			}
+		}
+		if (best < 0) {
+			break;
+		}
+		fprintf(f, "wait stack: %llu waits, %llu us, longest %llu us:", (unsigned long long)time_stacks[best].n,
+		    (unsigned long long)time_stacks[best].us, (unsigned long long)time_stacks[best].max);
+		for (int k = 0; k < TIME_DEPTH && time_stacks[best].pc[k] != NULL; k++) {
+			Dl_info info;
+			const char *image = "?";
+			uintptr_t offset = (uintptr_t)time_stacks[best].pc[k];
+			if (dladdr(time_stacks[best].pc[k], &info) != 0 && info.dli_fname != NULL) {
+				image = strrchr(info.dli_fname, '/') != NULL ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
+				offset -= (uintptr_t)info.dli_fbase;
+			}
+			fprintf(f, " %s+%#lx", image, (unsigned long)offset);
+		}
+		fprintf(f, "\n");
+		time_stacks[best].n = 0;
+	}
+	memset(time_calls, 0, sizeof(time_calls));
+	memset(time_stacks, 0, sizeof(time_stacks));
+	fclose(f);
+}
+
 static int
 call(unsigned number, void *data, size_t size)
+{
+	uint64_t began = time_us();
+	int error = call_raw(number, data, size);
+	uint64_t now = time_us(), us = now - began;
+	int render = time_is_render();
+
+	pthread_mutex_lock(&time_lock);
+	struct time_stat *t = &time_calls[render ? 0 : 1][number & 0xff];
+	t->n++;
+	t->us += us;
+	if (us > t->max) {
+		t->max = us;
+	}
+	if (render && us >= 1000 && (number == SYNCOBJ_WAIT_NR || number == PANFROST_WAIT_BO_NR ||
+	    number == PANFROST_SUBMIT_NR)) {
+		time_stack_note(us);
+	}
+	if (time_last_us == 0) {
+		time_last_us = now;
+	} else if (now - time_last_us >= 10000000) {
+		time_report(now);
+		time_last_us = now;
+	}
+	pthread_mutex_unlock(&time_lock);
+	return error;
+}
+
+static int
+call_raw(unsigned number, void *data, size_t size)
 {
 	size_t returned = size;
 	kern_return_t result;
